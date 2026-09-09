@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Atari File Forge
+Comment=Open and maintain Atari media images
+Exec=@EXEC@ %F
+TryExec=@TRY_EXEC@
+Icon=atari-file-forge
+Terminal=false
+Categories=Utility;FileTools;
+MimeType=application/x-atari-ofs;application/x-atari-hdf;application/x-atari-ffs;application/x-atari-dms;application/x-atari-rom;application/x-atari-hfe;
+StartupNotify=true
+StartupWMClass=uk.co.atarifileforge.AtariFileForge

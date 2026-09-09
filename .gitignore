@@ -1,0 +1,41 @@
+# Local disk images and test collections can be large and may contain software
+# that cannot be redistributed. Keep the whole samples tree out of Git.
+/samples/
+/output/
+
+# Release build output: source archives and native packages are large and are
+# rebuilt from a tag rather than committed.
+/dist/
+/release/
+
+# Firmware you supply. Kickstart ROMs, Workbench disks and the CD32 and CDTV
+# extended ROMs are the copyright of their owners and are not redistributable,
+# so nothing here is ever committed. The directory's own README is, because it
+# explains what belongs here and where else the application will look.
+/firmware/*
+!/firmware/README.md
+# EmuTOS is GPL and redistributable, so the bundled images are committed.
+!/firmware/emutos/
+
+# Atari File Forge working data belongs in Docker's named volume.
+/work/
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+node_modules/
+test-results/
+.venv-desktop/
+.venv/
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.agents
+.claude
+.codex

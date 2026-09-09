@@ -1,0 +1,15 @@
+# Complete Python dependency lock for architecture-native Debian package builds.
+#
+# This is the resolved closure of requirements.txt and nothing else. The
+# GEMDOS engine is not listed: atarinut/ lives in this repository and is
+# copied into the package from the source tree, so it is not fetched from an
+# index. Anything named atarinut-* would be a package that does not exist.
+Flask==3.1.3
+blinker==1.9.0
+capstone==5.0.9
+click==8.5.0
+gunicorn==26.2.0
+itsdangerous==2.2.0
+jinja2==3.1.6
+markupsafe==3.0.3
+werkzeug==3.1.8

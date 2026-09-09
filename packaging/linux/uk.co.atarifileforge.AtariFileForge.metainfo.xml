@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>uk.co.atarifileforge.AtariFileForge</id>
+  <name>Atari File Forge</name>
+  <summary>Open and maintain Atari media images</summary>
+  <developer id="uk.co.atarifileforge">
+    <name>Atari File Forge contributors</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Atari File Forge browses, edits, validates and converts Atari,
+      Atari 600, Atari 4000 and TOS disk, dms, ROM and hard-drive images.
+    </p>
+    <p>
+      The Linux application uses the same filesystem and editor implementation
+      as the web edition, with a GTK file chooser, desktop file associations
+      and private XDG working state.
+    </p>
+    <p>
+      A bundled architecture-native HxCFloppyEmulator command-line converter
+      opens, creates and verifies supported HFE floppy images and decodes SCP
+      flux captures without requiring
+      a separate host installation.
+    </p>
+    <p>
+      Open OFS and FFS images can be converted between containers. Any of them
+      exports as its canonical sector image, and OFS images together with FFS
+      S, M and L floppies also export as HFE or SCP. Every flux export is
+      decoded again and compared byte for byte with the working sectors before
+      the file is released.
+    </p>
+    <p>
+      With the official Greaseweazle tools installed, the native edition writes
+      an open floppy image to a connected drive and captures a physical disk
+      back into a new working image, as decoded sectors or as HFE or SCP flux.
+    </p>
+  </description>
+  <launchable type="desktop-id">uk.co.atarifileforge.AtariFileForge.desktop</launchable>
+  <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
+  <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
+  <releases>
+    <release version="0.0.0" date="2026-09-10">
+      <description>
+        <p>Initial import of Atari File Forge.</p>
+      </description>
+    </release>
+  </releases>
+  <provides>
+    <binary>atari-file-forge</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>
