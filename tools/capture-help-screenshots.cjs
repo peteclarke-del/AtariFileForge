@@ -52,6 +52,13 @@ const ROM = path.join(ROOT, "firmware", "emutos", "etos512uk.img");
 // drive that was prepared elsewhere. A drive this application made itself
 // would show none of what those dialogs are for.
 const DRIVE = path.join(SAMPLES, "hdd", "petari_acsi_800mb_icd.hd");
+// A real tokenised GFA BASIC program. None of the sample game disks carries
+// one, and a picture of the BASIC editor has to have BASIC in it.
+const GFA_PROGRAM = path.join(ROOT, "tests", "fixtures", "basic", "tilemap.gfa");
+// A folder of real host files whose names have to be changed to reach a
+// GEMDOS volume: lower case throughout, and one name too long for eight
+// characters. That is what the copy review is for.
+const HOST_FOLDER = path.join(ROOT, "tests", "fixtures", "basic");
 
 const wait = (page, ms) => page.waitForTimeout(ms);
 
@@ -181,6 +188,49 @@ async function openFile(page, name) {
     if (await modalIsOpen(page)) break;
   }
   await wait(page, 3000);
+}
+
+// Make a blank floppy in a pane, which is what the "New image" dialog does.
+async function newFloppy(page, format, title, paneIndex = 0) {
+  await page.locator(".pane").nth(paneIndex).locator(".pane-new").click();
+  await wait(page, 1200);
+  await page.evaluate(chosen => {
+    const modal = document.querySelector("#modal");
+    const select = modal.querySelector('select[name="format"]');
+    select.value = chosen;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }, format);
+  await wait(page, 500);
+  await page.fill('#modal input[name="title"]', title);
+  await click(page, '#modal button[value="create"]');
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(page, 500);
+    if (!(await modalIsOpen(page))) break;
+  }
+  await wait(page, 2500);
+}
+
+// Put a host file onto the open image and take whatever the plan dialog offers.
+async function insertHostFile(page, file) {
+  await paneMenu(page, "File");
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser", { timeout: 20000 }),
+    page.evaluate(() => document.querySelector(".pane .import-file")?.click()),
+  ]);
+  await chooser.setFiles([file]);
+  await wait(page, 3000);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (!(await modalIsOpen(page))) break;
+    const advanced = await page.evaluate(() => {
+      const button = document.querySelector('#modal button[value="continue"], #modal button.primary:not([disabled])');
+      if (!button) return false;
+      button.click();
+      return true;
+    });
+    if (!advanced) break;
+    await wait(page, 2000);
+  }
+  await wait(page, 2500);
 }
 
 async function shot(page, directory, name) {
@@ -423,6 +473,42 @@ scene("file-editor-script", HELP, async page => {
 scene("file-editor-disassembly", HELP, async page => {
   await openImage(page, DISKS.battleHawks);
   await openFile(page, "B_HAWK.PRG");
+});
+
+scene("file-editor-basic", HELP, async page => {
+  await newFloppy(page, "ds-720k", "BASIC");
+  await insertHostFile(page, GFA_PROGRAM);
+  await openFile(page, "TILEMAP.GFA");
+});
+
+// Insert a host folder into the open volume and stop on the review that comes
+// before anything is written.
+async function importHostFolder(page, folder) {
+  await paneMenu(page, "File");
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser", { timeout: 20000 }),
+    page.evaluate(() => document.querySelector(".pane .import-folder")?.click()),
+  ]);
+  await chooser.setFiles([folder]);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(page, 500);
+    if (await modalIsOpen(page)) break;
+  }
+  await wait(page, 4000);
+}
+
+scene("copy-name-preflight", HELP, async page => {
+  await openDrive(page);
+  await importHostFolder(page, HOST_FOLDER);
+});
+
+scene("destination-conflict", HELP, async page => {
+  await openDrive(page);
+  await importHostFolder(page, HOST_FOLDER);
+  // Past the review is the dialog that decides where the files land and
+  // whether an existing file of the same name is replaced.
+  await click(page, '#modal button[value="continue"], #modal button.primary:not([disabled])');
+  await wait(page, 4000);
 });
 
 module.exports = { SHOTS };

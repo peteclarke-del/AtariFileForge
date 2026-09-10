@@ -2752,9 +2752,9 @@ async function addSelectedHostFolder(index, records) {
   const closed = showModal(`
     <h2>Import ${roots.size} folder${roots.size === 1 ? "" : "s"}</h2>
     <p>${relevant.length} file${relevant.length === 1 ? "" : "s"} will be imported into <code>${esc(drivePath(pane.partitionName || pane.image.driveLetter || "", pane.path))}</code>. Review how host folders should map to the target filing system.</p>
-    ${canPreserve ? `<div class="choice-grid folder-import-modes">
-      <label><input type="radio" name="folderMode" value="preserve" checked><span><b>Preserve folder structure</b><small>Create the selected folder tree under the current GEMDOS folder.</small></span></label>
-      <label><input type="radio" name="folderMode" value="flatten"><span><b>Import all files here</b><small>Ignore host folders and place every file in the current folder.</small></span></label>
+    ${canPreserve ? `<div class="install-modes">
+      <label class="check-field install-mode"><input type="radio" name="folderMode" value="preserve" checked><span><b>Preserve folder structure</b><small>Create the selected folder tree under the current GEMDOS folder.</small></span></label>
+      <label class="check-field install-mode"><input type="radio" name="folderMode" value="flatten"><span><b>Import all files here</b><small>Ignore host folders and place every file in the current folder.</small></span></label>
     </div>` : `<input type="hidden" name="folderMode" value="flatten"><div class="help-note">This view has no folders of its own. Files from all selected folders will be imported into <strong>${esc(pane.path || "the root")}</strong>.</div>`}
     <div class="folder-import-preview" data-folder-preview>${initial.plans.slice(0, 12).map(item => `<code>${esc(item.relativePath)} → ${esc(item.targetPath)}</code>`).join("")}</div>
     ${ignoredCount ? `<div class="help-note">${ignoredCount} metadata sidecar or operating-system housekeeping file${ignoredCount === 1 ? "" : "s"} will not be stored as a separate file.</div>` : ""}
