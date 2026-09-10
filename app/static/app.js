@@ -766,9 +766,6 @@ function renderPane(index, preserveScroll = false) {
   //: volume, so it is browsed as a project and converted rather than edited
   //: in place. A Pasti capture is read-only by nature.
   const isContainer = CONTAINER_KINDS.includes(pane.image.kind);
-  //: A CD is read-only by nature, so it offers browsing and copying out and
-  //: none of the controls that would write to it.
-  const isIso = pane.image.kind === "iso";
   const isRom = pane.image.kind === "rom";
   const isTosRom = pane.image.kind === "tosrom";
   const isHardDiskVolume = pane.image.kind === "gemdos" && Boolean(pane.image.hardDisk);
@@ -782,7 +779,6 @@ function renderPane(index, preserveScroll = false) {
   const supportsFolders = !isPartitionIndex && !isContainer && !isArchive && !isRom && !isTosRom;
   const canFolder = supportsFolders && !pane.image.readOnly;
   const canEdit = !isPartitionIndex && !isContainer && !isArchive && !pane.image.readOnly;
-  const isDsd = pane.image.doubleSided;
   const kind = paneFormatClass(pane);
   const driveLetter = pane.partitionName || pane.image.driveLetter || "";
   const location = isArchive
