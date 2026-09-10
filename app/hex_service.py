@@ -280,7 +280,10 @@ def write_raw_image(
             os.fsync(image.fileno())
 
         session.invalidate_cached_views()
-        session.dms = None
+        # A raw write replaces the bytes a container header described, so the
+        # parsed container is dropped along with everything else derived from
+        # them.
+        session.container = None
         session.dirty = True
         service._append_warning(
             session,

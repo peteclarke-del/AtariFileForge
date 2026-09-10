@@ -1,28 +1,37 @@
-"""The one place Atari File Forge builds and takes apart inner paths.
+r"""The one place Atari File Forge builds and takes apart inner paths.
 
-An GEMDOS path separates its components with ``/`` and names its volume root
-with a bare ``:``. The separator matters: Atari filenames routinely contain
-full stops -- ``Startup-Sequence`` sits beside ``Disk.info`` and ``game.exe``
-in the same drawer -- so a dot cannot be a separator without corrupting
-ordinary names.
+GEMDOS separates the components of a path with a backslash and names the root
+of a volume with a bare ``\``. That is what TOS prints, what a ``DESKTOP.INF``
+line contains and what a program passes to ``Fopen``, so it is the form this
+application stores and shows.
 
-Requests that arrive from an older client, a saved workspace or a stored
-recipe may still spell the root ``$``. Those are accepted and normalised here
-rather than being handled again at each call site.
+Clients do not all speak it. A browser drag, a stored recipe and a saved
+workspace may all arrive with forward slashes, and older material may spell
+the root ``$``. Every such spelling is accepted and normalised here rather
+than being handled again at each call site, so exactly one module knows that
+``AUTO/FOO.PRG`` and ``AUTO\FOO.PRG`` name the same file.
+
+Names themselves are 8.3 and case-folded by the filing system, which is why
+comparisons elsewhere in the application are case-insensitive. Splitting is
+not affected: a full stop separates a name from its extension and never one
+component from the next.
 """
 
 from __future__ import annotations
 
-SEPARATOR = "/"
+SEPARATOR = "\\"
+
+#: The separator a client may send instead, normalised away on the way in.
+ACCEPTED_SEPARATORS = "\\/"
 
 #: Every spelling of "the root of this volume" that the workbench accepts.
-ROOT_TOKENS = {"", "$", ":", "/", "$."}
+ROOT_TOKENS = {"", "\\", "/", ":", "$", "$."}
 
 #: The canonical root, which is the empty path.
 ROOT = ""
 
 #: What the user sees when a pane is showing the volume root.
-ROOT_DISPLAY = ":"
+ROOT_DISPLAY = "\\"
 
 
 def is_root(path: str | None) -> bool:
@@ -31,21 +40,23 @@ def is_root(path: str | None) -> bool:
 
 
 def split(path: str | None) -> list[str]:
-    """Split an inner path into its components, discarding root spellings.
+    r"""Split an inner path into its components, discarding root spellings.
 
-    A path written ``$.C.List`` came from a saved workspace, a stored recipe
-    or a bookmark made before the separator changed. It is recognised by its
-    leading ``$`` together with the absence of any ``/``, and is split on full
-    stops just this once so the entry it names is still reachable. Nothing
-    writes that form any more.
+    Both separators are honoured, because a request may have come from a
+    browser that joined its path with forward slashes. A path written ``$.C``
+    came from a saved workspace or a bookmark made before the separator was
+    settled; it is recognised by its leading ``$`` together with the absence
+    of any separator, and is split on full stops just this once so the entry
+    it names is still reachable. Nothing writes that form any more.
     """
     text = str(path or "").strip()
     if is_root(text):
         return []
-    if text.startswith("$") and SEPARATOR not in text:
+    if text.startswith("$") and not any(part in text for part in ACCEPTED_SEPARATORS):
         return [part for part in text[1:].strip(".").split(".") if part]
     if text.startswith(("$", ":")):
         text = text[1:]
+    text = text.replace("/", SEPARATOR)
     return [part for part in text.strip(SEPARATOR).split(SEPARATOR) if part]
 
 
@@ -57,10 +68,10 @@ def normalise(path: str | None) -> str:
 def join(directory: str | None, name: str) -> str:
     """Join a directory and a leaf name into one inner path."""
     parts = split(directory)
-    leaf = str(name).strip(SEPARATOR)
+    leaf = str(name).strip(ACCEPTED_SEPARATORS)
     if not leaf:
         return SEPARATOR.join(parts)
-    return SEPARATOR.join([*parts, leaf])
+    return SEPARATOR.join([*parts, *[part for part in leaf.replace("/", SEPARATOR).split(SEPARATOR) if part]])
 
 
 def parent(path: str | None) -> str:
@@ -75,15 +86,21 @@ def leaf(path: str | None) -> str:
 
 
 def display(path: str | None) -> str:
-    """Render a path the way an Atari shell prompt would."""
+    """Render a path the way a TOS prompt would, from the volume root."""
     parts = split(path)
     return ROOT_DISPLAY + SEPARATOR.join(parts)
 
 
 def is_below(path: str | None, directory: str | None) -> bool:
-    """True when ``path`` sits inside ``directory`` at any depth."""
-    branch = split(directory)
-    return split(path)[: len(branch)] == branch and len(split(path)) > len(branch)
+    """True when ``path`` sits inside ``directory`` at any depth.
+
+    The comparison folds case, because GEMDOS stores every name in upper case
+    and a client that remembers ``auto\\foo.prg`` is naming the same entry the
+    volume calls ``AUTO\\FOO.PRG``.
+    """
+    branch = [part.casefold() for part in split(directory)]
+    parts = [part.casefold() for part in split(path)]
+    return parts[: len(branch)] == branch and len(parts) > len(branch)
 
 
 def depth(path: str | None) -> int:
@@ -91,6 +108,7 @@ def depth(path: str | None) -> int:
 
 
 __all__ = [
+    "ACCEPTED_SEPARATORS",
     "ROOT",
     "ROOT_DISPLAY",
     "ROOT_TOKENS",

@@ -106,7 +106,7 @@ class PreflightTests(unittest.TestCase):
         return open_image_path(self.service, path)
 
     def _drive(self, machine: str, addons: list[str], *, workbench: bool) -> object:
-        drive = self.service.create_blank("ffs-hard", "SYSTEM", "40MB")
+        drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(drive, 0)
         drive.hardware_profile = {"machine": machine, "addons": addons}
         if workbench:
@@ -166,7 +166,7 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("OS-Version3.9", checked["disc"]["reason"])
 
     def test_a_partition_table_is_not_a_place_to_install_onto(self) -> None:
-        drive = self.service.create_blank("ffs-hard", "SYSTEM", "40MB")
+        drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         drive.hardware_profile = {"machine": "a1200", "addons": []}
         disc = self._disc("TOS3.9", "OS-Version3.9")
 
@@ -176,7 +176,7 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(any("partition" in item for item in checked["blocking"]))
 
     def test_a_release_is_not_recognised_on_something_that_is_not_a_cd(self) -> None:
-        floppy = self.service.create_blank("adf", "Workbench3.1")
+        floppy = self.service.create_blank("ds-720k", "Workbench3.1")
 
         found = self.service.tos_release_on(floppy)
 
@@ -199,7 +199,7 @@ class CdDriverTests(unittest.TestCase):
         self.root = Path(self._temporary.name)
         self.addCleanup(self._temporary.cleanup)
         self.service = DiskService(self.root / "work")
-        self.drive = self.service.create_blank("ffs-hard", "SYSTEM", "40MB")
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(self.drive, 0)
 
     def _put(self, path: str, data: bytes) -> None:

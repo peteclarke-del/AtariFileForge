@@ -13,8 +13,8 @@ from .filename_policy import session_name_policy, target_name_policy
 from .image_session import ImageSession, SESSION_OWNER
 from .rom import DEFAULT_BANK_SIZE, bank_count, validate_bank_size
 from .rom_workbench import normalise_project
+from .floppy_geometry import resolve_geometry
 from .session_state import session_metadata
-from .dms import DMSError, parse_dms
 
 
 class SessionDiskMixin:
@@ -45,7 +45,9 @@ class SessionDiskMixin:
                 descriptor_path = None
                 descriptor_name = None
             kind = metadata.get("kind") or self.detect_kind(name)
-            if kind not in {"hdf", "ofs", "ffs", "dms", "rom", "kickfs", "raw"}:
+            if kind not in {
+                "gemdos", "hd", "msa", "dim", "stx", "iso", "rom", "tosrom",
+            }:
                 raise ValueError
             session = ImageSession(
                 id=image_id,
@@ -60,9 +62,9 @@ class SessionDiskMixin:
                     if metadata.get("partition") is not None
                     else None
                 ),
-                ffs_source_names={
+                source_names={
                     str(path): str(name)
-                    for path, name in metadata.get("ffsSourceNames", {}).items()
+                    for path, name in metadata.get("sourceNames", {}).items()
                 },
                 distribution_name=metadata.get("distributionName"),
                 target_hardware=str(metadata.get("targetHardware") or "auto"),
@@ -96,7 +98,7 @@ class SessionDiskMixin:
                 ),
                 rom_bank_size=validate_bank_size(int(metadata.get("romBankSize", DEFAULT_BANK_SIZE))),
                 rom_erase_byte=int(metadata.get("romEraseByte", 0xFF)) & 0xFF,
-                rom_platform=str(metadata.get("romPlatform") or "kickstart"),
+                rom_platform=str(metadata.get("romPlatform") or "tos"),
                 rom_layout=str(metadata.get("romLayout") or "linear"),
                 rom_component_names=[
                     self.safe_filename(name)
@@ -122,9 +124,9 @@ class SessionDiskMixin:
                 warnings=self._normalise_warnings(
                     [str(warning) for warning in metadata.get("warnings", [])]
                 ),
-                ffs_capabilities=(
-                    dict(metadata.get("ffsCapabilities") or {})
-                    if isinstance(metadata.get("ffsCapabilities"), dict)
+                gemdos_capabilities=(
+                    dict(metadata.get("gemdosCapabilities") or {})
+                    if isinstance(metadata.get("gemdosCapabilities"), dict)
                     else {}
                 ),
             )
@@ -136,12 +138,9 @@ class SessionDiskMixin:
                 raise ValueError
             if session.scp_export_path and not session.scp_export_path.is_file():
                 session.scp_export_path = None
-            if session.kind == "dms":
-                session.dms = parse_dms(path.read_bytes())
-            elif session.kind in {"ffs", "ofs"} and not session.ffs_capabilities:
-                self.refresh_ffs_capabilities(session)
-            self._normalise_hardfile_dat_size(session)
-        except (OSError, KeyError, ValueError, json.JSONDecodeError, DMSError) as exc:
+            if self.mountable(session) and not session.gemdos_capabilities:
+                self.refresh_gemdos_capabilities(session)
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
             raise DiskError("That image session no longer exists.") from exc
         with self._lock:
             self.sessions[image_id] = session
@@ -257,8 +256,7 @@ class SessionDiskMixin:
         with session.lock:
             session.name = safe_name
             if session.descriptor_path:
-                descriptor_suffix = Path(session.descriptor_name or ".geo").suffix or ".geo"
-                session.descriptor_name = f"{Path(safe_name).stem}{descriptor_suffix}"
+                session.descriptor_name = Path(session.descriptor_path).name
             session.hfe_export_path = None
             session.scp_export_path = None
             self._persist_session(session)
@@ -342,11 +340,7 @@ class SessionDiskMixin:
             except CheckpointError as exc:
                 raise DiskError(str(exc)) from exc
             session.invalidate_cached_views()
-            if session.kind == "dms":
-                try:
-                    session.dms = parse_dms(session.path.read_bytes())
-                except DMSError as exc:
-                    raise DiskError(str(exc)) from exc
+            session.container = None
             self._persist_session(session)
             return restored
 
@@ -369,13 +363,58 @@ class SessionDiskMixin:
             except CheckpointError as exc:
                 raise DiskError(str(exc)) from exc
 
+    def _drive_facts(self, session: ImageSession) -> dict:
+        """The partition table's own description, for a hard-disk session."""
+        if session.kind != "hd":
+            return {}
+        try:
+            table = self.partition_table(session)
+        except DiskError:
+            return {}
+        return {
+            "scheme": str(table.get("scheme") or ""),
+            "partitionScheme": str(table.get("scheme") or ""),
+            "byteSwapped": bool(table.get("byteSwapped")),
+            "partitionCount": len(table.get("partitions") or []),
+        }
+
+    def image_geometry(self, session: ImageSession) -> dict | None:
+        """The shape of a floppy image, read from its own boot sector.
+
+        A hard-disk volume has no cylinders, heads and sectors worth
+        reporting: it is addressed as logical sectors through a driver. Only
+        a floppy has a geometry a person can act on, so only a floppy
+        reports one.
+        """
+        if session.kind != "gemdos":
+            return None
+        try:
+            size = session.path.stat().st_size
+            with session.path.open("rb") as image:
+                boot = image.read(512)
+        except OSError:
+            return None
+        found = resolve_geometry(size, boot)
+        if found is None:
+            return None
+        return {
+            "id": found.identifier,
+            "label": found.label,
+            "tracks": found.tracks,
+            "sides": found.sides,
+            "sectors": found.sectors,
+            "size": found.size,
+        }
+
     def summary(self, session: ImageSession) -> dict:
         checkpoints = self.list_checkpoints(session)
-        kickfs = self.kickfs_details(session) if session.kind == "kickfs" else None
+        tosrom = self.tosrom_details(session) if session.kind == "tosrom" else None
         image_stat = session.path.stat()
         image_size = image_stat.st_size
         file_policy = session_name_policy(session)
-        partition_policy = target_name_policy("hdf", item_type="partition")
+        partition_policy = target_name_policy("hd", item_type="partition")
+        capabilities = session.gemdos_capabilities or {}
+        drive = self._drive_facts(session)
         return {
             "id": session.id,
             "name": session.name,
@@ -386,7 +425,7 @@ class SessionDiskMixin:
             "dirty": session.dirty,
             "hasDescriptor": bool(session.descriptor_path),
             "descriptorName": session.descriptor_name,
-            "doubleSided": self.is_two_volume_image(session),
+            "doubleSided": self.is_double_sided(session),
             "containerFormat": "hfe" if session.hfe_original_path else "scp" if session.scp_original_path else None,
             # A CD is read-only by construction, so saying so here is what
             # disables every control that would write to it, rather than each
@@ -395,7 +434,7 @@ class SessionDiskMixin:
                 session.kind == "iso"
                 or session.hfe_read_only
                 or session.scp_read_only
-                or bool(kickfs and kickfs["readOnly"])
+                or session.kind in {"stx", "tosrom"}
             ),
             "exportFormats": self.export_formats(session),
             "rom": ({
@@ -407,18 +446,26 @@ class SessionDiskMixin:
                 "componentNames": session.rom_component_names,
                 "project": session.rom_project,
             } if session.kind == "rom" else None),
-            "kickfs": kickfs,
-            "filesystemCapabilities": session.ffs_capabilities or None,
+            "tosrom": tosrom,
+            "filesystemCapabilities": session.gemdos_capabilities or None,
             "filenamePolicies": {
                 "file": file_policy.public_contract(),
-                "disk": partition_policy.public_contract() if session.kind == "hdf" else None,
+                "disk": partition_policy.public_contract() if session.kind == "hd" else None,
             },
+            # The volume's own description, so a report does not have to
+            # mount the image again to say what shape it is.
+            "title": capabilities.get("label") or None,
+            "label": capabilities.get("label") or None,
+            "format": capabilities.get("format") or None,
+            "clusters": capabilities.get("clusters") or None,
+            "sizeBytes": capabilities.get("sizeBytes") or image_size,
+            "bootable": capabilities.get("bootable"),
+            "tosLimits": capabilities.get("tosLimits") or [],
+            "geometry": self.image_geometry(session),
+            **drive,
             "targetHardware": session.target_hardware,
             "hardwareProfile": session.hardware_profile,
-            "warnings": [
-                *self._normalise_warnings(session.warnings),
-                *(list(session.dms.warnings) if session.dms else []),
-            ],
+            "warnings": self._normalise_warnings(session.warnings),
             "checkpoints": {
                 "total": len(checkpoints),
                 "named": sum(not item["automatic"] for item in checkpoints),

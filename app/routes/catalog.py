@@ -157,7 +157,7 @@ def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprin
                 installed.update(_catalogue_identities(entry["name"]))
         except DiskError:
             pass
-        for name in session.ffs_source_names.values():
+        for name in session.source_names.values():
             installed.update(_catalogue_identities(name))
         for row in rows:
             candidates = _catalogue_identities(row["title"])
@@ -210,7 +210,7 @@ def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprin
                             directory = _available_ffs_directory_name(
                                 service, target, target_path, directory
                             )
-                        destination = service.extract_image_to_ffs_directory(source, target, target_path, directory, create_directory=create_dir)
+                        destination = service.extract_image_to_directory(source, target, target_path, directory, create_directory=create_dir)
                         metadata = analyse_directory(service, target, destination) if identify else None
                         if metadata:
                             metadata["title"] = str(item.get("title") or metadata["title"])

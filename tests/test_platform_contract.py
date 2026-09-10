@@ -9,6 +9,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
+from app.errors import DiskError
 from app.platform_contract import (
     HOST_EXCLUSIVE_ENDPOINTS,
     PLATFORM_CONTRACT_FORMAT,
@@ -18,11 +19,11 @@ from app.platform_contract import (
 
 try:
     from app.server import create_app
-    from app.routes.desktop import _image_pair
-    from desktop.__main__ import _paired_selection, _review_open_plans
+    from app.routes.desktop import _regular_file
+    from desktop.__main__ import _resolved_selection, _review_open_plans
     from desktop.runtime import DesktopServer, desktop_paths
 except ModuleNotFoundError:  # Flask and Werkzeug are container dependencies.
-    create_app = DesktopServer = desktop_paths = _image_pair = _paired_selection = _review_open_plans = None
+    create_app = DesktopServer = desktop_paths = _regular_file = _resolved_selection = _review_open_plans = None
 
 
 class PlatformContractTests(unittest.TestCase):
@@ -171,47 +172,55 @@ class PlatformContractTests(unittest.TestCase):
         self.assertEqual(paths.config, Path(temporary) / ".config/atari-file-forge")
         self.assertEqual(paths.cache, Path(temporary) / ".cache/atari-file-forge")
 
-    @unittest.skipIf(_image_pair is None, "Flask is available in the application container")
-    def test_desktop_open_pairs_dat_and_dsc_from_either_file(self) -> None:
+    @unittest.skipIf(_regular_file is None, "Flask is available in the application container")
+    def test_desktop_open_takes_one_image_and_no_companion_file(self) -> None:
+        """An Atari image is self-describing, so it opens on its own.
+
+        A partitioned drive carries its own table in its first sector and a
+        floppy its own parameter block in its boot sector, so the desktop
+        opens exactly the file it was handed and never reaches for a
+        neighbouring one.
+        """
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            hda = root / "SCSI0.HDA"
-            geo = root / "scsi0.geo"
-            hda.write_bytes(b"data")
-            geo.write_bytes(b"descriptor")
+            drive = root / "GAMES.HD"
+            drive.write_bytes(b"AHDI")
+            (root / "GAMES.TXT").write_bytes(b"notes about the drive")
 
-            from_dat = _image_pair({"path": str(hda)})
-            from_dsc = _image_pair({"path": str(geo)})
+            resolved = _regular_file(str(drive), "image")
 
-        self.assertEqual(from_dat, (hda, geo))
-        self.assertEqual(from_dsc, (hda, geo))
+            with self.assertRaisesRegex(DiskError, "absolute path"):
+                _regular_file("GAMES.HD", "image")
+            with self.assertRaisesRegex(DiskError, "no longer exists"):
+                _regular_file(str(root / "MISSING.HD"), "image")
 
-    @unittest.skipIf(_paired_selection is None, "Desktop dependencies unavailable")
-    def test_native_multi_file_selection_collapses_matching_dat_dsc_pair(self) -> None:
+        self.assertEqual(resolved, drive.resolve())
+
+    @unittest.skipIf(_resolved_selection is None, "Desktop dependencies unavailable")
+    def test_native_multi_file_selection_keeps_every_chosen_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            hda = root / "SCSI0.HDA"
-            geo = root / "scsi0.geo"
-            adf = root / "game.adf"
-            for path in (hda, geo, adf):
+            drive = root / "GAMES.HD"
+            floppy = root / "game.st"
+            for path in (drive, floppy):
                 path.touch()
 
-            paired = _paired_selection([geo, adf, hda])
-            descriptor_only = _paired_selection([geo])
+            several = _resolved_selection([floppy, drive])
+            single = _resolved_selection([drive])
 
-        self.assertEqual(paired, [adf.resolve(), hda.resolve()])
-        self.assertEqual(descriptor_only, [geo.resolve()])
+        self.assertEqual(several, [floppy.resolve(), drive.resolve()])
+        self.assertEqual(single, [drive.resolve()])
 
     @unittest.skipIf(_review_open_plans is None, "Desktop dependencies unavailable")
     def test_native_open_batch_is_validated_before_it_is_queued(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            image = Path(temporary) / "one.adf"
+            image = Path(temporary) / "one.st"
             image.touch()
             message = json.dumps({
                 "command": "open-plans",
                 "plans": [
                     {"paths": [str(image)]},
-                    {"paths": [str(Path(temporary) / "missing.adf")]},
+                    {"paths": [str(Path(temporary) / "missing.st")]},
                 ],
             })
 

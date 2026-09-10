@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify
 from atari_floppy import (
     ATARI_GEOMETRIES,
     geometry as floppy_geometry,
+    image_geometry,
     validated_device,
     FloppyDevice,
     FloppyError,
@@ -21,6 +22,7 @@ from atari_greaseweazle import (
     DRIVE_CHOICES,
     GreaseweazleClient,
     GreaseweazleError,
+    gw_format,
     image_format,
     stable_snapshot,
 )
@@ -50,41 +52,23 @@ def _regular_file(value: object, label: str) -> Path:
     return path
 
 
-def _matching_sibling(path: Path, suffix: str) -> Path | None:
-    wanted = f"{path.stem}{suffix}".casefold()
-    try:
-        return next(
-            item for item in path.parent.iterdir()
-            if item.is_file() and item.name.casefold() == wanted
-        )
-    except (OSError, StopIteration):
-        return None
-
-
-def _image_pair(data: dict) -> tuple[Path, Path | None]:
-    image = _regular_file(data.get("path"), "image")
-    descriptor_value = data.get("descriptorPath")
-    descriptor = (
-        _regular_file(descriptor_value, "GEO descriptor")
-        if descriptor_value else None
-    )
-    if image.suffix.casefold() == ".geo":
-        descriptor = image
-        image = _matching_sibling(image, ".hdf") or _matching_sibling(image, ".hda")
-        if image is None:
-            raise DiskError(f"Choose the hard-drive image matching {descriptor.name}.")
-    elif image.suffix.casefold() in {".hdf", ".hda"} and descriptor is None:
-        descriptor = _matching_sibling(image, ".geo")
-    return image, descriptor
-
-
 def _physical_media_details(service: DiskService, session) -> dict:
-    if session.kind == "hdf":
+    """Describe the medium an open image would be written to a drive as.
+
+    An Atari image carries no geometry sidecar, so everything needed is in
+    the image itself: the boot sector says what shape the disk is, and the
+    extension says which container the bytes are in.
+    """
+    if session.kind == "hd":
         raise DiskError(
-            "A hard drive cannot be written to a floppy drive. Open a floppy image instead."
+            "A hard disk cannot be written to a floppy drive. Open a floppy image instead."
         )
     name = session.name
-    if session.kind in {"ffs", "ofs"} and service.summary(session).get("hardDisk"):
+    if session.kind in CONVERT_BEFORE_WRITE:
+        # Greaseweazle reads .dim as a PC-98 format and cannot read Pasti at
+        # all, so the sectors are rebuilt as a .st before the drive sees them.
+        name = f"{Path(name).stem}.st"
+    if service.summary(session).get("hardDisk"):
         raise DiskError(
             "A hard-disk image cannot be written to a floppy drive. Open a floppy image instead."
         )
@@ -96,15 +80,57 @@ def _physical_media_details(service: DiskService, session) -> dict:
         "name": name,
         "format": media_format.label,
         "automaticVerification": media_format.automatic_verification,
+        # What a capture from this drive can be written as, and the shapes a
+        # sector capture can be told to decode. Both are listed here so the
+        # pane offers exactly what this build supports rather than a fixed
+        # menu that may not match.
+        "captureFormats": [
+            {"id": name, "label": image_format(f"{CAPTURE_STEM}{suffix}").label}
+            for name, suffix in PHYSICAL_READ_FORMATS.items()
+        ],
+        "geometries": [
+            {"id": item.identifier, "label": item.label}
+            for item in sorted(ATARI_GEOMETRIES.values(), key=lambda row: row.size)
+        ],
     }
+
+
+def _write_disk_format(image: Path) -> str | None:
+    """Return the Greaseweazle disk format a sector image needs, if any.
+
+    A plain ``.st`` is sectors and nothing else: Greaseweazle cannot tell how
+    many tracks, sides or sectors it holds, so the shape is read out of the
+    image's own boot sector here and passed as a format name. A container
+    that carries its own geometry needs nothing.
+    """
+    if not image_format(image).format_on_write:
+        return None
+    try:
+        layout = image_geometry(image)
+    except FloppyError as exc:
+        raise DiskError(str(exc)) from exc
+    try:
+        return gw_format(layout.tracks, layout.sides, layout.sectors)
+    except GreaseweazleError as exc:
+        raise DiskError(str(exc)) from exc
+
+
+#: Container kinds Greaseweazle cannot be handed directly, and which are
+#: rebuilt as a plain sector image before a drive is written.
+CONVERT_BEFORE_WRITE = frozenset({"dim", "stx"})
 
 
 @contextmanager
 def _physical_media(service: DiskService, session, details: dict, progress):
     """Expose finalised media without allowing later edits to change the write."""
-    temporary: Path | None = None
+    del details
+    converted = None
     try:
         progress("Finalising the working image before physical media access", 0, None)
+        if session.kind in CONVERT_BEFORE_WRITE:
+            progress("Rebuilding the disk as a plain sector image", None, None)
+            converted, _tracks = service.convert_container(session, "st")
+            session = converted
         with session.lock:
             source = service.prepare_download(
                 session,
@@ -118,20 +144,20 @@ def _physical_media(service: DiskService, session, details: dict, progress):
         finally:
             snapshot_context.__exit__(None, None, None)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        if converted is not None:
+            service.discard_session(converted)
 
 
 # Capture targets the workbench can open again, mapped to the suffix each one
 # writes. A request names the format, so the suffix is taken from this table
 # rather than from the request, keeping the caller's text out of the path.
 #
-# Only formats Greaseweazle itself writes appear here: sectors as an ADF or a
-# PC-format IMG, and flux as HFE, SCP or IPF. An ADZ is an ADF compressed
-# afterwards and a DMS is built by DiskMasher, so neither is a capture target.
+# Only formats Greaseweazle itself writes appear here: sectors as a ``.st`` or
+# an MSA, and flux as HFE, SCP or IPF. A Pasti capture is made by Pasti and a
+# DIM by FastCopy Pro, so neither is a capture target.
 PHYSICAL_READ_FORMATS: dict[str, str] = {
-    "adf": ".adf",
-    "img": ".img",
+    "st": ".st",
+    "msa": ".msa",
     "hfe": ".hfe",
     "scp": ".scp",
     "ipf": ".ipf",
@@ -203,16 +229,15 @@ def create_desktop_blueprint(
                     service,
                     components,
                     layout=str(rom.get("layout") or "linear"),
-                    platform=str(rom.get("platform") or "kickstart"),
+                    platform=str(rom.get("platform") or "tos"),
                 )
             except (OSError, ValueError) as exc:
                 raise DiskError(str(exc)) from exc
             return jsonify(image=service.summary(session))
-        image_path, descriptor_path = _image_pair(data)
+        image_path = _regular_file(data.get("path"), "image")
         session = open_image_path(
             service,
             image_path,
-            descriptor_path,
             target_hardware=str(data.get("targetHardware") or "auto"),
             rom_options=(
                 data.get("rom") if isinstance(data.get("rom"), dict) else None
@@ -253,6 +278,7 @@ def create_desktop_blueprint(
                         image,
                         str(data.get("drive") or ""),
                         progress,
+                        disk_format=_write_disk_format(image),
                     )
         except GreaseweazleError as exc:
             raise DiskError(str(exc)) from exc
@@ -269,13 +295,31 @@ def create_desktop_blueprint(
         """
         data = payload()
         drive = str(data.get("drive") or "")
-        suffix = PHYSICAL_READ_FORMATS.get(str(data.get("format") or "adf").strip().lower())
+        suffix = PHYSICAL_READ_FORMATS.get(str(data.get("format") or "st").strip().lower())
         if suffix is None:
             raise DiskError(
                 "Choose a capture format: "
                 + ", ".join(sorted(PHYSICAL_READ_FORMATS))
                 + "."
             )
+        # A sector capture has to be told the shape of the disk, because
+        # Greaseweazle decodes sectors as it reads and cannot discover a
+        # layout it was not asked for. Flux needs nothing: it records what
+        # the head saw.
+        disk_format = None
+        # ``image_format`` reads a suffix off a filename, and a bare ".st" has
+        # no suffix of its own, so it is asked about the file that will
+        # actually be written.
+        if image_format(f"{CAPTURE_STEM}{suffix}").format_on_read:
+            layout = data.get("geometry") or "ds-720k"
+            try:
+                shape = floppy_geometry(str(layout))
+            except FloppyError as exc:
+                raise DiskError(str(exc)) from exc
+            try:
+                disk_format = gw_format(shape.tracks, shape.sides, shape.sectors)
+            except GreaseweazleError as exc:
+                raise DiskError(str(exc)) from exc
         revolutions = data.get("revolutions")
         operation_id = str(data.get("operationId") or "") or None
         with tempfile.TemporaryDirectory(dir=service.work_dir, prefix="gw-read-") as folder:
@@ -291,6 +335,7 @@ def create_desktop_blueprint(
                         drive,
                         progress,
                         revolutions=int(revolutions) if revolutions is not None else None,
+                        disk_format=disk_format,
                     )
                     progress("Opening the captured image", None, None)
                     session = service.create_from_path(destination)

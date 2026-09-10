@@ -4,7 +4,7 @@ import re
 
 from flask import request
 
-from ..atari_metadata import parse_protection
+from ..atari_metadata import parse_attributes
 
 from ..errors import DiskError
 
@@ -28,7 +28,7 @@ def apply_partition(service, session, value) -> None:
     current selection alone, so an operation on a floppy never has to mention
     one.
     """
-    if session.kind != "hdf" or value in (None, ""):
+    if session.kind != "hd" or value in (None, ""):
         return
     if value == "null":
         service.select_partition(session, None)
@@ -36,23 +36,24 @@ def apply_partition(service, session, value) -> None:
     service.select_partition(session, int(value))
 
 
-def protection_field(value) -> str | None:
-    """Normalise a protection value a person supplied, or None when absent.
+def attributes_field(value) -> str | None:
+    """Normalise an attribute value a person supplied, or None when absent.
 
-    A person may type either form: the eight letters ``List`` prints, such as
-    ``----rwed``, or the raw long as hexadecimal. Both are accepted here so
-    every route reads one written value as one number. An empty field means
-    "leave it alone" and is returned as ``None`` rather than as zero, because
-    zero is itself meaningful -- it is the ordinary fully permitted file.
+    A person may type either form: the six letters the workbench prints, such
+    as ``r----a``, or the byte itself in hexadecimal. Both are accepted here
+    so every route reads one written value as one number. An empty field
+    means "leave it alone" and is returned as ``None`` rather than as zero,
+    because zero is itself meaningful: it is an ordinary file with no
+    attribute bit set at all.
     """
     text = str(value or "").strip()
     if not text:
         return None
-    if parse_protection(text) is not None:
+    if parse_attributes(text) is not None:
         return text
-    if re.fullmatch(r"(?:&|0x)?[0-9a-fA-F]{1,8}", text):
+    if re.fullmatch(r"(?:&|0x|\$)?[0-9a-fA-F]{1,2}", text):
         return text
     raise DiskError(
-        f"“{text}” is not a valid protection value. Use the eight letters "
-        "List prints, such as ----rwed, or one to eight hexadecimal digits."
+        f"“{text}” is not a valid attribute value. Use the six letters the "
+        "workbench prints, such as r----a, or one or two hexadecimal digits."
     )

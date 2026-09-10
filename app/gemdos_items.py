@@ -6,8 +6,10 @@ point of view: every path is checked before anything is written, so a selection
 that contains one impossible move fails without having half-moved the rest.
 
 The checks are the ones GEMDOS itself enforces, plus the two a filer has to
-add because it is acting on a selection: no item may collide with another item's
-destination, and a drawer may not be dropped inside itself.
+add because it is acting on a selection: no item may collide with another
+item's destination, and a folder may not be dropped inside itself. Names are
+compared case-insensitively throughout, because GEMDOS folds every name to
+upper case and ``LETTER.DOC`` and ``letter.doc`` are one file.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover - imported for type checkers only
     from .image_session import ImageSession
 
 
-def move_ffs_items(
+def move_gemdos_items(
     service: DiskService,
     session: ImageSession,
     items: list[dict],
@@ -32,7 +34,7 @@ def move_ffs_items(
     if not service.mountable(session):
         raise DiskError("Same-image moves are available inside a mounted volume.")
     if not items:
-        raise DiskError("Choose at least one file or drawer to move.")
+        raise DiskError("Choose at least one file or folder to move.")
     service.require_writable_geometry(session)
 
     def normalise(value: object) -> str:
@@ -43,7 +45,7 @@ def move_ffs_items(
             raise DiskError("The volume root cannot be moved.")
         return path
 
-    with service.ffs_mount(session) as mount:
+    with service.gemdos_mount(session) as mount:
         moves: list[dict] = []
         destinations: set[str] = set()
         for raw in items:
@@ -58,7 +60,7 @@ def move_ffs_items(
             if entry.is_dir and destination.casefold().startswith(
                 f"{source}{atari_paths.SEPARATOR}".casefold()
             ):
-                raise DiskError("A drawer cannot be moved inside itself.")
+                raise DiskError("A folder cannot be moved inside itself.")
             destination_key = destination.casefold()
             if destination_key in destinations:
                 raise DiskError(f"More than one item would become “{destination}”.")
@@ -69,7 +71,7 @@ def move_ffs_items(
                 )
             parent = atari_paths.parent(destination)
             if not mount.exists(parent) or not mount.stat(parent).is_dir:
-                raise DiskError(f"Destination drawer “{parent}” does not exist.")
+                raise DiskError(f"Destination folder “{parent}” does not exist.")
             moves.append(
                 {
                     "source": source,
@@ -83,9 +85,9 @@ def move_ffs_items(
         for move in moves:
             mount.rename(move["source"], move["destination"])
 
-        session.ffs_source_names = {
+        session.source_names = {
             _rewrite_path(path, moves): source_name
-            for path, source_name in session.ffs_source_names.items()
+            for path, source_name in session.source_names.items()
         }
 
     session.dirty = True
@@ -94,7 +96,7 @@ def move_ffs_items(
     return {"moved": moves}
 
 
-def delete_ffs_items(
+def delete_gemdos_items(
     service: DiskService,
     session: ImageSession,
     paths: list[str],
@@ -105,11 +107,11 @@ def delete_ffs_items(
     service.require_writable_geometry(session)
     sources = list(dict.fromkeys(str(path or "").strip().rstrip(".") for path in paths))
     if not sources:
-        raise DiskError("Choose at least one file or drawer to delete.")
+        raise DiskError("Choose at least one file or folder to delete.")
     if any(not atari_paths.normalise(source) for source in sources):
-        raise DiskError("Choose files or drawers inside the volume.")
+        raise DiskError("Choose files or folders inside the volume.")
 
-    with service.ffs_mount(session) as mount:
+    with service.gemdos_mount(session) as mount:
         deleted_items = []
         for source in sources:
             if not mount.exists(source):
@@ -118,7 +120,7 @@ def delete_ffs_items(
                 {"path": source, "isDirectory": bool(mount.stat(source).is_dir)}
             )
 
-        # A selected drawer already includes anything selected below it. Removing
+        # A selected folder already includes anything selected below it. Removing
         # descendants from the work list avoids a misleading second "not found".
         directories = [item["path"] for item in deleted_items if item["isDirectory"]]
         deleted_items = [
@@ -152,9 +154,9 @@ def delete_ffs_items(
                 for item in deleted_items
             )
 
-        session.ffs_source_names = {
+        session.source_names = {
             path: source_name
-            for path, source_name in session.ffs_source_names.items()
+            for path, source_name in session.source_names.items()
             if not path_was_deleted(path)
         }
 
@@ -186,4 +188,4 @@ def _rewrite_path(path: str, moves: list[dict]) -> str:
     return path
 
 
-__all__ = ["delete_ffs_items", "move_ffs_items"]
+__all__ = ["delete_gemdos_items", "move_gemdos_items"]

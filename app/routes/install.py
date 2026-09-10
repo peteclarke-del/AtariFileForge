@@ -93,7 +93,7 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
                 session,
                 title or source.name,
                 parent=str(data.get("stagingParent") or ""),
-                disc_label=str(data.get("discLabel") or "").strip() or None,
+                disc_label=str(data.get("diskLabel") or "").strip() or None,
                 progress=progress,
             )
         return jsonify(image=service.summary(session), staged=staged)
@@ -153,7 +153,7 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        discs = [service.get(str(identifier)) for identifier in data.get("discs") or []]
+        discs = [service.get(str(identifier)) for identifier in data.get("disks") or []]
         if not discs:
             raise DiskError("Choose the Workbench floppy images to install from.")
         return jsonify(
@@ -169,7 +169,7 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        chosen = data.get("discs") or {}
+        chosen = data.get("disks") or {}
         if not isinstance(chosen, dict) or not chosen:
             raise DiskError("Choose which disc plays each part before installing.")
         discs = {str(role): service.get(str(identifier)) for role, identifier in chosen.items()}

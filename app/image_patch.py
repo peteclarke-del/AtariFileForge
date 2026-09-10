@@ -11,7 +11,7 @@ from .analysis_service import build_manifest
 from .checksum import sha256_copy, sha256_stream
 from .disk_service import DiskError
 from .image_diff import compare_manifests, manifest_fingerprint, record_key
-from .ffs_items import delete_ffs_items
+from .gemdos_items import delete_gemdos_items
 from . import atari_paths
 from . import progress as progress_module
 
@@ -22,6 +22,12 @@ MAX_OPERATIONS = 100_000
 MAX_PATCH_UNCOMPRESSED_BYTES = 9 * 1024 * 1024 * 1024
 MAX_PATCH_DOCUMENT_BYTES = 64 * 1024 * 1024
 PATCH_ACTIONS = frozenset({"added", "removed", "modified", "metadata"})
+
+#: Session kinds whose bytes cannot receive a patch. A Pasti capture is a
+#: record of a physical read and is never writable; an MSA or a DIM is a
+#: floppy behind a header, and is patched by converting it to a .st, applying
+#: the patch there and writing the container back out.
+READ_ONLY_CONTAINERS = frozenset({"stx", "msa", "dim"})
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
@@ -40,7 +46,10 @@ def _layout_signature(manifest: dict) -> dict:
     """Return the physical traits that can change how logical paths are addressed."""
     image = manifest.get("image", {})
     signature = {"kind": image.get("kind")}
-    if image.get("kind") == "ofs":
+    if image.get("kind") == "gemdos":
+        # A single-sided ST disk and a double-sided one of the same track
+        # count hold different numbers of sectors, so a patch built against
+        # one cannot be applied to the other.
         signature["doubleSided"] = bool(image.get("doubleSided"))
     elif image.get("kind") == "rom":
         signature["bankSize"] = (image.get("rom") or {}).get("bankSize")
@@ -73,7 +82,7 @@ def _change_patchable(kind: str, change: dict) -> bool:
     row = change.get("after") or change.get("before") or {}
     if kind == "rom":
         return row.get("recordType") == "rom-bank"
-    return kind != "dms"
+    return kind not in READ_ONLY_CONTAINERS
 
 
 def _parent_paths(path: str) -> list[str]:
@@ -285,7 +294,9 @@ def _preflight_patch(service, session, archive: zipfile.ZipFile, progress=None) 
     report(f"Cataloguing the open {session.kind.upper()} image", 0, None)
     current = build_manifest(service, session, report)
     if document.get("layout") and _layout_signature(current) != document.get("layout"):
-        raise DiskError("This patch targets a different OFS side layout or ROM bank size.")
+        raise DiskError(
+            "This patch targets a different disk side count or ROM bank size."
+        )
     if manifest_fingerprint(current) != document.get("baseFingerprint"):
         raise DiskError("The open image does not match this patch's exact base revision.")
     report("Checking the canonical operation plan", 0, None)
@@ -345,11 +356,7 @@ def inspect_patch_archive(service, session, archive_path: Path, progress=None) -
 @contextmanager
 def _candidate_payload_path(service, session, row: dict):
     """Expose one candidate payload as a path and clean generated exports."""
-    exported = service.export_file(
-        session,
-        str(row["path"]),
-        int(row["side"]) if row.get("side") is not None else None,
-    )
+    exported = service.export_file(session, str(row["path"]))
     try:
         yield exported
     finally:
@@ -374,9 +381,14 @@ def write_patch_archive(
     if not comparison["sameFormat"]:
         raise DiskError("Patch sets require two images from the same filesystem family.")
     if _layout_signature(base) != _layout_signature(candidate):
-        raise DiskError("Patch sets require matching OFS side layouts or ROM bank sizes.")
-    if base_session.kind == "dms":
-        raise DiskError("DMS DMS archives are read-only and cannot receive patch sets.")
+        raise DiskError(
+            "Patch sets require matching disk side counts or ROM bank sizes."
+        )
+    if base_session.kind in READ_ONLY_CONTAINERS:
+        raise DiskError(
+            "MSA, DIM and Pasti containers are read-only here. Convert one to a "
+            ".st image before building a patch set against it."
+        )
     selection = None
     if selected_keys is not None:
         candidate, selection = _selected_candidate_manifest(
@@ -456,35 +468,34 @@ def write_patch_archive(
 
 def _remove_filesystem_record(service, session, row: dict) -> None:
     path = str(row["path"])
-    if session.kind in {"ffs", "ofs"}:
-        delete_ffs_items(service, session, [path])
+    if service.mountable(session):
+        delete_gemdos_items(service, session, [path])
         return
     arguments = ["rm", "--force"]
     if row.get("recordType") == "directory":
         arguments.append("--recursive")
     arguments.append("{image}:" + path)
-    service.mutate(
-        session,
-        arguments,
-        int(row["side"]) if row.get("side") is not None else None,
-    )
+    service.mutate(session, arguments)
 
 
-def _protection_text(value) -> str:
-    """Render a manifest protection value as the text a metadata edit takes."""
+def _attribute_text(value) -> str:
+    """Render a manifest attribute value as the text a metadata edit takes.
+
+    A manifest may record either the six letters or the byte. Both forms are
+    accepted by the metadata edit, so the only work here is turning a number
+    back into the hexadecimal spelling it was written from.
+    """
     if isinstance(value, int):
         return f"{value:X}"
     return str(value or "0")
 
 
 def _apply_access(service, session, row: dict) -> None:
+    """Restore the read-only bit a manifest recorded for one entry."""
     path = str(row["path"])
-    side = int(row["side"]) if row.get("side") is not None else None
     attributes = str(row.get("attributes") or "")
     if attributes:
-        normalised = attributes.upper()
-        writable = "RUN" not in normalised if session.kind == "kickfs" else "L" not in normalised
-        service.set_access(session, [path], writable, side)
+        service.set_access(session, [path], "r" not in attributes.casefold())
 
 
 def _apply_metadata(service, session, row: dict) -> None:
@@ -494,15 +505,12 @@ def _apply_metadata(service, session, row: dict) -> None:
     service.set_file_metadata(
         session,
         str(row["path"]),
-        _protection_text(row.get("protection")),
-        str(row.get("comment") or ""),
-        int(row["side"]) if row.get("side") is not None else None,
+        _attribute_text(row.get("attributes")),
         # A patch reproduces the image it was taken from, so the entry keeps
         # the datestamp the candidate recorded rather than the moment the
         # patch happened to be applied.
-        str(row.get("datestamp") or "") or None,
+        datestamp=str(row.get("datestamp") or "") or None,
     )
-    _apply_access(service, session, row)
 
 
 def _apply_normal_patch(
@@ -513,7 +521,7 @@ def _apply_normal_patch(
     progress=None,
 ) -> None:
     report = progress_module.reporter(progress)
-    removal_actions = {"removed", "modified"} if session.kind == "ofs" else {"removed"}
+    removal_actions = {"removed"}
     removals = [item for item in operations if item["action"] in removal_actions]
     removals.sort(key=lambda item: (item["before"].get("recordType") == "directory", -str(item["before"].get("path") or "").count(".")))
     metadata = [item for item in operations if item["action"] == "metadata"]
@@ -532,7 +540,7 @@ def _apply_normal_patch(
         row = operation["after"]
         report(f"Writing {row.get('path')}", completed, total_steps)
         if row.get("recordType") == "directory":
-            if session.kind not in {"ffs", "ofs"}:
+            if not service.mountable(session):
                 raise DiskError("This patch contains a directory for a flat filesystem.")
             service.make_directory(session, str(row["path"]))
             _apply_access(service, session, row)
@@ -551,16 +559,13 @@ def _apply_normal_patch(
                 session,
                 str(row["path"]),
                 temporary_path,
-                _protection_text(row.get("protection")) if row.get("protection") else None,
-                str(row.get("comment") or "") or None,
-                None,
-                int(row["side"]) if row.get("side") is not None else None,
+                _attribute_text(row.get("attributes")) if row.get("attributes") else None,
             )
         finally:
             temporary_path.unlink(missing_ok=True)
-        # put() writes the protection bits and comment, but the entry gets a
-        # fresh datestamp because it has genuinely just been written. A patch
-        # is supposed to reproduce the image it was taken from, datestamps
+        # put() writes the attribute byte, but the entry gets a fresh
+        # datestamp because it has genuinely just been written. A patch is
+        # supposed to reproduce the image it was taken from, datestamps
         # included, so the recorded one is restored here. Without this the
         # candidate fingerprint can never match and every patch fails its own
         # verification on a metadata difference it created itself.
@@ -606,8 +611,11 @@ def apply_patch_archive(service, session, archive_path: Path, progress=None) -> 
             operations = document["operations"]
             if session.kind == "rom":
                 _apply_rom_patch(service, session, operations, archive, report)
-            elif session.kind == "dms":
-                raise DiskError("A DMS archive is read-only and cannot receive a patch set.")
+            elif session.kind in READ_ONLY_CONTAINERS:
+                raise DiskError(
+                    "MSA, DIM and Pasti containers are read-only here. Convert "
+                    "one to a .st image before applying a patch to it."
+                )
             else:
                 _apply_normal_patch(service, session, operations, archive, report)
     except zipfile.BadZipFile as exc:
