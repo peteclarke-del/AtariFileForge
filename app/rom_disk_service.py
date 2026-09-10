@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import atari_paths
 from .editor_project import editor_project_key, normalise_editor_project
 from .errors import DiskError
 from .image_session import ImageSession
@@ -271,7 +272,8 @@ class RomDiskMixin:
             folded = path.casefold()
             for source, destination in replacements:
                 source_folded = source.casefold()
-                if folded != source_folded and not folded.startswith(source_folded + "/"):
+                branch = f"{source_folded}{atari_paths.SEPARATOR}"
+                if folded != source_folded and not folded.startswith(branch):
                     continue
                 suffix = path[len(source):]
                 changed[editor_project_key(destination + suffix, side)] = project
@@ -301,7 +303,11 @@ class RomDiskMixin:
             if not separator or key_side != side_key:
                 continue
             folded = path.casefold()
-            if any(folded == prefix or folded.startswith(prefix + "/") for prefix in prefixes):
+            if any(
+                folded == prefix
+                or folded.startswith(f"{prefix}{atari_paths.SEPARATOR}")
+                for prefix in prefixes
+            ):
                 removed.append(key)
         if not removed:
             return 0

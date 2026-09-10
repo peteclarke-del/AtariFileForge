@@ -8,59 +8,59 @@ from app.disk_service import DiskError, DiskService, ImageSession
 
 
 class CheckpointTests(unittest.TestCase):
-    def make_session(self, root: Path, *, paired: bool = False) -> tuple[DiskService, ImageSession]:
+    def make_session(
+        self, root: Path, *, partitioned: bool = False
+    ) -> tuple[DiskService, ImageSession]:
         folder = root / ("a" * 32)
         folder.mkdir()
-        image = folder / ("scsi0.hda" if paired else "games.adf")
+        image = folder / ("drive.img" if partitioned else "games.st")
         image.write_bytes(b"original image")
-        descriptor = folder / "scsi0.geo" if paired else None
-        if descriptor:
-            descriptor.write_bytes(b"original descriptor")
         service = DiskService(root)
         session = ImageSession(
             "a" * 32,
             image.name,
-            "ffs" if paired else "raw",
+            "hd" if partitioned else "gemdos",
             image,
-            descriptor_name=descriptor.name if descriptor else None,
-            descriptor_path=descriptor,
+            partition=0 if partitioned else None,
         )
         return service, session
 
-    def test_named_checkpoint_restores_image_descriptor_and_session_state(self) -> None:
+    def test_named_checkpoint_restores_image_and_session_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            service, session = self.make_session(Path(directory), paired=True)
+            service, session = self.make_session(Path(directory), partitioned=True)
             checkpoint = service.create_checkpoint(session, "Known good")
 
             session.path.write_bytes(b"changed image")
-            session.descriptor_path.write_bytes(b"changed descriptor")
-            session.name = "changed.hda"
-            session.descriptor_name = "changed.geo"
+            session.name = "changed.img"
+            # Which partition is open is session state, not image bytes, so a
+            # restore has to put the drive back on the volume it was showing.
+            session.partition = 2
             session.dirty = True
             session.warnings = ["changed"]
             restored = service.restore_checkpoint(session, checkpoint["id"])
 
             self.assertEqual(restored["name"], "Known good")
             self.assertEqual(session.path.read_bytes(), b"original image")
-            self.assertEqual(session.descriptor_path.read_bytes(), b"original descriptor")
-            self.assertEqual(session.name, "scsi0.hda")
-            self.assertEqual(session.descriptor_name, "scsi0.geo")
+            self.assertEqual(session.name, "drive.img")
+            self.assertEqual(session.partition, 0)
             self.assertFalse(session.dirty)
             self.assertEqual(session.warnings, [])
 
-    def test_oldest_snapshot_exposes_validated_primary_descriptor_and_metadata(self) -> None:
+    def test_oldest_snapshot_exposes_the_validated_primary_image_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            service, session = self.make_session(Path(directory), paired=True)
+            service, session = self.make_session(Path(directory), partitioned=True)
             oldest = service.create_checkpoint(session, "Workflow base")
             session.path.write_bytes(b"later")
             service.create_checkpoint(session, "Later point")
 
-            image, descriptor, metadata = service.oldest_checkpoint_snapshot(session)
+            image, companion, metadata = service.oldest_checkpoint_snapshot(session)
 
             self.assertEqual(metadata["id"], oldest["id"])
             self.assertEqual(image.read_bytes(), b"original image")
-            self.assertEqual(descriptor.read_bytes(), b"original descriptor")
             self.assertEqual(metadata["reason"], "Workflow base")
+            # An Atari drive describes its own shape in its root sector, so
+            # there is no companion file for a checkpoint to keep beside it.
+            self.assertIsNone(companion)
 
     def test_undo_restores_and_consumes_latest_automatic_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
