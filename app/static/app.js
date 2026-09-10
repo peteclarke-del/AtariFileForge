@@ -6674,7 +6674,7 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
     }
     else if (action === "debugger-workspace") {
       if (target) return toast("Extract this archive member before starting a debugger.", true);
-      // An GEMDOS load file is relocatable and records no address, so the
+      // A GEMDOS program is relocatable and records no address, so the
       // debugger starts at the beginning of the extracted bytes.
       await openDebuggerWorkspace(pane, entry, path, pane.image?.targetHardware === "tos" ? "68040" : "68000", "0x0", isBasic, editor.value);
       project = await loadEditorProject(pane, path);
