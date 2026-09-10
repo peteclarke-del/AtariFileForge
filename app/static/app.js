@@ -890,7 +890,7 @@ function renderPane(index, preserveScroll = false) {
       ${!isArchive && !isRom && !isPartitionIndex ? `<button class="menu-command inspect-file" ${selected && selected.type !== "dir" && selected.type !== "directory" ? "" : "disabled"}><b>⌕</b><span>Open selected file</span></button><button class="menu-command inspect-dependencies" ${selected && selected.type !== "dir" && selected.type !== "directory" ? "" : "disabled"}><b>⛓</b><span>Check loader dependencies</span></button>` : ""}
       <button class="menu-command find-duplicates"><b>≡</b><span>${isPartitionIndex ? "Check for duplicate games" : "Find duplicates / variants"}</span></button>
       <button class="menu-command compare-image" ${panes.some((other, otherIndex) => otherIndex !== index && other.image?.id && other.image.id !== pane.image.id) ? "" : 'disabled title="Open another image to compare."'}><b>⇄</b><span>Compare with open image…</span></button>
-      <button class="menu-command apply-image-patch" ${pane.image.readOnly || isDMS ? "disabled" : ""}><b>⇥</b><span>Apply guarded patch…</span></button>
+      <button class="menu-command apply-image-patch" ${pane.image.readOnly || isContainer ? "disabled" : ""}><b>⇥</b><span>Apply guarded patch…</span></button>
       <button class="menu-command export-manifest"><b>⇩</b><span>Export collection manifest</span></button>
     </div>
   </details>`;
@@ -1758,9 +1758,9 @@ function chooseImage(index) {
   form => {
     const files = selection.files;
     if (!files.length) throw new Error("Choose a media image to open.");
-    // Let showModal finish closing this dialog before an HDA/GEO pairing
-    // dialog is opened. Opening the replacement synchronously here lets the
-    // first dialog's promise handler close the new one as well.
+    // Let showModal finish closing this dialog before a geometry-sidecar
+    // pairing dialog is opened. Opening the replacement synchronously here
+    // lets the first dialog's promise handler close the new one as well.
     const targetHardware = form.get("targetHardware") || "auto";
     if (form.get("formatOverride") === "rom") files.forEach(file => { file.atariForceKind = "rom"; });
     setTimeout(() => openFiles(index, files, targetHardware), 0);
@@ -3260,7 +3260,7 @@ function extractionPreviewMarkup(preview) {
         ${rows.length ? rows.map(item => `
           <div class="image-import-preview-row">
             <span class="preview-kind">${item.type === "dir" ? "▣" : item.type === "disk" ? "▤" : "□"}</span>
-            <span><b>${esc(item.name)}</b><small>${esc(item.path || "$")}${item.detail ? ` · ${esc(item.detail)}` : ""}</small></span>
+            <span><b>${esc(item.name)}</b><small>${esc(item.path || "\\")}${item.detail ? ` · ${esc(item.detail)}` : ""}</small></span>
             <em>${item.size == null ? "" : humanSize(item.size)}</em>
           </div>`).join("") : '<p class="muted">No files were found in this image.</p>'}
       </div>
@@ -3277,25 +3277,25 @@ function showImageExtractionPlan(index, options) {
   const closed = showModal(`
     <h2>${esc(options.heading)}</h2>
     ${batchLabel}
-    <p>Review the source, then choose where its contents should go. Extraction defaults to the directory currently shown in the pane.</p>
+    <p>Review the source, then choose where its contents should go. Extraction defaults to the folder currently shown in the pane.</p>
     ${extractionPreviewMarkup(options.preview)}
     ${options.allowRaw || options.allowInstall ? `<div class="field"><label>Import as</label><select name="storageMethod">
-      <option value="extract">Copy the disc contents in as they are</option>
+      <option value="extract">Copy the disk contents in as they are</option>
       ${options.allowInstall ? '<option value="install">Install it onto this drive</option>' : ""}
       ${options.allowRaw ? '<option value="raw">Store the original image as an ordinary file</option>' : ""}
     </select></div>` : '<input type="hidden" name="storageMethod" value="extract">'}
     ${options.allowInstall ? installPlanMarkup(options) : ""}
     <div data-extraction-options>
       <div class="selected-destination"><small>DESTINATION</small><code data-selected-destination>${esc(pane.path)}</code></div>
-      <label class="check-field"><input type="checkbox" name="pickDestination" value="yes"> Choose a different existing directory</label>
+      <label class="check-field"><input type="checkbox" name="pickDestination" value="yes"> Choose a different existing folder</label>
       <input type="hidden" name="targetPath" value="${esc(pane.path)}">
-      <div class="ffs-directory-picker" data-directory-picker hidden>
+      <div class="volume-directory-picker" data-directory-picker hidden>
         <div class="directory-picker-head"><button type="button" class="button ghost picker-up">Up</button><code data-picker-path>${esc(pane.path)}</code></div>
         <div class="directory-picker-list" data-picker-list></div>
       </div>
-      <label class="check-field"><input type="checkbox" name="createDirectory" value="yes"> Create a new child directory before extracting</label>
-      <div class="field" data-extracted-directory hidden><label>New drawer name · max 30 characters</label>
-        <input name="directoryName" maxlength="30" value="${esc(options.suggestedName)}" disabled></div>
+      <label class="check-field"><input type="checkbox" name="createDirectory" value="yes"> Create a new child folder before extracting</label>
+      <div class="field" data-extracted-directory hidden><label>New folder name · max 12 characters</label>
+        <input name="directoryName" maxlength="12" value="${esc(options.suggestedName)}" disabled></div>
       <div class="help-note">Existing names are never overwritten. A failed or aborted direct extraction restores the working image.</div>
     </div>
     <input type="hidden" name="applyRemaining" value="no">
@@ -3307,7 +3307,7 @@ function showImageExtractionPlan(index, options) {
       return options.onInstall({
         mode: form.get("installMode") || "stage",
         title: (form.get("installTitle") || options.suggestedName || "").trim(),
-        discLabel: (form.get("discLabel") || "").trim(),
+        diskLabel: (form.get("diskLabel") || "").trim(),
         parent: (form.get("installParent") || "").trim(),
         installNow: form.get("installNow") === "yes",
         applyAll,
@@ -3348,7 +3348,7 @@ function bindImageExtractionPlan(index, allowRaw, options = {}) {
   };
   const parentOf = path => parentPath(path);
   const loadPicker = async path => {
-    pickerList.innerHTML = '<span class="muted">Reading directories…</span>';
+    pickerList.innerHTML = '<span class="muted">Reading folders…</span>';
     try {
       const data = await api(`/api/images/${pane.image.id}/tree?path=${encodeURIComponent(path)}`);
       if (!modal.open) return;
@@ -3358,7 +3358,7 @@ function bindImageExtractionPlan(index, allowRaw, options = {}) {
       const directories = data.entries.filter(item => item.type === "dir");
       pickerList.innerHTML = directories.length
         ? directories.map(item => `<button type="button" data-directory-name="${esc(item.name)}"><b>▣</b><span>${esc(item.name)}</span></button>`).join("")
-        : '<span class="muted">No child directories here.</span>';
+        : '<span class="muted">No child folders here.</span>';
       pickerList.querySelectorAll("[data-directory-name]").forEach(button => {
         button.onclick = () => loadPicker(fullPath(path, button.dataset.directoryName));
       });
@@ -3425,7 +3425,7 @@ function installPlanMarkup(options) {
         <input name="installTitle" maxlength="60" value="${esc(options.suggestedName || "")}" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>
         <small>Disks staged under the same title are merged into one tree on this drive.</small></div>
       <div class="field"><label>Disk</label>
-        <input name="discLabel" maxlength="30" placeholder="Disk 1" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}></div>
+        <input name="diskLabel" maxlength="30" placeholder="Disk 1" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}></div>
       <div class="field"><label>Method</label>
         <div class="install-modes">
           ${INSTALL_MODES.map((mode, position) => `
@@ -3496,9 +3496,9 @@ async function showStagedInstallations(index) {
     <div class="staged-title" data-name="${esc(title.name)}">
       <div>
         <b>${esc(title.title)}</b>
-        <small>${title.discCount ? `${title.discCount} disk${title.discCount === 1 ? "" : "s"} · ` : ""}${title.fileCount} file${title.fileCount === 1 ? "" : "s"} · ${humanSize(title.bytes)}</small>
+        <small>${title.diskCount ? `${title.diskCount} disk${title.diskCount === 1 ? "" : "s"} · ` : ""}${title.fileCount} file${title.fileCount === 1 ? "" : "s"} · ${humanSize(title.bytes)}</small>
         <small><code>${esc(title.path)}</code></small>
-        ${title.discs.length ? `<small>${esc(title.discs.map(disc => `${disc.label}: ${disc.volume}`).join(" · "))}</small>` : ""}
+        ${title.disks.length ? `<small>${esc(title.disks.map(disk => `${disk.label}: ${disk.volume}`).join(" · "))}</small>` : ""}
         ${title.conflicts.length ? `<small class="staged-conflict">${title.conflicts.length} file${title.conflicts.length === 1 ? "" : "s"} differed between disks; the first was kept and the rest are under ${esc(DEFAULT_STAGING_PARENT)}\\CLASH</small>` : ""}
       </div>
       <div class="staged-actions">
@@ -3706,7 +3706,7 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
         partition: pane.partition,
         stagingParent: DEFAULT_STAGING_PARENT,
         title,
-        discLabel: plan.discLabel || null,
+        diskLabel: plan.diskLabel || null,
         operationId,
       }),
     })).then(data => {
@@ -3719,7 +3719,7 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
       api(`/api/images/${pane.image.id}/install/emulator`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ discs: [sourceImageId], partition: pane.partition }),
+        body: JSON.stringify({ disks: [sourceImageId], partition: pane.partition }),
       }));
     toast(result.result.summary);
     return staged;
@@ -3727,7 +3727,7 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
 
   if (!plan.installNow) {
     await loadDirectory(index);
-    toast(`${title} staged into ${staged.path} as ${staged.discCount} disk(s). Install it when the set is complete.`);
+    toast(`${title} staged into ${staged.path} as ${staged.diskCount} disk(s). Install it when the set is complete.`);
     return staged;
   }
 
@@ -3799,7 +3799,7 @@ function hasObviousLaunchCandidate(metadata) {
 function setWorkspaceClipboard(index, mode) {
   const pane = panes[index];
   const items = clipboardItemsForPane(index);
-  if (!items.length) return toast("Select one or more files or drawers first.", true);
+  if (!items.length) return toast("Select one or more files or folders first.", true);
   clearWorkspaceClipboard("", false);
   workspaceClipboard = {
     mode,
@@ -4372,10 +4372,8 @@ const LAUNCH_COMMANDS = Object.freeze({ "": "ST BASIC", R: "Run", E: "Execute", 
 
 const ONLINE_MACHINES = [
   ["all", "All compatible machines"],
-  ["a500", "Atari 500"], ["a500plus", "Atari 500+"], ["a600", "Atari 600"],
-  ["a1200", "Atari 1200"], ["a2000", "Atari 2000"], ["a3000", "Atari 3000"],
-  ["a4000", "Atari 4000"], ["cd32", "Atari CD32"],
-  ["tos", "TOS"]
+  ["st", "Atari ST"], ["megast", "Atari Mega ST"], ["ste", "Atari STE"],
+  ["megaste", "Atari Mega STE"], ["tt030", "Atari TT030"], ["falcon030", "Atari Falcon030"],
 ];
 const ONLINE_MACHINE_STORAGE_KEY = "atari-file-forge-online-machine";
 const ACTIVE_PROFILE_STORAGE_KEY = "atari-file-forge-active-hardware-profile";
@@ -4423,10 +4421,6 @@ function defaultOnlineMachine(pane) {
   if (workbenchProfileMachine) return workbenchProfileMachine;
   const workbenchMachine = storedOnlineMachine();
   if (workbenchMachine) return workbenchMachine;
-  const hardware = String(pane.image?.targetHardware || "").toLowerCase();
-  if (hardware.includes("a500")) return "a500";
-  if (hardware.includes("a1200")) return "a1200";
-  if (hardware.includes("tos")) return "tos";
   return "all";
 }
 
@@ -4436,14 +4430,14 @@ async function showOnlineSources(index) {
     <label class="check"><input type="checkbox" name="enabled-${offset}" ${source.enabled ? "checked" : ""}> Enabled</label>
     <label>Name<input name="name-${offset}" value="${esc(source.name)}" required></label>
     <label>Catalogue URL<input name="url-${offset}" type="url" value="${esc(source.url)}" required></label>
-    <label>Machines<input name="machines-${offset}" value="${esc(source.machines.join(","))}" placeholder="a500,a1200"></label>
+    <label>Machines<input name="machines-${offset}" value="${esc(source.machines.join(","))}" placeholder="st,ste,falcon030"></label>
     <label class="online-provider-options">Provider settings (JSON)<textarea name="options-${offset}" rows="5">${esc(JSON.stringify(source.options || {}, null, 2))}</textarea></label>
     <input type="hidden" name="id-${offset}" value="${esc(source.id)}"><input type="hidden" name="type-${offset}" value="${esc(source.type)}">
     <input type="hidden" name="direct-${offset}" value="${source.direct ? "1" : "0"}">
   </fieldset>`).join("");
   const closed = showModal(`<div class="modal-heading"><span class="modal-kicker">ONLINE LIBRARY</span><h2>Catalogue sources</h2><p>Enable, disable or relocate a provider. Provider settings contain its query templates, categories and machine IDs, so site changes can be handled without changing application code.</p></div>
     <div class="online-source-list">${rows}</div>
-    <fieldset class="online-new-source"><legend>Add a compatible provider</legend><label>Name<input name="newName" placeholder="My Atari archive"></label><label>URL<input name="newUrl" type="url" placeholder="https://…"></label><label>Loading strategy<select name="newLoader"><option value="page">Single page</option><option value="category-crawl">Category crawl</option><option value="machine-index">Machine indexes</option></select></label><label>Page layout<select name="newParser"><option value="thumbnail-cards">Thumbnail cards</option><option value="section-catalogue">Section catalogue</option><option value="function-calls">Function-call records</option><option value="item-rows">Linked item rows</option><option value="query-media-tiles">Media links in query parameters</option><option value="html-cards">Configurable HTML cards</option><option value="zip-links">ZIP download links</option><option value="package-paragraphs">Package paragraphs</option><option value="links">Plain links</option></select></label><label>Machines<input name="newMachines" placeholder="a500,a1200"></label><label class="online-provider-options">Provider settings (JSON)<textarea name="newOptions" rows="5">{}</textarea></label></fieldset>
+    <fieldset class="online-new-source"><legend>Add a compatible provider</legend><label>Name<input name="newName" placeholder="My Atari archive"></label><label>URL<input name="newUrl" type="url" placeholder="https://…"></label><label>Loading strategy<select name="newLoader"><option value="page">Single page</option><option value="category-crawl">Category crawl</option><option value="machine-index">Machine indexes</option></select></label><label>Page layout<select name="newParser"><option value="thumbnail-cards">Thumbnail cards</option><option value="section-catalogue">Section catalogue</option><option value="function-calls">Function-call records</option><option value="item-rows">Linked item rows</option><option value="query-media-tiles">Media links in query parameters</option><option value="html-cards">Configurable HTML cards</option><option value="zip-links">ZIP download links</option><option value="package-paragraphs">Package paragraphs</option><option value="links">Plain links</option></select></label><label>Machines<input name="newMachines" placeholder="st,ste,falcon030"></label><label class="online-provider-options">Provider settings (JSON)<textarea name="newOptions" rows="5">{}</textarea></label></fieldset>
     <div class="modal-actions"><button class="button" type="button" data-back-library>Back</button><button class="button primary" type="submit">Save sources</button></div>`, async form => {
       const sources = data.sources.map((source, offset) => ({
         id: form.get(`id-${offset}`), name: form.get(`name-${offset}`), url: form.get(`url-${offset}`),
@@ -4465,6 +4459,24 @@ async function showOnlineSources(index) {
     setTimeout(() => showOnlineLibrary(index), 0);
   };
   return closed;
+}
+
+//: The media an Online Library result can arrive as. A badge is shown only
+//: for a container the catalogue actually declares, so an unrecognised entry
+//: says nothing rather than guessing.
+const ONLINE_MEDIA_BADGES = Object.freeze({
+  st: "ST", msa: "MSA", stx: "STX", dim: "DIM", hfe: "HFE", scp: "SCP", zip: "ZIP",
+});
+
+function onlineMediaBadges(item) {
+  const declared = Array.isArray(item.media) ? item.media : [item.media, item.format, item.filename].filter(Boolean);
+  const found = new Set();
+  declared.forEach(value => {
+    const text = String(value).toLowerCase();
+    const extension = text.match(/\.([a-z0-9]+)$/)?.[1] || text;
+    if (ONLINE_MEDIA_BADGES[extension]) found.add(ONLINE_MEDIA_BADGES[extension]);
+  });
+  return [...found].map(badge => `<small class="pill">${esc(badge)}</small>`).join("");
 }
 
 function nextAvailableOnlineDirectoryName(pane, title, usedNames) {
@@ -4502,7 +4514,7 @@ async function showOnlineLibrary(index) {
     <div class="online-status">Choose a machine and search the configured catalogues.</div>
     <div class="online-results" aria-live="polite"></div>
     <div class="online-install-options">
-      <label class="check"><input type="checkbox" name="createDirectory" checked> Create a drawer for each downloaded item</label><span class="field-note">Each item is installed into its own drawer beneath the current directory unless this is unticked.</span>
+      <label class="check"><input type="checkbox" name="createDirectory" checked> Create a folder for each downloaded item</label><span class="field-note">Each item is installed into its own folder beneath the current one unless this is unticked.</span>
     </div>
     <div class="online-compatibility-review" aria-live="polite"></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary online-install" type="submit" disabled>Install selected</button></div>`, async form => {
@@ -4531,7 +4543,7 @@ async function showOnlineLibrary(index) {
             nameIsLeaf: true,
             existingDestination: !createDirectories,
             source: item.sourceName || item.pageUrl || "Online Library",
-            type: createDirectories ? "directory" : "contents into directory",
+            type: createDirectories ? "directory" : "contents into folder",
             allowDuplicateName: !createDirectories,
           })),
         );
@@ -4603,7 +4615,7 @@ async function showOnlineLibrary(index) {
       const ariaSort = active ? (resultSort.direction === "asc" ? "ascending" : "descending") : "none";
       return `<th aria-sort="${ariaSort}"><button class="online-sort" type="button" data-sort="${key}">${label}<span aria-hidden="true">${arrow}</span></button></th>`;
     };
-    resultHost.innerHTML = items.length ? `<table class="online-result-table" aria-label="Downloadable Atari software"><thead><tr><th></th>${heading("Title", "title")}${heading("Publisher", "publisher")}${heading("Year", "year")}${heading("Source", "sourceName")}<th></th></tr></thead><tbody>${items.map(item => `<tr class="${item.installed ? "already-installed" : ""}"><td><input type="checkbox" name="catalogItem" value="${esc(item.id)}" aria-label="Select ${esc(item.title)}" ${selected.has(item.id) ? "checked" : ""}></td><td><strong>${esc(item.title)}</strong>${item.version ? `<small>Version ${esc(item.version)}</small>` : ""}${item.description ? `<small>${esc(item.description)}</small>` : ""}</td><td>${esc(item.publisher || "Unknown")}</td><td>${esc(item.year || "-")}</td><td><span class="pill">${esc(item.sourceName)}</span>${item.installed ? '<small class="installed-label">Already present</small>' : ""}</td><td><a class="button tiny" href="${esc(item.pageUrl)}" target="_blank" rel="noopener">Details</a></td></tr>`).join("")}</tbody></table>` : '<div class="empty-list">No matching downloadable items were found. Try All results, another machine, or a broader search.</div>';
+    resultHost.innerHTML = items.length ? `<table class="online-result-table" aria-label="Downloadable Atari software"><thead><tr><th></th>${heading("Title", "title")}${heading("Publisher", "publisher")}${heading("Year", "year")}${heading("Source", "sourceName")}<th></th></tr></thead><tbody>${items.map(item => `<tr class="${item.installed ? "already-installed" : ""}"><td><input type="checkbox" name="catalogItem" value="${esc(item.id)}" aria-label="Select ${esc(item.title)}" ${selected.has(item.id) ? "checked" : ""}></td><td><strong>${esc(item.title)}</strong>${item.version ? `<small>Version ${esc(item.version)}</small>` : ""}${item.description ? `<small>${esc(item.description)}</small>` : ""}</td><td>${esc(item.publisher || "Unknown")}</td><td>${esc(item.year || "-")}</td><td><span class="pill">${esc(item.sourceName)}</span>${onlineMediaBadges(item)}${item.installed ? '<small class="installed-label">Already present</small>' : ""}</td><td><a class="button tiny" href="${esc(item.pageUrl)}" target="_blank" rel="noopener">Details</a></td></tr>`).join("")}</tbody></table>` : '<div class="empty-list">No matching downloadable items were found. Try All results, another machine, or a broader search.</div>';
     if (Object.keys(resultContinuation).length) {
       resultHost.insertAdjacentHTML("beforeend", '<div class="online-load-more"><button class="button" type="button" data-online-more>Find more downloadable results</button><small>Only entries with verified downloadable Atari media are added.</small></div>');
       resultHost.querySelector("[data-online-more]").onclick = event => runSearch(null, true, event.currentTarget);
@@ -4830,9 +4842,13 @@ async function newImageFromFileMenu(index, initialFormat) {
 function showCreateImageModal(preferredIndex = null, options = {}) {
   const firstEmpty = panes.findIndex(pane => !pane.image);
   const defaultTarget = preferredIndex ?? (firstEmpty < 0 ? 0 : firstEmpty);
-  const currentProfile = panes[defaultTarget]?.image?.hardwareProfile || {};
-  const currentMachine = `${currentProfile.machine || ""} ${panes[defaultTarget]?.image?.targetHardware || ""}`.toLowerCase();
-  const kickfsHardwareDefault = currentMachine.match(/a500|a2000/) ? "a500-ofs" : currentMachine.match(/a600|a1200|a3000|a4000/) ? "a1200-ffs" : "auto";
+  const floppyOptions = FLOPPY_GEOMETRIES.map(geometry =>
+    `<option value="${geometry.value}">${geometry.label} ${geometry.singleSided ? "single sided" : "double sided"}${geometry.value === "hd-1440k" ? " · high density" : ""}</option>`).join("");
+  const gotekOptions = FLOPPY_GEOMETRIES
+    .filter(geometry => geometry.hfe)
+    .map(geometry => ({ value: geometry.hfe, label: geometry.label }))
+    .filter((entry, position, all) => all.findIndex(item => item.value === entry.value) === position)
+    .map(entry => `<option value="${entry.value}">HFE · ${entry.label} floppy</option>`).join("");
   showModal(`
     <h2>Create a blank image</h2>
     <p>The new image opens as an editable working copy and can be downloaded when ready.</p>
@@ -4840,63 +4856,42 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
       ${panes.map((_pane, index) => `<option value="${index}" ${index === defaultTarget ? "selected" : ""}>${esc(paneLabel(index))}</option>`).join("")}
     </select><small>An empty pane is preferred. Replacing an edited pane requires confirmation.</small></div>
     <div class="field"><label>Format</label><select name="format">
-      <optgroup label="Floppy · 880 KiB DS/DD">
-        <option value="adf">OFS ADF · DOS\\0 · Kickstart 1.x</option>
-        <option value="adf-intl">OFS International ADF · DOS\\2</option>
-        <option value="adf-dc">OFS Directory Cache ADF · DOS\\4</option>
-        <option value="ffs">FFS ADF · DOS\\1</option>
-        <option value="ffs-intl" selected>FFS International ADF · DOS\\3 · Kickstart 3.x</option>
-        <option value="ffs-dc">FFS Directory Cache ADF · DOS\\5</option>
-      </optgroup>
-      <optgroup label="Floppy · 1760 KiB high density · A3000/A4000">
-        <option value="adf-hd">OFS International HD ADF</option>
-        <option value="ffs-hd">FFS International HD ADF</option>
-        <option value="ffs-hd-dc">FFS Directory Cache HD ADF</option>
+      <optgroup label="Floppy">
+        ${floppyOptions}
       </optgroup>
       <optgroup label="Gotek and HxC">
-        <option value="hfe-adf">HFE · OFS DS/DD floppy</option>
-        <option value="hfe-ffs">HFE · FFS DS/DD floppy</option>
-        <option value="hfe-ffs-intl">HFE · FFS International floppy</option>
-        <option value="hfe-adf-hd">HFE · OFS high-density floppy</option>
-        <option value="hfe-ffs-hd">HFE · FFS high-density floppy</option>
+        ${gotekOptions}
       </optgroup>
       <optgroup label="Hard drive">
-        <option value="hardfile">UAE hardfile · HDA + GEO sidecar</option>
-        <option value="ffs-hard">Partitioned drive · HDF with RDB</option>
-        <option value="ffs-physical">Raw physical drive image · RAW</option>
+        <option value="hd">Hard drive · AHDI or MBR partitions</option>
+        <option value="volume">Bare volume · one FAT16 partition, no table</option>
       </optgroup>
       <optgroup label="ROM">
         <option value="rom">Blank ROM image · banked or custom</option>
-        <option value="kickfs">Expansion ROM with a resident tag · 256 KiB to 1 MiB</option>
+        <option value="cartridge">Cartridge · 128 KiB with a header</option>
       </optgroup>
     </select></div>
-    <div class="field"><label>Volume name</label><input name="title" maxlength="30" value="Empty" required><small data-title-help></small></div>
-    <div class="field"><label>Image size</label><input name="capacity" value="880 KiB" readonly></div>
-    <div class="field"><label>Target hardware</label><select name="targetHardware">
-      <option value="auto">Auto / inspect only</option>
-      <option value="hardfile">UAE hardfile · HDA + GEO sidecar</option>
-      <option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option>
-      <option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option>
-      <option value="tos">Atari 3000 / 4000 · TOS hard drive</option>
-    </select><small data-hardware-help></small></div>
+    <div class="field"><label>Volume label</label><input name="title" maxlength="11" value="EMPTY" required><small data-title-help></small></div>
+    <div class="field"><label>Image size</label><input name="capacity" value="720K" readonly></div>
+    <label class="check-field" data-bootable-field><input type="checkbox" name="bootable" value="yes"> Write a boot sector this machine can start from</label>
+    <div class="hard-drive-create-options" hidden>
+      <div class="field"><label>Partitions</label><input name="hdPartitions" type="number" min="1" max="12" value="2"><small>Each becomes a drive letter, starting at C:.</small></div>
+      <div class="field"><label>Partition scheme</label><select name="hdScheme">
+        <option value="ahdi">AHDI · the table TOS and every hard-disk driver reads</option>
+        <option value="mbr">MBR · read by HDDRIVER and by a PC card reader</option>
+      </select></div>
+    </div>
     <div class="rom-create-options" hidden>
-      <div class="field"><label>ROM family</label><select name="romPlatform"><option value="kickstart">Kickstart · A500 to A4000</option><option value="cartridge">Cartridge · CD32 / CDTV extended ROM</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>
-      <div class="field"><label>Total image size in bytes</label><input name="romTotalSize" type="number" min="256" max="67108864" step="256" value="524288" required></div>
-      <div class="field"><label>Bank size in bytes</label><input name="romBankSize" type="number" min="256" max="67108864" step="256" value="262144" required><small>Use 262,144 for a Kickstart 1.x ROM and 524,288 for Kickstart 2.0 and later. A pair of 27C400 EPROMs is one 512 KiB bank split across two chips.</small></div>
-      <div class="field"><label>Initial contents</label><select name="romTemplate"><option value="blank">Erased bytes only</option><option value="kickstart">ROM header, resident tag and checksum skeleton</option></select></div>
+      <div class="field"><label>ROM family</label><select name="romPlatform"><option value="tos">TOS ROM · 192 KiB, 256 KiB or 512 KiB</option><option value="cartridge">Cartridge · 128 KiB at &amp;FA0000</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>
+      <div class="field"><label>Total image size in bytes</label><input name="romTotalSize" type="number" min="256" max="67108864" step="256" value="262144" required></div>
+      <div class="field"><label>Bank size in bytes</label><input name="romBankSize" type="number" min="256" max="67108864" step="256" value="262144" required><small>262,144 is a 256 KiB TOS 1.04 or 2.06 ROM and 524,288 a 512 KiB TOS 3.06. A 128 KiB cartridge is 131,072.</small></div>
+      <div class="field"><label>Initial contents</label><select name="romTemplate"><option value="blank">Erased bytes only</option><option value="tos">ROM header and checksum skeleton</option></select></div>
       <div class="field"><label>Erased byte</label><select name="romEraseByte"><option value="255">&FF</option><option value="0">&00</option></select></div>
       <div class="field"><label>Byte layout</label><select name="romLayout"><option value="linear">Linear / banked</option><option value="byte-interleaved-2">Two byte-wide chips</option><option value="byte-interleaved-4">Four byte-wide chips</option></select></div>
     </div>
-    <div class="kickfs-create-options" hidden>
-      <div class="field"><label>Target platform</label><select name="kickfsPlatform">
-        <option value="auto" ${kickfsHardwareDefault === "auto" ? "selected" : ""}>Choose automatically / portable expansion ROM</option>
-        <option value="a500-ofs" ${kickfsHardwareDefault === "a500-ofs" ? "selected" : ""}>Atari 500 / 2000 · Kickstart 1.3</option>
-        <option value="a1200-ffs" ${kickfsHardwareDefault === "a1200-ffs" ? "selected" : ""}>Atari 600 / 1200 · Kickstart 3.x</option>
-      </select><small>${kickfsHardwareDefault === "auto" ? "No workbench machine could be inferred, so choose the intended platform." : "Preselected from the workbench profile. You can change it here."}</small></div>
-      <div class="field"><label>ROM capacity</label><select name="kickfsGeometry"><option value="256k" selected>256 KiB · Kickstart 1.x sized</option><option value="512k">512 KiB · Kickstart 2.0 and later</option><option value="1m">1 MiB · extended ROM</option></select></div>
-      <div class="field"><label>ROM version word</label><input name="kickfsVersion" type="number" min="0" max="65535" value="40" required></div>
-      <div class="field"><label>Resident identification string</label><input name="kickfsCopyright" maxlength="120" value="forge.library 1.0 (${new Date().getFullYear()})" required></div>
-      <div class="help-note">Creates a valid ROM image around one <code>&amp;4AFC</code> resident tag: the size header, a jump to the entry point, the module name and identification string, the declared size and the ROM checksum. The ROM scan on a real machine will find the module. It does not create a bootable Kickstart.</div>
+    <div class="cartridge-create-options" hidden>
+      <div class="field"><label>Cartridge application name</label><input name="cartridgeApplication" maxlength="24" value="NEW CARTRIDGE" required></div>
+      <div class="help-note">Creates a valid 128 KiB cartridge around one <code>&amp;ABCDEF42</code> application header: the magic longword, the entry point, the flags and the name TOS shows. The ROM scan on a real machine will find the application. It does not create a bootable operating system.</div>
     </div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="create">Create image</button></div>`,
   async form => {
@@ -4907,24 +4902,29 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
       `${paneLabel(targetIndex)} has changes that have not been downloaded.`,
       { confirmLabel: "Replace it", danger: true, note: "Its recoverable session is kept, so it can be reopened from Recover previous session." },
     )) return false;
+    const chosenFormat = form.get("format");
     const data = await api("/api/images/create", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        format: form.get("format"),
-        title: form.get("title") || "BLANK",
+        format: chosenFormat,
+        title: form.get("title") || "EMPTY",
         capacity: form.get("capacity"),
-        targetHardware: form.get("format") === "kickfs" ? form.get("kickfsPlatform") : (modalContent.querySelector('select[name="targetHardware"]').value || "auto"),
-        rom: form.get("format") === "rom" ? {
+        bootable: form.get("bootable") === "yes",
+        targetHardware: createTargetMedia(chosenFormat),
+        hardDisk: chosenFormat === "hd" ? {
+          partitions: Number(form.get("hdPartitions")),
+          scheme: form.get("hdScheme"),
+        } : undefined,
+        rom: chosenFormat === "rom" ? {
           platform: form.get("romPlatform"),
           totalSize: Number(form.get("romTotalSize")),
           bankSize: Number(form.get("romBankSize")),
           template: form.get("romTemplate"),
           eraseByte: Number(form.get("romEraseByte")),
           layout: form.get("romLayout"),
-        } : form.get("format") === "kickfs" ? {
-          geometry: form.get("kickfsGeometry"),
-          version: Number(form.get("kickfsVersion")),
-          copyright: form.get("kickfsCopyright"),
+        } : chosenFormat === "cartridge" ? {
+          platform: "cartridge",
+          application: form.get("cartridgeApplication"),
         } : undefined,
       })
     });
@@ -4938,39 +4938,26 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
   const title = modalContent.querySelector('input[name="title"]');
   const titleLabel = title.closest(".field").querySelector("label");
   const titleHelp = modalContent.querySelector("[data-title-help]");
-  const targetHardware = modalContent.querySelector('select[name="targetHardware"]');
-  const hardwareHelp = modalContent.querySelector("[data-hardware-help]");
-  // Every Atari floppy is the same disk: 880 KiB DS/DD, or 1760 KiB on the
-  // high-density drives of the A3000 and A4000, whichever DOS type formatted
-  // it. Only the boot block differs, so the size never changes with the
-  // filing system.
-  const doubleDensity = { size: "880 KiB", hardware: "auto", chooseHardware: true };
-  const highDensity = { size: "1.76 MiB", hardware: "auto", chooseHardware: true };
+  const bootableField = modalContent.querySelector("[data-bootable-field]");
+  const bootable = modalContent.querySelector('input[name="bootable"]');
+  // Every floppy format is FAT12 on a fixed geometry, so the size follows the
+  // format and nothing else. A hard drive and a bare volume are sized by the
+  // operator; a ROM is sized in its own section.
+  const floppyProfiles = Object.fromEntries(FLOPPY_GEOMETRIES.flatMap(geometry => {
+    const entry = { size: geometry.label, media: "floppy", bootable: true, hasTitle: true };
+    return geometry.hfe ? [[geometry.value, entry], [geometry.hfe, entry]] : [[geometry.value, entry]];
+  }));
   const profiles = {
-    adf: doubleDensity,
-    "adf-intl": doubleDensity,
-    "adf-dc": doubleDensity,
-    ffs: doubleDensity,
-    "ffs-intl": doubleDensity,
-    "ffs-dc": doubleDensity,
-    "adf-hd": highDensity,
-    "ffs-hd": highDensity,
-    "ffs-hd-dc": highDensity,
-    "hfe-adf": doubleDensity,
-    "hfe-ffs": doubleDensity,
-    "hfe-ffs-intl": doubleDensity,
-    "hfe-adf-hd": highDensity,
-    "hfe-ffs-hd": highDensity,
-    hardfile: { size: null, defaultCapacity: "20MB", hardware: "hardfile" },
-    "ffs-hard": { size: null, defaultCapacity: "20MB", hardware: "tos" },
-    "ffs-physical": { size: null, defaultCapacity: "20MB", hardware: "tos" },
-    hdf: { size: "440 MiB (511 × 880 KiB)", hardware: null, hasTitle: false },
-    rom: { size: "Set below", hardware: null, chooseHardware: false },
-    kickfs: { size: "Set below", hardware: null, chooseHardware: false }
+    ...floppyProfiles,
+    hd: { size: null, defaultCapacity: "256MB", media: "hd", bootable: true, hasTitle: true },
+    volume: { size: null, defaultCapacity: "32MB", media: "volume", bootable: false, hasTitle: true },
+    rom: { size: "Set below", media: "tos", bootable: false, hasTitle: true },
+    cartridge: { size: "128K", media: "tos", bootable: false, hasTitle: true },
   };
   // A format the client does not know about is still openable: fall back to a
-  // plain double-density floppy rather than throwing while building the dialog.
-  const profileFor = value => profiles[value] || doubleDensity;
+  // plain 720K double-sided floppy rather than throwing while building the
+  // dialog.
+  const profileFor = value => profiles[value] || floppyProfiles["ds-720k"];
   const capacities = new Map();
   let diskTitle = title.value;
   let previousFormat = format.value;
@@ -4983,70 +4970,92 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
     capacity.readOnly = Boolean(profile.size);
     capacity.value = profile.size || capacities.get(format.value) || profile.defaultCapacity;
     capacity.placeholder = profile.size ? "" : profile.defaultCapacity;
-    capacityLabel.textContent = profile.size ? "Image size" : "Hard disk capacity (HDA/HDF/RAW)";
+    capacityLabel.textContent = profile.size ? "Image size" : "Drive capacity";
 
     const hasTitle = profile.hasTitle !== false;
     title.disabled = !hasTitle;
     title.required = hasTitle;
-    title.value = hasTitle ? diskTitle : "Not applicable to an HDF bank";
-    titleLabel.textContent = ["rom", "kickfs"].includes(format.value)
+    title.value = hasTitle ? diskTitle : "";
+    titleLabel.textContent = ["rom", "cartridge"].includes(format.value)
       ? "ROM filename and title"
-      : ["hardfile", "ffs-hard", "ffs-physical"].includes(format.value)
-          ? "Volume title"
-          : "Disk title";
-    titleHelp.textContent = "Stored in the new filesystem.";
+      : "Volume label";
+    titleHelp.textContent = "Stored in the boot sector as the volume label. A GEMDOS label holds eleven characters.";
+    title.maxLength = ["rom", "cartridge"].includes(format.value) ? 24 : 11;
 
-    targetHardware.value = profile.hardware || "auto";
-    targetHardware.disabled = !profile.chooseHardware;
-    hardwareHelp.textContent = profile.chooseHardware
-      ? "Choose the machine that will use this normal FFS floppy, or leave Auto for a neutral image."
-      : profile.hardware === "hardfile"
-        ? "Fixed because this format is a Hardfile HDA/GEO pair."
-        : profile.hardware === "tos"
-          ? "Fixed because this is an Atari 4000 / TOS hard-drive format."
-          : "Not applicable to this format.";
+    bootableField.hidden = !profile.bootable;
+    if (!profile.bootable) bootable.checked = false;
+    modalContent.querySelector(".hard-drive-create-options").hidden = format.value !== "hd";
     modalContent.querySelector(".rom-create-options").hidden = format.value !== "rom";
-    modalContent.querySelector(".kickfs-create-options").hidden = format.value !== "kickfs";
-    if (format.value === "rom") {
+    modalContent.querySelector(".cartridge-create-options").hidden = format.value !== "cartridge";
+    if (["rom", "cartridge"].includes(format.value)) {
       capacityLabel.textContent = "ROM capacity";
-      title.maxLength = 24;
       titleHelp.textContent = "Used as the filename and, for the header template, its initial ROM title.";
-    } else if (format.value === "kickfs") {
-      capacityLabel.textContent = "ROM capacity";
-      capacity.value = modalContent.querySelector('[name="kickfsGeometry"]').value === "8k" ? "8 KiB" : "16 KiB";
-      title.maxLength = 8;
-      titleHelp.textContent = "Stored as both the Kickstart ROM catalogue title and the .rom filename.";
-    } else {
-      title.maxLength = 12;
     }
     previousFormat = format.value;
   };
   format.addEventListener("change", updateFormatControls);
-  modalContent.querySelector('[name="kickfsGeometry"]').addEventListener("change", updateFormatControls);
   updateFormatControls();
+}
+
+//: What a newly created image is meant to be, so the service validates it the
+//: same way it would validate one that had been opened from a file.
+function createTargetMedia(format) {
+  if (format === "hd") return "hd";
+  if (format === "volume") return "volume";
+  if (["rom", "cartridge"].includes(format)) return "tos";
+  return "floppy";
 }
 
 const PROFILE_STORAGE_KEY = "atari-file-forge-hardware-profiles";
 const RECIPE_STORAGE_KEY = "atari-file-forge-import-recipes";
 
+//: Twelve machines a person is likely to be working towards, built from the
+//: add-on identifiers in app/hardware_profiles.py. Each one is a real
+//: combination: the TOS release the machine shipped with or was upgraded to,
+//: the memory it plausibly holds, the drive and storage fitted to it and the
+//: driver that makes that storage bootable.
 const BUILTIN_PROFILES = [
-  { name: "Atari 500 · Kickstart 1.3, one drive", machine: "a500", addons: ["kick13", "df0-internal"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + 512 KiB trapdoor", machine: "a500", addons: ["kick13", "df0-internal", "chip-512"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 600 + IDE CompactFlash", machine: "a600", addons: ["kick204", "df0-internal", "ide-internal", "cf-adapter", "chip-1024"], catalogMachine: "a600", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 1200 + Fast RAM + WHDLoad", machine: "a1200", addons: ["kick31", "df0-internal", "ide-internal", "chip-2048", "fast-ram", "whdload"], catalogMachine: "a1200", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 4000/040 · TOS 3.1 hard drive", machine: "a4000", addons: ["kick31", "df0-hd", "ide-internal", "chip-2048", "fast-ram", "acc-68040", "whdload"], catalogMachine: "a4000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 2000 + A2091 SCSI", machine: "a2000", addons: ["kick204", "df0-internal", "a2091", "fast-ram", "chip-1024"], catalogMachine: "a2000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 3000 · internal SCSI", machine: "a3000", addons: ["kick31", "scsi-internal", "chip-2048", "fast-ram", "acc-68030"], catalogMachine: "a3000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari CD32", machine: "cd32", addons: ["kick31", "chip-2048"], catalogMachine: "cd32", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + Gotek", machine: "a500", addons: ["kick13", "gotek", "chip-512"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + 68020 accelerator", machine: "a500", addons: ["kick31", "df0-internal", "chip-512", "acc-68020", "fast-ram", "a590", "whdload"], catalogMachine: "a500", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + PiStorm", machine: "a500", addons: ["kick31", "df0-internal", "chip-512", "pistorm"], catalogMachine: "a500", filingSystem: "ffs-hd", targetHardware: "tos", handlerBuild: "rdb", page: "8192", emulator: "fs-uae-pistorm", debugger: "fs-uae-debug" },
-  { name: "Atari 1200 + PiStorm32", machine: "a1200", addons: ["kick31", "df0-internal", "chip-2048", "pistorm32", "pistorm-rtg"], catalogMachine: "a1200", filingSystem: "ffs-hd", targetHardware: "tos", handlerBuild: "rdb", page: "8192", emulator: "fs-uae-pistorm", debugger: "fs-uae-debug" },
+  { name: "520ST · TOS 1.04, single-sided drive", machine: "st", addons: ["tos-104", "ram-512k", "drive-a-ss", "monitor-colour", "tv-modulator", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "1040ST · TOS 1.04, two drives", machine: "st", addons: ["tos-104", "ram-1m", "drive-a-ds", "drive-b-external", "monitor-mono", "printer", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST 2 · blitter and an ACSI Megafile", machine: "megast", addons: ["tos-104", "ram-2m", "drive-a-ds", "acsi-megafile", "driver-ahdi", "blitter", "monitor-mono", "midi", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "ahdi", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "520STE · TOS 1.62, colour monitor", machine: "ste", addons: ["tos-162", "ram-512k", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "1040STE · TOS 1.62, 4 MiB", machine: "ste", addons: ["tos-162", "ram-4m", "drive-a-ds", "drive-b-external", "monitor-colour", "midi", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega STE · TOS 2.06 with a hard-disk driver", machine: "megaste", addons: ["tos-206", "ram-4m", "hd-floppy", "scsi-internal", "driver-hddriver", "monitor-mono", "midi", "desktop-inf"], catalogMachine: "megaste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "TT030 · TT RAM and internal SCSI", machine: "tt030", addons: ["tos-306", "ram-2m", "tt-ram", "hd-floppy", "scsi-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "tt030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Falcon030 · internal IDE and VGA", machine: "falcon030", addons: ["tos-4xx", "ram-14m", "hd-floppy", "ide-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "midi", "desktop-inf"], catalogMachine: "falcon030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "ST with a Gotek", machine: "st", addons: ["tos-104", "ram-1m", "gotek", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "ST with EmuTOS and ACSI2STM", machine: "st", addons: ["tos-emutos", "ram-4m", "drive-a-ds", "acsi2stm", "driver-emutos-builtin", "monitor-colour", "gemdos-hd-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "STE with a 68030 accelerator", machine: "ste", addons: ["tos-206", "ram-4m", "drive-a-ds", "ide-adapter", "cf-adapter", "driver-hddriver", "acc-68030-pak", "fpu-68881", "monitor-vga", "desktop-inf"], catalogMachine: "ste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST · UltraSatan and the ICD driver", machine: "megast", addons: ["tos-102", "ram-2m", "drive-a-ds", "ultrasatan", "driver-icd", "blitter", "monitor-mono", "cartridge-port", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
 ];
 
-const WORKBENCH_FILE_SYSTEMS = [["ofs", "OFS · DOS\\0"], ["ofs-intl", "OFS International · DOS\\2"], ["ffs", "FFS · DOS\\1"], ["ffs-intl", "FFS International · DOS\\3"], ["ffs-dc", "FFS Directory Cache · DOS\\5"], ["ffs-hd", "FFS on a hard drive · RDB partitions"], ["dms", "DiskMasher archive"]];
-const WORKBENCH_EMULATORS = [["auto", "Automatic for machine"], ["fs-uae", "FS-UAE · every model, floppy and hard drive"], ["fs-uae-pistorm", "FS-UAE · PiStorm whole-drive integration"]];
-const WORKBENCH_DEBUGGERS = [["auto", "Automatic for emulator"], ["fs-uae-debug", "FS-UAE console debugger"]];
+//: A GEMDOS volume is FAT12 on a floppy and FAT16 on a hard drive, and a
+//: partitioned drive carries a table as well. There is nothing else to
+//: choose between.
+const WORKBENCH_FILE_SYSTEMS = [
+  ["fat12", "FAT12 · floppy"],
+  ["fat16", "FAT16 · hard-drive partition"],
+  ["fat16-ahdi", "FAT16 on a drive with an AHDI table"],
+  ["fat16-mbr", "FAT16 on a drive with an MBR table"],
+];
+//: The memory a TOS machine can hold, from a 520ST through to a fully
+//: populated Falcon.
+const WORKBENCH_MEMORY = [
+  ["512K", "512 KiB"], ["1M", "1 MiB"], ["2M", "2 MiB"],
+  ["2.5M", "2.5 MiB"], ["4M", "4 MiB"], ["14M", "14 MiB"],
+];
+//: Which driver a prepared drive is expected to boot through, so a profile
+//: can say what the finished drive should carry.
+const DRIVE_DRIVER_BUILDS = [
+  ["none", "Not used · floppy only"],
+  ["emutos", "None · EmuTOS reads the drive itself"],
+  ["ahdi", "Atari AHDI"],
+  ["hddriver", "HDDRIVER"],
+  ["pp", "PP driver"],
+  ["icd", "ICD Pro driver"],
+];
+const WORKBENCH_EMULATORS = [["auto", "Automatic for machine"], ["hatari", "Hatari. Every ST, STE, TT and Falcon, floppy, hard drive and folder"]];
+const WORKBENCH_DEBUGGERS = [["auto", "Automatic for emulator"], ["hatari-debug", "Hatari debugger"]];
 let cachedHardwareCatalogue = null;
 
 async function hardwareProfileCatalogue() {
@@ -5092,17 +5101,17 @@ function saveCollection(key, value) {
 function storedHardwareProfiles() {
   const saved = storedCollection(PROFILE_STORAGE_KEY, []);
   const schemaKey = `${PROFILE_STORAGE_KEY}-schema`;
-  if (persistentStorage.getItem(schemaKey) === "5" && saved.length) return saved;
+  if (persistentStorage.getItem(schemaKey) === "6" && saved.length) return saved;
   // Profile names shipped by earlier releases, replaced by the machine list
   // the hardware catalogue now supplies.
-  const superseded = new Set(["Atari 500 with FastFileSystem", "Atari 500/1200 Hardfile", "Atari 4000 / TOS"]);
+  const superseded = new Set(saved.filter(profile => !ONLINE_MACHINES.some(([value]) => value === profile.machine)).map(profile => profile.name));
   const builtInNames = new Set(BUILTIN_PROFILES.map(profile => profile.name));
   const migrated = [
     ...BUILTIN_PROFILES.map(profile => ({ ...profile, addons: [...(profile.addons || [])] })),
     ...saved.filter(profile => !builtInNames.has(profile.name) && !superseded.has(profile.name)),
   ];
   saveCollection(PROFILE_STORAGE_KEY, migrated);
-  persistentStorage.setItem(schemaKey, "5");
+  persistentStorage.setItem(schemaKey, "6");
   return migrated;
 }
 
@@ -6022,11 +6031,13 @@ function editorProperties(root, pane, path, report) {
     shade.setAttribute("role", "dialog");
     shade.setAttribute("aria-modal", "true");
     shade.setAttribute("aria-labelledby", "editor-properties-title");
-    const locked = Boolean(Number(metadata.protection || 0) & 0x04);
-    shade.innerHTML = `<form class="editor-choice-card editor-properties-card"><h2 id="editor-properties-title">File properties</h2><p>Update the file header without changing the file bytes.</p>
-      <div class="field-grid two"><div class="field"><label>Protection</label><input name="protection" value="${esc(formatProtection(metadata.protection || 0))}" maxlength="8"><small>The eight letters <code>List</code> prints.</small></div><div class="field"><label>Comment</label><input name="comment" value="${esc(metadata.comment || "")}" maxlength="79"></div></div>
-      <div class="field"><label>Workbench icon type</label><input name="filetype" value="${esc(metadata.filetype || "")}" placeholder="Tool, Project or 3"></div>
-      <label class="check-field"><input type="checkbox" name="writable" ${locked ? "" : "checked"}> Writable</label>
+    const flags = attributeFlags(metadata.attributes ?? metadata.attr ?? 0);
+    const flag = (letter, label, hint) => `<label class="check"><input type="checkbox" name="bit-${letter}" ${flags[letter] ? "checked" : ""}> ${label}<small>${hint}</small></label>`;
+    const stamp = String(metadata.datestamp || "").slice(0, 19).replace(" ", "T");
+    shade.innerHTML = `<form class="editor-choice-card editor-properties-card"><h2 id="editor-properties-title">File properties</h2><p>Update the directory entry without changing the file bytes.</p>
+      <div class="field-grid two">${flag("r", "Read-only", "r · $01")}${flag("h", "Hidden", "h · $02")}${flag("s", "System", "s · $04")}${flag("v", "Volume label", "v · $08")}${flag("d", "Directory", "d · $10")}${flag("a", "Archive", "a · $20")}</div>
+      <div class="field"><label>Datestamp</label><input name="datestamp" type="datetime-local" step="2" value="${esc(stamp)}"><small>TOS records the time to the nearest two seconds.</small></div>
+      <div class="field"><label>Desktop icon type</label><input name="filetype" value="${esc(metadata.filetype || "")}" placeholder="GEM, TOS or TTP"></div>
       <dl class="editor-property-summary"><dt>Size</dt><dd>${Number(report.size || 0).toLocaleString()} bytes</dd><dt>SHA-256</dt><dd><code>${esc(report.sha256)}</code></dd></dl>
       <div class="modal-actions"><button type="button" class="button ghost" data-properties-cancel>Cancel</button><button type="submit" class="button primary">Apply properties</button></div></form>`;
     const finish = value => { shade.remove(); resolve(value); };
@@ -6038,10 +6049,17 @@ function editorProperties(root, pane, path, report) {
     shade.querySelector("form").onsubmit = event => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
-      finish({ protection: form.get("protection"), comment: form.get("comment") || "", filetype: form.get("filetype") || "", writable: form.has("writable") });
+      finish({
+        attributes: attributeHex({
+          r: form.has("bit-r"), h: form.has("bit-h"), s: form.has("bit-s"),
+          v: form.has("bit-v"), d: form.has("bit-d"), a: form.has("bit-a"),
+        }),
+        datestamp: form.get("datestamp") || "",
+        filetype: form.get("filetype") || "",
+      });
     };
     modal.append(shade);
-    shade.querySelector("[name=protection]").focus();
+    shade.querySelector("[name=bit-r]").focus();
   });
 }
 
@@ -6229,7 +6247,7 @@ function paneEmulatorTarget(index) {
   const pane = panes[index];
   // A hard drive is attached whole, exactly as it would be on the machine;
   // anything else is handed over as the image the pane has open.
-  return pane.image.kind === "hdf"
+  return pane.image.kind === "hd"
     ? { partition: null, label: `complete hard drive · ${pane.image.name}`, modePrefix: "whole-drive" }
     : { partition: pane.partition, label: pane.image.name, modePrefix: "parent" };
 }
@@ -7912,7 +7930,7 @@ async function renderWorkbench(section = "profiles") {
   const recipes = storedCollection(RECIPE_STORAGE_KEY, []);
   const imageOptions = panes.map((pane, index) => pane.image ? `<option value="${index}">${esc(paneLabel(index))}</option>` : "").join("");
   showModal(`<div class="workbench-dialog"><header><div><small>ATARI FILE FORGE</small><h2>Workbench</h2></div><select name="workbenchSection"><option value="profiles" ${section === "profiles" ? "selected" : ""}>Hardware profiles</option><option value="recipes" ${section === "recipes" ? "selected" : ""}>Import recipes</option><option value="project" ${section === "project" ? "selected" : ""}>Portable project</option></select></header>
-    ${section === "profiles" ? `<div class="workbench-profile-picker field"><label>Hardware profile</label><select name="profileSelect">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)}</option>`).join("")}</select><small>Start with a common system, then build the exact target from compatible additions.</small></div><div class="workbench-grid workbench-profile-grid"><section><div class="field"><label>Profile name</label><input name="profileName" value="${esc(profiles[0]?.name || "My Atari setup")}"></div><div class="field"><label>Base machine</label><select name="profileMachine">${hardware.machines.map(machine => `<option value="${esc(machine.id)}">${esc(machine.label)} · ${esc(machine.baseRam)} · ${esc(machine.processor)}</option>`).join("")}</select></div><div class="field"><label>Online Library filter</label><select name="profileCatalogMachine">${ONLINE_MACHINES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Filing system</label><select name="profileFs">${WORKBENCH_FILE_SYSTEMS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Target validation</label><select name="profileTarget"><option value="auto">Automatic</option><option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option><option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option><option value="hardfile">UAE hardfile · HDA + GEO</option><option value="tos">Atari 3000 / 4000 · TOS hard drive</option></select></div><div class="field"><label>FastFileSystem build</label><select name="profileHandler"><option value="none">Not used</option><option value="rom">FastFileSystem in Kickstart</option><option value="rdb">FastFileSystem loaded from the Rigid Disk Block</option></select></div><div class="field"><label>Expected stack size</label><input name="profilePage" value="${esc(profiles[0]?.page || "8192")}"></div><section class="workbench-addon-builder"><header><div><small>COMPATIBLE HARDWARE</small><h3>Add-ons</h3></div><span data-addon-summary></span></header><div class="hardware-addon-groups" data-hardware-addons></div></section><details class="workbench-emulator-settings" open><summary>Emulator and debugger integration</summary><div class="help-note"><strong>Managed tools:</strong> Atari File Forge translates supported additions into emulator models, writable banks, CPU accelerators, controller settings and expansion cards. Items marked Validation only still affect compatibility analysis but are not falsely claimed as emulated.</div><div class="workbench-emulator-controls"><div class="field"><label>Emulator</label><select name="profileEmulator">${WORKBENCH_EMULATORS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Debugger</label><select name="profileDebugger">${WORKBENCH_DEBUGGERS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Emulated RAM</label><select name="profileEmulatorRam"><option value="auto">From base machine and add-ons</option><option value="32K">32 KiB</option><option value="64K">64 KiB</option><option value="128K">128 KiB</option><option value="1M">1 MiB</option></select></div><div class="field"><label>Startup action</label><select name="profileEmulatorBoot"><option value="auto">Use image default</option><option value="boot">Boot from this image</option><option value="catalogue">Open catalogue only</option></select></div></div></details><div class="field"><label>Apply to open pane</label><select name="profilePane">${imageOptions || '<option value="">No open images</option>'}</select></div><div class="modal-actions"><button type="button" class="button" data-save-profile>Save profile</button><button type="button" class="button primary" data-apply-profile ${imageOptions ? "" : "disabled"}>Apply profile</button></div></section></div>` : section === "recipes" ? `<div class="workbench-grid"><aside>${recipes.map((recipe, index) => `<button type="button" data-recipe-index="${index}"><b>${esc(recipe.name)}</b><small>${esc(recipe.naming)} · ${recipe.addMenu ? "menu" : "off-menu"}</small></button>`).join("") || "<p>No saved recipes yet.</p>"}</aside><section><div class="field"><label>Recipe name</label><input name="recipeName" value="Collection import"></div><div class="field"><label>Directory naming</label><select name="recipeNaming"><option value="source">Use source titles</option><option value="generic">DISC-0000 sequence</option></select></div><div class="field"><label>Group prefix</label><input name="recipeGroup" maxlength="10" value="DISCS"></div><label class="check-field"><input type="checkbox" name="recipeOnline" checked> Use online metadata for ambiguous titles</label><label class="check-field"><input type="checkbox" name="recipeCompat" checked> Apply safe OFS to FFS compatibility rewrites</label><label class="check-field"><input type="checkbox" name="recipeMenu" checked> Offer imported titles to a menu</label><div class="modal-actions"><button type="button" class="button primary" data-save-recipe>Save recipe</button></div></section></div>` : `<div class="project-tools"><p>A project description preserves the pane layout, working session references, current paths, profiles and recipes. Image bytes remain in their private recoverable sessions and normal timestamped save ZIPs. Theme remains a browser preference.</p><div class="modal-actions"><button type="button" class="button" data-export-project>Export project JSON</button><label class="button primary">Import project JSON<input type="file" accept="application/json,.json" data-import-project hidden></label></div><hr><h3>Deterministic workflow</h3><p>Export the earliest retained pre-change checkpoint identity, a guarded patch containing every later filesystem change, and the exact hashes expected from a successful rebuild. Original image bytes are not included.</p><label class="field"><span>Completed image</span><select name="workflowPane">${imageOptions || '<option value="">No open images</option>'}</select></label><div class="help-note">The CLI verifies the base image, optional GEO companion, patch and final saved output. DMS and HFE workflows remain unavailable until their container-level reconstruction is provably lossless.</div><div class="modal-actions"><button type="button" class="button primary" data-export-workflow ${imageOptions ? "" : "disabled"}>Export workflow bundle</button></div></div>`}
+    ${section === "profiles" ? `<div class="workbench-profile-picker field"><label>Hardware profile</label><select name="profileSelect">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)}</option>`).join("")}</select><small>Start with a common system, then build the exact target from compatible additions.</small></div><div class="workbench-grid workbench-profile-grid"><section><div class="field"><label>Profile name</label><input name="profileName" value="${esc(profiles[0]?.name || "My Atari setup")}"></div><div class="field"><label>Base machine</label><select name="profileMachine">${hardware.machines.map(machine => `<option value="${esc(machine.id)}">${esc(machine.label)} · ${esc(machine.baseRam)} · ${esc(machine.processor)}</option>`).join("")}</select></div><div class="field"><label>Online Library filter</label><select name="profileCatalogMachine">${ONLINE_MACHINES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Filing system</label><select name="profileFs">${WORKBENCH_FILE_SYSTEMS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Target validation</label><select name="profileTarget">${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Hard-disk driver</label><select name="profileDriver">${DRIVE_DRIVER_BUILDS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Program flags</label><input name="profilePage" value="${esc(profiles[0]?.page || "0")}"><small>The <code>_p_flags</code> longword a program header on this machine is expected to carry.</small></div><section class="workbench-addon-builder"><header><div><small>COMPATIBLE HARDWARE</small><h3>Add-ons</h3></div><span data-addon-summary></span></header><div class="hardware-addon-groups" data-hardware-addons></div></section><details class="workbench-emulator-settings" open><summary>Emulator and debugger integration</summary><div class="help-note"><strong>Managed tools:</strong> Atari File Forge translates supported additions into Hatari machine types, memory sizes, floppy and hard-drive attachments, processor options and monitor modes. Items marked Validation only still affect compatibility analysis but are not falsely claimed as emulated.</div><div class="workbench-emulator-controls"><div class="field"><label>Emulator</label><select name="profileEmulator">${WORKBENCH_EMULATORS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Debugger</label><select name="profileDebugger">${WORKBENCH_DEBUGGERS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Emulated RAM</label><select name="profileEmulatorRam"><option value="auto">From base machine and add-ons</option>${WORKBENCH_MEMORY.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Startup action</label><select name="profileEmulatorBoot"><option value="auto">Use image default</option><option value="boot">Boot from this image</option><option value="catalogue">Open catalogue only</option></select></div></div></details><div class="field"><label>Apply to open pane</label><select name="profilePane">${imageOptions || '<option value="">No open images</option>'}</select></div><div class="modal-actions"><button type="button" class="button" data-save-profile>Save profile</button><button type="button" class="button primary" data-apply-profile ${imageOptions ? "" : "disabled"}>Apply profile</button></div></section></div>` : section === "recipes" ? `<div class="workbench-grid"><aside>${recipes.map((recipe, index) => `<button type="button" data-recipe-index="${index}"><b>${esc(recipe.name)}</b><small>${esc(recipe.naming)} · ${recipe.addMenu ? "menu" : "off-menu"}</small></button>`).join("") || "<p>No saved recipes yet.</p>"}</aside><section><div class="field"><label>Recipe name</label><input name="recipeName" value="Collection import"></div><div class="field"><label>Folder naming</label><select name="recipeNaming"><option value="source">Use source titles</option><option value="generic">DISK0000 sequence</option></select></div><div class="field"><label>Group prefix</label><input name="recipeGroup" maxlength="8" value="DISKS"></div><label class="check-field"><input type="checkbox" name="recipeOnline" checked> Use online metadata for ambiguous titles</label><label class="check-field"><input type="checkbox" name="recipeCompat" checked> Rewrite host names to GEMDOS 8.3 automatically</label><label class="check-field"><input type="checkbox" name="recipeMenu" checked> Offer imported titles to a menu</label><div class="modal-actions"><button type="button" class="button primary" data-save-recipe>Save recipe</button></div></section></div>` : `<div class="project-tools"><p>A project description preserves the pane layout, working session references, current paths, profiles and recipes. Image bytes remain in their private recoverable sessions and normal timestamped save ZIPs. Theme remains a browser preference.</p><div class="modal-actions"><button type="button" class="button" data-export-project>Export project JSON</button><label class="button primary">Import project JSON<input type="file" accept="application/json,.json" data-import-project hidden></label></div><hr><h3>Deterministic workflow</h3><p>Export the earliest retained pre-change checkpoint identity, a guarded patch containing every later filesystem change, and the exact hashes expected from a successful rebuild. Original image bytes are not included.</p><label class="field"><span>Completed image</span><select name="workflowPane">${imageOptions || '<option value="">No open images</option>'}</select></label><div class="help-note">The CLI verifies the base image, its optional <code>.geo</code> geometry sidecar, the patch and the final saved output. Flux workflows remain unavailable until their container-level reconstruction is provably lossless.</div><div class="modal-actions"><button type="button" class="button primary" data-export-workflow ${imageOptions ? "" : "disabled"}>Export workflow bundle</button></div></div>`}
     <div class="modal-actions"><button class="button primary" value="cancel">Close workbench</button></div></div>`, null, { replace: modal.open });
   modalContent.querySelector('[name="workbenchSection"]').onchange = event => renderWorkbench(event.target.value);
   if (section === "profiles") wireProfileWorkbench(profiles, activeProfile.index, hardware);
@@ -7924,15 +7942,14 @@ async function renderWorkbench(section = "profiles") {
 
 function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
   let selectedIndex = initialIndex;
+  const hardwareMachineIds = () => (catalogue?.machines || []).map(machine => machine.id);
   const machineDefaults = {
-    a500: { addons: ["kick13", "df0-internal"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "512K" },
-    a500plus: { addons: ["kick204", "df0-internal", "chip-1024"], catalogMachine: "a500plus", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "1M" },
-    a600: { addons: ["kick205", "df0-internal", "ide-internal", "chip-1024"], catalogMachine: "a600", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "1M" },
-    a1200: { addons: ["kick31", "df0-internal", "ide-internal", "chip-2048", "fast-ram"], catalogMachine: "a1200", filingSystem: "ffs-intl", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
-    a2000: { addons: ["kick204", "df0-internal", "a2091", "chip-1024", "fast-ram"], catalogMachine: "a2000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "1M" },
-    a3000: { addons: ["kick31", "scsi-internal", "chip-2048", "fast-ram", "acc-68030"], catalogMachine: "a3000", filingSystem: "ffs-intl", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
-    cd32: { addons: ["kick31", "chip-2048"], catalogMachine: "cd32", filingSystem: "ffs-intl", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
-    a4000: { addons: ["kick31", "chip-2048", "fast-ram", "acc-68040"], catalogMachine: "a4000", filingSystem: "ffs-intl", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
+    st: { addons: ["tos-104", "ram-1m", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "1M" },
+    megast: { addons: ["tos-104", "ram-2m", "drive-a-ds", "blitter", "monitor-mono", "auto-folder"], catalogMachine: "megast", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
+    ste: { addons: ["tos-162", "ram-1m", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "1M" },
+    megaste: { addons: ["tos-206", "ram-4m", "hd-floppy", "scsi-internal", "driver-hddriver", "monitor-mono", "desktop-inf"], catalogMachine: "megaste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "4M" },
+    tt030: { addons: ["tos-306", "ram-2m", "tt-ram", "hd-floppy", "scsi-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "tt030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
+    falcon030: { addons: ["tos-4xx", "ram-14m", "hd-floppy", "ide-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "falcon030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "14M" },
   };
   const selectedAddons = () => [
     ...[...modalContent.querySelectorAll('[name="profileAddon"]:checked')].map(input => input.value),
@@ -8020,22 +8037,15 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
       else removeInvalidDependants();
       refreshAddonDescriptions();
       const values = selectedAddons();
-      const machine = modalContent.querySelector('[name="profileMachine"]').value;
-      // A profile's filing system follows its Kickstart, because that is what
-      // decides which DOS types the machine can actually mount.
-      if (values.includes("kick13")) {
-        modalContent.querySelector('[name="profileFs"]').value = "ofs";
-        modalContent.querySelector('[name="profileTarget"]').value = "a500-ofs";
-      } else if (values.includes("kick204")) {
-        modalContent.querySelector('[name="profileFs"]').value = "ffs";
-        modalContent.querySelector('[name="profileTarget"]').value = "a1200-ffs";
-      } else if (values.includes("kick31") || values.includes("kick305")) {
-        modalContent.querySelector('[name="profileFs"]').value = "ffs-intl";
-        modalContent.querySelector('[name="profileTarget"]').value = "a1200-ffs";
+      // Storage decides the filing system: a floppy is FAT12 and a hard drive
+      // is FAT16, and a drive needs a driver unless EmuTOS is reading it.
+      const hasDrive = ["acsi-megafile", "acsi-third-party", "acsi2stm", "ultrasatan", "cosmosex", "ide-internal", "ide-adapter", "scsi-internal", "cf-adapter"].some(id => values.includes(id));
+      modalContent.querySelector('[name="profileFs"]').value = hasDrive ? "fat16" : "fat12";
+      modalContent.querySelector('[name="profileTarget"]').value = hasDrive ? "hd" : "floppy";
+      if (hasDrive && modalContent.querySelector('[name="profileDriver"]').value === "none") {
+        modalContent.querySelector('[name="profileDriver"]').value = values.includes("driver-emutos-builtin") ? "emutos" : "hddriver";
       }
-      if (["a590", "a2091", "a4091", "scsi-internal", "ide-internal", "cf-adapter"].some(id => values.includes(id))) {
-        modalContent.querySelector('[name="profileTarget"]').value = "tos";
-      }
+      if (!hasDrive) modalContent.querySelector('[name="profileDriver"]').value = "none";
       applyDependencies();
       updateAddonSummary();
     });
@@ -8048,22 +8058,25 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     wireAddonInputs();
   };
   const applyDependencies = profile => {
-    const usesHdf = modalContent.querySelector('[name="profileFs"]').value === "ffs-hd";
-    modalContent.querySelector('[name="profileHandler"]').disabled = !usesHdf;
-    if (!usesHdf) modalContent.querySelector('[name="profileHandler"]').value = "none";
+    // A driver is only meaningful once the profile has a hard drive to boot
+    // from; a floppy-only machine boots from TOS in ROM.
+    const usesDrive = modalContent.querySelector('[name="profileFs"]').value.startsWith("fat16");
+    modalContent.querySelector('[name="profileDriver"]').disabled = !usesDrive;
+    if (!usesDrive) modalContent.querySelector('[name="profileDriver"]').value = "none";
   };
   const fill = profile => {
-    const legacyMachine = { "Atari 500": "a500", "Atari 500+": "a500plus", "Atari 600": "a600", "Atari 1200": "a1200", "Atari 2000": "a2000", "Atari 3000": "a3000", "Atari 4000": "a4000", "Atari CD32": "cd32" };
-    const legacyFs = { "OFS": "ofs", "FFS": "ffs", "FastFileSystem": "ffs", "FFS + FastFileSystem": "ffs-hd", "GEMDOS": "ffs" };
+    // A profile saved by an older release can name a machine or a filing
+    // system this build no longer offers, so each field falls back to the
+    // default rather than leaving a select showing nothing.
+    const machines = new Set(hardwareMachineIds());
     modalContent.querySelector('[name="profileName"]').value = profile.name || "";
-    modalContent.querySelector('[name="profileMachine"]').value = legacyMachine[profile.machine] || profile.machine || "a500";
+    modalContent.querySelector('[name="profileMachine"]').value = machines.has(profile.machine) ? profile.machine : "st";
     modalContent.querySelector('[name="profileCatalogMachine"]').value = onlineMachineFromProfile(profile) || "all";
-    modalContent.querySelector('[name="profileFs"]').value = legacyFs[profile.filingSystem] || profile.filingSystem || "ofs";
-    modalContent.querySelector('[name="profileTarget"]').value = profile.targetHardware || "auto";
-    modalContent.querySelector('[name="profileHandler"]').value = profile.handlerBuild || "";
-    modalContent.querySelector('[name="profilePage"]').value = profile.page || "";
-    const legacyAddons = profile.addons || (profile.accelerated ? ["acc-68030"] : []);
-    renderAddons(legacyAddons);
+    modalContent.querySelector('[name="profileFs"]').value = WORKBENCH_FILE_SYSTEMS.some(([value]) => value === profile.filingSystem) ? profile.filingSystem : "fat12";
+    modalContent.querySelector('[name="profileTarget"]').value = TARGET_MEDIA.some(([value]) => value === profile.targetHardware) ? profile.targetHardware : "auto";
+    modalContent.querySelector('[name="profileDriver"]').value = DRIVE_DRIVER_BUILDS.some(([value]) => value === profile.driverBuild) ? profile.driverBuild : "none";
+    modalContent.querySelector('[name="profilePage"]').value = profile.page || "0";
+    renderAddons(profile.addons || []);
     modalContent.querySelector('[name="profileEmulator"]').value = profile.emulator || "auto";
     modalContent.querySelector('[name="profileDebugger"]').value = profile.debugger || "auto";
     const ram = modalContent.querySelector('[name="profileEmulatorRam"]');
@@ -8071,7 +8084,7 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     modalContent.querySelector('[name="profileEmulatorBoot"]').value = profile.emulatorBoot || "auto";
     applyDependencies(profile);
   };
-  const read = () => { const addons = selectedAddons(); return ({ name: modalContent.querySelector('[name="profileName"]').value.trim() || "My Atari setup", machine: modalContent.querySelector('[name="profileMachine"]').value, addons, catalogMachine: modalContent.querySelector('[name="profileCatalogMachine"]').value, filingSystem: modalContent.querySelector('[name="profileFs"]').value, targetHardware: modalContent.querySelector('[name="profileTarget"]').value, handlerBuild: modalContent.querySelector('[name="profileHandler"]').value, page: modalContent.querySelector('[name="profilePage"]').value.trim(), accelerated: addons.some(id => id.startsWith("acc-") || id === "pistorm"), menuType: "workbench", emulator: modalContent.querySelector('[name="profileEmulator"]').value, debugger: modalContent.querySelector('[name="profileDebugger"]').value, emulatorRam: modalContent.querySelector('[name="profileEmulatorRam"]').value, emulatorBoot: modalContent.querySelector('[name="profileEmulatorBoot"]').value }); };
+  const read = () => { const addons = selectedAddons(); return ({ name: modalContent.querySelector('[name="profileName"]').value.trim() || "My Atari setup", machine: modalContent.querySelector('[name="profileMachine"]').value, addons, catalogMachine: modalContent.querySelector('[name="profileCatalogMachine"]').value, filingSystem: modalContent.querySelector('[name="profileFs"]').value, targetHardware: modalContent.querySelector('[name="profileTarget"]').value, driverBuild: modalContent.querySelector('[name="profileDriver"]').value, page: modalContent.querySelector('[name="profilePage"]').value.trim(), accelerated: addons.some(id => id.startsWith("acc-")), menuType: "desktop", emulator: modalContent.querySelector('[name="profileEmulator"]').value, debugger: modalContent.querySelector('[name="profileDebugger"]').value, emulatorRam: modalContent.querySelector('[name="profileEmulatorRam"]').value, emulatorBoot: modalContent.querySelector('[name="profileEmulatorBoot"]').value }); };
   modalContent.querySelector('[name="profileSelect"]').onchange = event => {
     selectedIndex = Number(event.target.value);
     fill(profiles[selectedIndex]);
@@ -8083,7 +8096,7 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     modalContent.querySelector('[name="profileCatalogMachine"]').value = defaults.catalogMachine;
     modalContent.querySelector('[name="profileFs"]').value = defaults.filingSystem;
     modalContent.querySelector('[name="profileTarget"]').value = defaults.targetHardware;
-    modalContent.querySelector('[name="profileHandler"]').value = defaults.handlerBuild;
+    modalContent.querySelector('[name="profileDriver"]').value = defaults.driverBuild;
     modalContent.querySelector('[name="profilePage"]').value = defaults.page;
     modalContent.querySelector('[name="profileEmulator"]').value = defaults.emulator;
     modalContent.querySelector('[name="profileDebugger"]').value = defaults.debugger;
@@ -8121,14 +8134,14 @@ function wireRecipeWorkbench(recipes) {
   const fill = recipe => {
     modalContent.querySelector('[name="recipeName"]').value = recipe.name || "";
     modalContent.querySelector('[name="recipeNaming"]').value = recipe.naming || "source";
-    modalContent.querySelector('[name="recipeGroup"]').value = recipe.groupPrefix || "DISCS";
+    modalContent.querySelector('[name="recipeGroup"]').value = recipe.groupPrefix || "DISKS";
     modalContent.querySelector('[name="recipeOnline"]').checked = recipe.online !== false;
     modalContent.querySelector('[name="recipeCompat"]').checked = recipe.compatibility !== false;
     modalContent.querySelector('[name="recipeMenu"]').checked = recipe.addMenu !== false;
   };
   modalContent.querySelectorAll("[data-recipe-index]").forEach(button => button.onclick = () => { selectedIndex = Number(button.dataset.recipeIndex); fill(recipes[selectedIndex]); });
   modalContent.querySelector("[data-save-recipe]").onclick = () => {
-    const recipe = { name: modalContent.querySelector('[name="recipeName"]').value.trim() || "Collection import", naming: modalContent.querySelector('[name="recipeNaming"]').value, groupPrefix: modalContent.querySelector('[name="recipeGroup"]').value.trim() || "DISCS", online: modalContent.querySelector('[name="recipeOnline"]').checked, compatibility: modalContent.querySelector('[name="recipeCompat"]').checked, addMenu: modalContent.querySelector('[name="recipeMenu"]').checked };
+    const recipe = { name: modalContent.querySelector('[name="recipeName"]').value.trim() || "Collection import", naming: modalContent.querySelector('[name="recipeNaming"]').value, groupPrefix: modalContent.querySelector('[name="recipeGroup"]').value.trim() || "DISKS", online: modalContent.querySelector('[name="recipeOnline"]').checked, compatibility: modalContent.querySelector('[name="recipeCompat"]').checked, addMenu: modalContent.querySelector('[name="recipeMenu"]').checked };
     recipes[selectedIndex] = recipe; saveCollection(RECIPE_STORAGE_KEY, recipes); renderWorkbench("recipes"); toast("Import recipe saved");
   };
 }
@@ -8236,13 +8249,13 @@ window.AtariDesktopHost = Object.freeze({
       : [];
     if (!selected.length) return toast("The native chooser did not return a usable image.", true);
     const allRom = selected.length > 1 && selected.every(file => formats.isRomImage(file.name));
-    const hasFfs = selected.some(file => formats.isPotentialFfsImage(file.name));
+    const hasGemdos = selected.some(file => formats.isPotentialGemdosImage(file.name));
     const equalRomSize = allRom && selected.every(file => Number(file.size) === Number(selected[0].size));
     const canInterleave = equalRomSize && [2, 4].includes(selected.length);
-    showModal(`<div class="modal-heading"><span class="modal-kicker">OPEN LOCAL MEDIA</span><h2>Review selected image${selected.length === 1 ? "" : "s"}</h2><p>The native host reads these paths directly. The same format and target-hardware decisions used by the web host are applied before a private working copy is created.</p></div>
+    showModal(`<div class="modal-heading"><span class="modal-kicker">OPEN LOCAL MEDIA</span><h2>Review selected image${selected.length === 1 ? "" : "s"}</h2><p>The native host reads these paths directly. The same format and target-media decisions used by the web host are applied before a private working copy is created.</p></div>
       <div class="folder-import-preview">${selected.map((file, order) => `<code>${order + 1}. ${esc(file.name)} · ${humanSize(file.size)}</code>`).join("")}</div>
-      ${hasFfs ? '<div class="field"><label>FFS target hardware</label><select name="targetHardware"><option value="auto">Auto / inspect only</option><option value="hardfile">UAE hardfile · HDA + GEO sidecar</option><option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option><option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option><option value="tos">Atari 3000 / 4000 · TOS hard drive</option></select><small>Used only for possible FFS images.</small></div>' : ""}
-      ${allRom ? `<div class="field"><label>Multiple ROM files</label><select name="romSetMode"><option value="separate">Open as separate ROM images</option><option value="linear">One component set · consecutive banks</option>${canInterleave ? `<option value="byte-interleaved-${selected.length}">One component set · ${selected.length}-way byte interleave</option>` : ""}</select><small>${canInterleave ? "Choose a component-set layout only when these files are physical chips from one logical ROM." : "Interleaving requires two or four equal-sized components."}</small></div><div class="field"><label>ROM platform</label><select name="romPlatform"><option value="kickstart">Kickstart ROM · A500 to A4000</option><option value="cartridge">Cartridge · CD32 / CDTV extended ROM</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>` : selected.length === 1 ? '<div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for a headerless ROM with a generic filename.</small></div>' : ""}
+      ${hasGemdos ? `<div class="field"><label>Target media</label><select name="targetHardware">${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}</select><small>Used only for an image that may hold a GEMDOS volume.</small></div>` : ""}
+      ${allRom ? `<div class="field"><label>Multiple ROM files</label><select name="romSetMode"><option value="separate">Open as separate ROM images</option><option value="linear">One component set · consecutive banks</option>${canInterleave ? `<option value="byte-interleaved-${selected.length}">One component set · ${selected.length}-way byte interleave</option>` : ""}</select><small>${canInterleave ? "Choose a component-set layout only when these files are physical chips from one logical ROM." : "Interleaving requires two or four equal-sized components."}</small></div><div class="field"><label>ROM platform</label><select name="romPlatform"><option value="tos">TOS ROM · 192 KiB, 256 KiB or 512 KiB</option><option value="cartridge">Cartridge · 128 KiB at &amp;FA0000</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>` : selected.length === 1 ? '<div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for a headerless ROM with a generic filename.</small></div>' : ""}
       <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open">Open selected image${selected.length === 1 ? "" : "s"}</button></div>`, form => {
         const targetHardware = String(form.get("targetHardware") || "auto");
         const romSetMode = String(form.get("romSetMode") || "separate");
@@ -8264,13 +8277,13 @@ window.AtariDesktopHost = Object.freeze({
           targetHardware: "auto",
           rom: {
             layout: romSetMode,
-            platform: String(form.get("romPlatform") || "kickstart"),
+            platform: String(form.get("romPlatform") || "tos"),
             componentNames: selected.map(file => file.name),
           },
         }] : selected.map((file, offset) => ({
           paths: [file.path],
           preferredPane: reservePane(offset === 0 ? preferredIndex : null),
-          targetHardware: formats.isPotentialFfsImage(file.name) ? targetHardware : "auto",
+          targetHardware: formats.isPotentialGemdosImage(file.name) ? targetHardware : "auto",
           forceKind: (allRom || (selected.length === 1 && form.get("formatOverride") === "rom")) ? "rom" : "",
         }));
         window.webkit.messageHandlers.atariDesktop.postMessage(JSON.stringify({ command: "open-plans", plans }));
@@ -8279,7 +8292,7 @@ window.AtariDesktopHost = Object.freeze({
       const profileTarget = activeWorkbenchProfile().targetHardware || "auto";
       if (targetSelect && [...targetSelect.options].some(option => option.value === profileTarget)) targetSelect.value = profileTarget;
       const platformSelect = modalContent.querySelector('[name="romPlatform"]');
-      if (platformSelect && activeWorkbenchProfile().machine === "a4000") platformSelect.value = "a4000";
+      if (platformSelect && ["tt030", "falcon030"].includes(activeWorkbenchProfile().profile?.machine)) platformSelect.value = "tos";
   },
   showOpening(name, preferredIndex = null) {
     const index = Number.isInteger(preferredIndex) && panes[preferredIndex]
