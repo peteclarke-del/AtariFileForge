@@ -933,6 +933,30 @@ def command_describe_filesystem(args) -> int:
     return 0
 
 
+def command_tosrom(args) -> int:
+    from ..tosrom import TOSRom
+
+    rom = TOSRom(Path(args.image).read_bytes())
+    if args.output_format == "json":
+        _emit(rom.to_dict())
+        return 0
+    header = rom.header
+    print(f"{rom.release}, {len(rom.data) // 1024} KiB at ${rom.base:06X}")
+    print(
+        f"{header.country} {header.video_standard}, {header.machine}, "
+        f"built {header.date.isoformat() if header.date else 'unknown date'}"
+    )
+    for segment in rom.segments:
+        print(
+            f"  {segment.name:<8} ${segment.start:06X} {segment.length:>8} bytes  "
+            f"{'proven' if segment.proven else 'unsegmented'}: {segment.evidence}"
+        )
+    for point in rom.entry_points:
+        print(f"  {point.name:<36} ${point.address:06X}  {point.evidence}")
+    return 0
+
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -1094,6 +1118,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("path")
 
     add("list-filesystems", command_list_filesystems, "List the filing systems this build recognises.", partition=False)
+
+    sub = add("tosrom", command_tosrom, "Decode a TOS ROM's header, segments and entry points.", partition=False)
+    sub.add_argument("--as", dest="output_format", default="text", choices=("text", "json"))
+    sub.add_argument("image")
 
     sub = add("describe-filesystem", command_describe_filesystem, "Describe one filing system.", partition=False)
     sub.add_argument("name")

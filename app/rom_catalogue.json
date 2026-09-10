@@ -1,5 +1,76 @@
 {
   "format": "atari-file-forge-rom-catalogue-1",
-  "note": "Shipped empty on purpose. A ROM identity is keyed by the exact SHA-256 of the image, so an entry is only meaningful once someone has hashed a ROM they actually hold. Add your own through Tools > ROM Workbench > Identity; those records are stored per owner and are never published from here.",
-  "roms": []
+  "note": "Only EmuTOS is listed here, because it is the only ROM this project may redistribute. A ROM identity is keyed by the exact SHA-256 of the image, so an entry for an Atari TOS release is only meaningful once someone has hashed a ROM they actually hold. Add your own through Tools > ROM Workbench > Identity; those records are stored per owner and are never published from here.",
+  "roms": [
+    {
+      "sha256": "154803e3ff4851f3dc358b91b16d6b6110d187a81d8132ecb665af49878939d5",
+      "size": 1048576,
+      "title": "EmuTOS 1.4 1024 KiB (multi-language)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "any 68000 to 68060 machine with a 1 MiB ROM socket or emulator",
+      "country": "multi-language",
+      "notes": "Committed under firmware/emutos/etos1024k.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    },
+    {
+      "sha256": "2d6f3f6f304c9ba340aff8d47ba72b274ae29b8fbe6214138846dada97edf0f3",
+      "size": 196608,
+      "title": "EmuTOS 1.4 192 KiB (UK)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "ST and Mega ST",
+      "country": "United Kingdom",
+      "notes": "Committed under firmware/emutos/etos192uk.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    },
+    {
+      "sha256": "8fbbf8b44fc3e34281eaf8cda5265510e9af9ccda0e3e409111648060d244cfc",
+      "size": 196608,
+      "title": "EmuTOS 1.4 192 KiB (US)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "ST and Mega ST",
+      "country": "USA",
+      "notes": "Committed under firmware/emutos/etos192us.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    },
+    {
+      "sha256": "3bfdc561eb193a8f65aa772169aa2aca241015a2bad9388a2fea3326b1b0aeb0",
+      "size": 262144,
+      "title": "EmuTOS 1.4 256 KiB (UK)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "STE and Mega STE",
+      "country": "United Kingdom",
+      "notes": "Committed under firmware/emutos/etos256uk.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    },
+    {
+      "sha256": "f1fe68360db345551231791edc6a7769e825edadf3632f59b10f3b2100ed75b3",
+      "size": 262144,
+      "title": "EmuTOS 1.4 256 KiB (US)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "STE and Mega STE",
+      "country": "USA",
+      "notes": "Committed under firmware/emutos/etos256us.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    },
+    {
+      "sha256": "f3177763bd3f2a984bf7d2f112f4a3bb4a6d20c7e2d77549f6973bb884edb49e",
+      "size": 524288,
+      "title": "EmuTOS 1.4 512 KiB (UK)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "TT and Falcon",
+      "country": "United Kingdom",
+      "notes": "Committed under firmware/emutos/etos512uk.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    },
+    {
+      "sha256": "167f5f148419a684a3646519ef12cd7be00e1a35e10040358184f4d471e27da9",
+      "size": 524288,
+      "title": "EmuTOS 1.4 512 KiB (US)",
+      "version": "1.4",
+      "publisher": "The EmuTOS development team",
+      "platform": "TT and Falcon",
+      "country": "USA",
+      "notes": "Committed under firmware/emutos/etos512us.img. GPL-2.0-or-later; see firmware/emutos/LICENSE.txt."
+    }
+  ]
 }
