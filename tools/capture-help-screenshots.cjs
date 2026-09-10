@@ -347,10 +347,72 @@ scene("staged-installations", HELP, async page => {
   await wait(page, 3500);
 });
 
-scene("rom-workbench-overview", HELP, async page => {
+// The workbench opens on its Overview tab; the others are one click away.
+async function romWorkbench(page, tab) {
   await openImage(page, ROM, 0, { asRawRom: true });
   await command(page, "Tools", "rom-workbench");
   await wait(page, 6000);
+  if (tab) {
+    await page.evaluate(name => {
+      const button = [...document.querySelectorAll("#modal button")]
+        .find(candidate => candidate.textContent.trim() === name);
+      if (!button) throw new Error(`The ROM Workbench has no ${name} tab`);
+      button.click();
+    }, tab);
+    await wait(page, 5000);
+  }
+}
+
+scene("rom-workbench-overview", HELP, async page => {
+  await romWorkbench(page, null);
+});
+
+scene("rom-decoder", HELP, async page => {
+  // The decoded view is per bank, and it is reached by opening a bank the way
+  // any other row is opened.
+  await openImage(page, ROM, 0, { asRawRom: true });
+  await click(page, ".pane .file-row .row-rom-inspect");
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(page, 500);
+    if (await modalIsOpen(page)) break;
+  }
+  await wait(page, 4000);
+});
+
+scene("rom-command-help", HELP, async page => {
+  await openImage(page, ROM, 0, { asRawRom: true });
+  await click(page, ".pane .file-row .row-rom-inspect");
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(page, 500);
+    if (await modalIsOpen(page)) break;
+  }
+  await wait(page, 3000);
+  // Selecting the question mark pins the explanation open, which is the
+  // behaviour the picture is there to show.
+  await click(page, "#modal .rom-command-help");
+  await wait(page, 1500);
+  // Bring the pinned tooltip into view, since the table is below the fold.
+  await page.evaluate(() => {
+    document.querySelector("#modal .rom-command-help")
+      ?.scrollIntoView({ block: "center" });
+  });
+  await wait(page, 1200);
+});
+
+scene("rom-workbench-disassembly", HELP, async page => {
+  await romWorkbench(page, "Disassembly");
+  // Disassemble the first bank so the picture shows annotated code rather
+  // than an empty pane waiting for a button.
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll("#modal button")]
+      .find(candidate => /disassemble/i.test(candidate.textContent));
+    button?.click();
+  });
+  await wait(page, 8000);
+});
+
+scene("rom-workbench-programmer", HELP, async page => {
+  await romWorkbench(page, "Programmer");
 });
 
 scene("file-editor-script", HELP, async page => {

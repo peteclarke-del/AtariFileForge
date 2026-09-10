@@ -2228,12 +2228,20 @@ async function showRomStructure(index, bankNumber, restoreState = null, { replac
   const headerRows = header ? [
     ["Title", header.title],
     ["Version text", header.version || "Not supplied"],
-    ["Version byte", `&${hex(header.versionByte, 2)}`],
+    // The Atari records its release as a 16-bit word at offset 2, not as a
+    // byte, and there is no type byte anywhere in the header. Asking for
+    // fields the decoder does not produce printed "&NAN" and "&undefined".
+    ["Version word", `&${header.versionHex}`],
     ["Copyright", header.copyright],
-    ["ROM type", `&${header.typeHex} · ${header.roles}`],
+    ["ROM type", header.roles || "Not identified"],
     ["Processor", header.processor],
-    ["Language entry", header.languageEntry == null ? "Not present" : `&${hex(header.languageEntry)}`],
-    ["Service entry", header.serviceEntry == null ? "Not present" : `&${hex(header.serviceEntry)}`],
+    // A TOS header carries no language or service entry; those two rows named
+    // fields the decoder never produced, so both always read "Not present".
+    // These are the pointers the header really does declare.
+    ["Operating system base", header.base == null ? "Not declared" : `&${hex(header.base)}`],
+    ["Reset entry", header.resetEntry == null ? "Not declared" : `&${hex(header.resetEntry)}`],
+    ["Built", header.date || "Not declared"],
+    ["Country and video", [header.country, header.videoStandard].filter(Boolean).join(" · ") || "Not declared"],
     ["Extra features", header.features?.length ? header.features.join(", ") : "None declared"],
   ] : [];
   const structureRows = structures.map(item => `
