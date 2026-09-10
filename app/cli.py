@@ -9,7 +9,9 @@ import tempfile
 from pathlib import Path
 
 from .analysis_service import build_manifest, preflight_report
+from .container_disk_service import CONVERSION_FORMATS
 from .disk_service import DiskError, DiskService
+from .rom import DEFAULT_BANK_SIZE, ROM_PLATFORMS
 from .headless import (
     BLANK_FORMATS,
     RESULT_FORMAT,
@@ -27,6 +29,9 @@ from .headless import (
     write_patch,
 )
 from .image_diff import manifest_fingerprint
+
+#: The target-medium claims a command may make about an image.
+TARGET_HARDWARE = frozenset(DiskService.TARGET_HARDWARE)
 
 
 EXIT_OK = 0
@@ -82,8 +87,7 @@ def _write_json(document: dict, destination: str | None = None, *, force=False) 
 
 def _image_arguments(parser: argparse.ArgumentParser, name: str = "image") -> None:
     parser.add_argument(name, type=Path)
-    parser.add_argument("--descriptor", type=Path, help="Matching Hardfile GEO descriptor")
-    parser.add_argument("--target-hardware", default="auto")
+    parser.add_argument("--target-hardware", default="auto", choices=sorted(TARGET_HARDWARE))
     parser.add_argument("--force-kind", choices=("rom",))
 
 
@@ -99,15 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     create = sub.add_parser("create", help="Create a blank image")
-    create.add_argument("--format", required=True)
+    create.add_argument("--format", required=True, choices=sorted(BLANK_FORMATS))
     create.add_argument("--title", required=True)
     create.add_argument("--capacity")
     create.add_argument("--target-hardware", default="auto")
-    create.add_argument("--bank-size", type=int, default=16384)
+    create.add_argument("--bank-size", type=int, default=DEFAULT_BANK_SIZE)
     create.add_argument("--total-size", type=int)
-    create.add_argument("--platform", default="kickstart")
+    create.add_argument("--platform", default="tos", choices=sorted(ROM_PLATFORMS))
     create.add_argument("--layout", default="linear")
-    create.add_argument("--template", default="blank")
+    create.add_argument("--template", default="blank", choices=("blank", "cartridge"))
     _output_arguments(create)
 
     manifest = sub.add_parser("manifest", help="Create a deterministic image manifest")
@@ -137,38 +141,40 @@ def build_parser() -> argparse.ArgumentParser:
     import_file.add_argument("source", type=Path)
     import_file.add_argument("--destination", required=True)
     import_file.add_argument("--partition", type=int)
-    import_file.add_argument("--side", type=int)
     import_file.add_argument(
-        "--protection",
-        help="Protection, as the eight letters List prints or as &hex.",
+        "--attributes",
+        help="GEMDOS attributes, as the six letters rhsvda or as a hex byte.",
     )
-    import_file.add_argument("--comment", help="File comment, up to 79 characters.")
-    import_file.add_argument("--filetype", help="Workbench icon type.")
+    import_file.add_argument(
+        "--create-directories",
+        action="store_true",
+        help="Create the destination folder, and any folder above it, if it is missing.",
+    )
     _output_arguments(import_file)
 
-    convert = sub.add_parser("convert", help="Convert a DMS archive to ADF or ADZ")
+    convert = sub.add_parser(
+        "convert-container",
+        help="Rebuild the disk an MSA, DIM or Pasti container describes",
+    )
     _image_arguments(convert)
-    convert.add_argument("--format", choices=("adf", "adz"), required=True)
+    convert.add_argument("--format", choices=CONVERSION_FORMATS, required=True)
     _output_arguments(convert)
 
     compact = sub.add_parser("compact", help="Compact a writable filesystem")
     _image_arguments(compact)
     compact.add_argument("--partition", type=int)
-    compact.add_argument("--order")
     _output_arguments(compact)
 
 
     comparison = sub.add_parser("compare", help="Compare two images logically")
     _image_arguments(comparison, "base")
     comparison.add_argument("candidate", type=Path)
-    comparison.add_argument("--candidate-descriptor", type=Path)
     comparison.add_argument("--output", type=Path)
     comparison.add_argument("--force", action="store_true")
 
     patch_create = sub.add_parser("patch-create", help="Create a guarded image patch")
     _image_arguments(patch_create, "base")
     patch_create.add_argument("candidate", type=Path)
-    patch_create.add_argument("--candidate-descriptor", type=Path)
     patch_create.add_argument("--output", required=True, type=Path)
     patch_create.add_argument("--force", action="store_true")
     patch_create.add_argument("--dry-run", action="store_true")
@@ -181,7 +187,6 @@ def build_parser() -> argparse.ArgumentParser:
     recipe = sub.add_parser("recipe-run", help="Verify and execute a versioned deterministic recipe")
     recipe.add_argument("recipe", type=Path)
     recipe.add_argument("--source", action="append", default=[], metavar="ALIAS=PATH")
-    recipe.add_argument("--descriptor", action="append", default=[], metavar="ALIAS=PATH")
     recipe.add_argument("--output", type=Path)
     recipe.add_argument("--force", action="store_true")
     recipe.add_argument("--dry-run", action="store_true")
@@ -189,15 +194,38 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _select_partition(service, session, args) -> None:
-    """Point a hard-drive session at the partition the command names."""
+    """Point a hard-disk session at the partition the command names."""
     partition = getattr(args, "partition", None)
-    if partition is not None and session.kind == "hdf":
+    if partition is not None and session.kind == "hd":
         service.select_partition(session, int(partition))
+
+
+def _ensure_parent(service, session, destination: str, requested) -> None:
+    """Create the folder an import is destined for, when the caller asked for it.
+
+    A folder has to exist before a file can be written into it, and the
+    command line has no separate command that makes one. Without this, an
+    automated import into a folder that is not already there fails on a disk
+    the operator has every right to write to.
+    """
+    if not requested:
+        return
+    from app.atari_paths import parent as _parent
+
+    folder = _parent(str(destination))
+    if not folder:
+        return
+    try:
+        service.make_directory(session, folder)
+    except DiskError as exc:
+        # An existing folder is the outcome the caller asked for, so saying it
+        # already exists is not a failure of this operation.
+        if "exist" not in str(exc).casefold():
+            raise
 
 
 def _open_kwargs(args) -> dict:
     return {
-        "descriptor": getattr(args, "descriptor", None),
         "target_hardware": getattr(args, "target_hardware", "auto"),
         "force_kind": getattr(args, "force_kind", None),
     }
@@ -237,12 +265,12 @@ def _validate_declared_outputs(args) -> None:
         value.resolve()
         for name in (
             "image", "base", "candidate", "source", "patch", "changes",
-            "recipe", "descriptor", "candidate_descriptor",
+            "recipe",
         )
         if isinstance((value := getattr(args, name, None)), Path)
     ]
     if any(target in inputs for target in resolved):
-        raise DiskError("Choose output files different from every source, descriptor and recipe input.")
+        raise DiskError("Choose output files different from every source and recipe input.")
     if not getattr(args, "force", False):
         existing = next((target for target in targets if target.exists()), None)
         if existing:
@@ -322,12 +350,7 @@ def _preflight(args, _progress) -> dict:
 
 def _save(args, progress) -> dict:
     with open_image(args.image, **_open_kwargs(args)) as (service, session):
-        identity = source_identity(
-            args.image,
-            descriptor=args.descriptor,
-            service=service,
-            session=session,
-        )
+        identity = source_identity(args.image, service=service, session=session)
         action = {"action": "save", **_recorded_open_context(args)}
         if args.dry_run:
             service.prepare_download(session, progress)
@@ -341,12 +364,7 @@ def _mutate(args, progress, action) -> dict:
     if not args.source.is_file():
         raise FileNotFoundError(f"Source file not found: {args.source}")
     with open_image(args.image, **_open_kwargs(args)) as (service, session):
-        identity = source_identity(
-            args.image,
-            descriptor=args.descriptor,
-            service=service,
-            session=session,
-        )
+        identity = source_identity(args.image, service=service, session=session)
         _select_partition(service, session, args)
         payload_identity = source_identity(args.source)
         decision = {
@@ -355,10 +373,8 @@ def _mutate(args, progress, action) -> dict:
             "source": "payload",
             "destination": args.destination,
             "partition": args.partition,
-            "side": args.side,
-            "protection": args.protection,
-            "comment": args.comment,
-            "filetype": args.filetype,
+            "attributes": args.attributes,
+            "createDirectories": bool(args.create_directories),
         }
         compatibility = preflight_report(service, session, {
             "operation": "import-file",
@@ -369,9 +385,7 @@ def _mutate(args, progress, action) -> dict:
                 "destination": args.destination,
                 "source": str(args.source),
                 "type": "file",
-                "protection": args.protection,
-                "comment": args.comment,
-                "filetype": args.filetype,
+                "attributes": args.attributes,
             }],
         })
         blocking = next(
@@ -380,15 +394,8 @@ def _mutate(args, progress, action) -> dict:
         )
         if blocking:
             raise DiskError(f"Compatibility preflight failed: {blocking['message']}")
-        service.put(
-            session,
-            args.destination,
-            args.source,
-            args.protection,
-            args.comment,
-            args.filetype,
-            args.side,
-        )
+        _ensure_parent(service, session, args.destination, args.create_directories)
+        service.put(session, args.destination, args.source, args.attributes)
         if args.dry_run:
             return {"image": identity, "payload": payload_identity, "action": decision, "compatibility": compatibility, "output": str(args.output), "validated": True}
         outputs = save_image(service, session, args.output, force=args.force, progress=progress)
@@ -398,9 +405,13 @@ def _mutate(args, progress, action) -> dict:
 
 def _convert(args, progress) -> dict:
     with open_image(args.image, **_open_kwargs(args)) as (service, session):
-        identity = source_identity(args.image, descriptor=args.descriptor, service=service, session=session)
-        action = {"action": "convert-dms", "format": args.format, **_recorded_open_context(args)}
-        converted, files = service.convert_dms(session, args.format)
+        identity = source_identity(args.image, service=service, session=session)
+        action = {
+            "action": "convert-container",
+            "format": args.format,
+            **_recorded_open_context(args),
+        }
+        converted, files = service.convert_container(session, args.format)
         if args.dry_run:
             return {"image": identity, "action": action, "output": str(args.output), "convertedFiles": files, "validated": True}
         outputs = save_image(service, converted, args.output, force=args.force, progress=progress)
@@ -410,10 +421,10 @@ def _convert(args, progress) -> dict:
 
 def _compact(args, progress) -> dict:
     with open_image(args.image, **_open_kwargs(args)) as (service, session):
-        identity = source_identity(args.image, descriptor=args.descriptor, service=service, session=session)
+        identity = source_identity(args.image, service=service, session=session)
         _select_partition(service, session, args)
-        action = {"action": "compact", "partition": args.partition, "order": args.order, **_recorded_open_context(args)}
-        service.compact(session, args.order)
+        action = {"action": "compact", "partition": args.partition, **_recorded_open_context(args)}
+        service.compact(session)
         if args.dry_run:
             return {"image": identity, "action": action, "output": str(args.output), "validated": True}
         outputs = save_image(service, session, args.output, force=args.force, progress=progress)
@@ -425,8 +436,6 @@ def _two_images(args, callback):
     with open_image_pair(
         args.base,
         args.candidate,
-        first_descriptor=args.descriptor,
-        second_descriptor=args.candidate_descriptor,
         target_hardware=args.target_hardware,
         force_kind=args.force_kind,
     ) as (service, first, second):
@@ -501,23 +510,16 @@ def _verify_recipe_outputs(document: dict, files: list[dict]) -> None:
 def _recipe_run(args, progress) -> dict:
     document = load_recipe(args.recipe)
     paths = _aliases(args.source)
-    descriptors = _aliases(args.descriptor)
     expected_aliases = set(document["sources"])
     if set(paths) != expected_aliases:
         extras = sorted(set(paths) - expected_aliases)
         if extras:
             raise DiskError(f"Recipe source alias is not declared and cannot be verified: {extras[0]}.")
-    expected_descriptors = {
-        alias for alias, identity in document["sources"].items()
-        if identity.get("descriptor") is not None
-    }
-    if set(descriptors) != expected_descriptors:
-        raise DiskError("Supply exactly the descriptor aliases recorded by this recipe.")
     for alias, expected in document["sources"].items():
         if alias not in paths:
             raise DiskError(f"Supply recipe source {alias} with --source {alias}=PATH.")
         try:
-            verify_identity(paths[alias], expected, descriptors.get(alias))
+            verify_identity(paths[alias], expected)
         except DiskError as exc:
             raise IdentityError(str(exc)) from exc
     actions = document["actions"]
@@ -551,12 +553,10 @@ def _recipe_run(args, progress) -> dict:
         raise DiskError("A mutating recipe requires --source image=PATH.")
     output_resolved = Path(output).resolve()
     recipe_inputs = [Path(path).resolve() for path in paths.values()]
-    recipe_inputs.extend(Path(path).resolve() for path in descriptors.values())
     if output_resolved in recipe_inputs:
-        raise DiskError("Choose a recipe output different from every mapped source and descriptor.")
+        raise DiskError("Choose a recipe output different from every mapped source.")
     with open_image(
         image_path,
-        descriptor=descriptors.get("image"),
         target_hardware=str(first.get("targetHardware") or "auto"),
         force_kind=first.get("forceKind"),
     ) as (service, session):
@@ -570,21 +570,24 @@ def _recipe_run(args, progress) -> dict:
         for action in actions:
             kind = action.get("action")
             if kind == "import-file":
+                _ensure_parent(
+                    service,
+                    session,
+                    action["destination"],
+                    action.get("createDirectories"),
+                )
                 service.put(
                     session,
                     action["destination"],
                     paths[action["source"]],
-                    action.get("protection"),
-                    action.get("comment"),
-                    action.get("filetype"),
-                    action.get("side"),
+                    action.get("attributes"),
                 )
             elif kind == "compact":
-                service.compact(session, action.get("order"))
+                service.compact(session)
             elif kind == "save":
                 continue
-            elif kind == "convert-dms":
-                session, _files = service.convert_dms(session, action["format"])
+            elif kind == "convert-container":
+                session, _files = service.convert_container(session, action["format"])
             elif kind == "apply-patch":
                 apply_patch(service, session, paths[action["source"]], progress)
             else:
@@ -606,7 +609,7 @@ COMMANDS = {
     "preflight": _preflight,
     "save": _save,
     "import-file": lambda args, progress: _mutate(args, progress, "import-file"),
-    "convert": _convert,
+    "convert-container": _convert,
     "compact": _compact,
     "compare": _compare,
     "patch-create": _patch_create,

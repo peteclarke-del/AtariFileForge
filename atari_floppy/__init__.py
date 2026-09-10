@@ -2,6 +2,7 @@
 
 from .device import (
     ATARI_GEOMETRIES,
+    DEVICE_SUFFIXES,
     KNOWN_DEVICES,
     FloppyDevice,
     FloppyError,
@@ -10,13 +11,16 @@ from .device import (
     FloppyReadResult,
     FloppyWriteResult,
     available_devices,
+    device_suffix,
     geometry,
-    validated_device,
     geometry_for_size,
+    image_geometry,
+    validated_device,
 )
 
 __all__ = [
     "ATARI_GEOMETRIES",
+    "DEVICE_SUFFIXES",
     "KNOWN_DEVICES",
     "FloppyDevice",
     "FloppyError",
@@ -25,7 +29,9 @@ __all__ = [
     "FloppyReadResult",
     "FloppyWriteResult",
     "available_devices",
+    "device_suffix",
     "geometry",
-    "validated_device",
     "geometry_for_size",
+    "image_geometry",
+    "validated_device",
 ]

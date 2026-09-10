@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
+import shutil
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import Mock, PropertyMock, patch
 
 from flask import Flask
@@ -61,6 +65,35 @@ def _hatari():
         yield
 
 
+#: Sizes and mapped addresses by release, so a fixture ROM is the shape the
+#: real one is. A ROM built any other way is rejected before it is offered,
+#: which is the point of the check.
+_ROM_SHAPE = {
+    "100": (192, 0xFC0000), "102": (192, 0xFC0000), "104": (192, 0xFC0000),
+    "106": (256, 0xE00000), "162": (256, 0xE00000),
+    "205": (256, 0xE00000), "206": (256, 0xE00000),
+    "306": (512, 0xE00000),
+    "400": (512, 0xE00000), "402": (512, 0xE00000), "404": (512, 0xE00000),
+}
+
+
+def rom_bytes(name: str) -> bytes:
+    """A ROM the decoder accepts, shaped by the release its name states."""
+    release = re.match(r"tos(\d{3})", name)
+    kilobytes, base = _ROM_SHAPE.get(release.group(1) if release else "", (192, 0xFC0000))
+    version = int(release.group(1), 16) if release else 0x104
+    size = kilobytes * 1024
+    data = bytearray(size)
+    struct.pack_into(">H", data, 0x00, 0x602E)
+    struct.pack_into(">H", data, 0x02, version)
+    struct.pack_into(">I", data, 0x04, base + 0x30)
+    struct.pack_into(">I", data, 0x08, base)
+    struct.pack_into(">I", data, 0x0C, base + size)
+    struct.pack_into(">I", data, 0x18, 0x04141993)
+    struct.pack_into(">H", data, 0x1C, 0x0006)
+    return bytes(data)
+
+
 @contextlib.contextmanager
 def _firmware(*names: str):
     """An operator ROM directory holding exactly ``names``, and no repository ROMs.
@@ -73,7 +106,7 @@ def _firmware(*names: str):
         roms = Path(temporary) / "tos"
         roms.mkdir()
         for name in names:
-            (roms / name).write_bytes(b"\0" * 16)
+            (roms / name).write_bytes(rom_bytes(name))
         with patch.object(emulator_config, "TOS_DIR", roms), patch.object(
             emulator_config, "REPOSITORY_TOS_DIR", Path(temporary) / "absent",
         ):
@@ -351,8 +384,8 @@ class FirmwareLookupTests(unittest.TestCase):
             repository = Path(temporary) / "repository"
             operator.mkdir()
             repository.mkdir()
-            (operator / "tos104us.img").write_bytes(b"\0" * 16)
-            (repository / "tos104uk.img").write_bytes(b"\0" * 16)
+            (operator / "tos104us.img").write_bytes(rom_bytes("tos104us.img"))
+            (repository / "tos104uk.img").write_bytes(rom_bytes("tos104uk.img"))
             with patch.object(emulator_config, "TOS_DIR", operator), patch.object(
                 emulator_config, "REPOSITORY_TOS_DIR", repository,
             ):
@@ -503,7 +536,7 @@ class EmulatorRouteTests(unittest.TestCase):
         """A hard drive is handed to the emulator entire, not partition by partition."""
         with tempfile.TemporaryDirectory() as temporary:
             service = DiskService(temporary)
-            drive = service.create_blank("ffs-hard", "Collection", capacity="4MB")
+            drive = service.create_blank("hd", "Collection", capacity="4MB")
             app = Flask(__name__)
             app.register_blueprint(create_tools_blueprint(service, OperationRegistry()))
             with patch("app.routes.tools.run_emulator_process") as run, _hatari(), _firmware():
@@ -565,3 +598,75 @@ class EmulatorRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RomChoiceTests(unittest.TestCase):
+    """A collection from the preservation archives is not a tidy folder.
+
+    It carries alternative dumps beside the good ones, some of them
+    truncated and some not ROMs at all, and the later releases were never
+    published per country. All of that decides which file the emulator gets.
+    """
+
+    def _rom(self, size: int, version: int = 0x0404, base: int = 0xE00000) -> bytes:
+        """A ROM the decoder accepts: the header fields it insists on."""
+        data = bytearray(size)
+        struct.pack_into(">H", data, 0x00, 0x602E)
+        struct.pack_into(">H", data, 0x02, version)
+        struct.pack_into(">I", data, 0x04, base + 0x30)
+        struct.pack_into(">I", data, 0x08, base)
+        struct.pack_into(">I", data, 0x0C, base + size)
+        struct.pack_into(">I", data, 0x18, 0x04141993)
+        struct.pack_into(">H", data, 0x1C, 0x0006)
+        return bytes(data)
+
+    def _folder(self, files: dict[str, bytes]):
+        folder = Path(tempfile.mkdtemp())
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        self.addCleanup(shutil.rmtree, folder, True)
+        return folder
+
+    def _choose(self, folder, machine: str):
+        with mock.patch.object(emulator_config, "tos_directories", lambda: [folder]):
+            return emulator_config.tos_for(machine)
+
+    def test_a_release_with_no_language_prefers_the_plain_file(self) -> None:
+        """The later releases were not published per country.
+
+        `tos404.img` is the ROM. `tos404-a.img` is somebody's other dump of
+        it, and sorting names alone put that first.
+        """
+        whole = self._rom(512 * 1024)
+        folder = self._folder({
+            "tos404-a.img": whole,
+            "tos404-a2.img": whole,
+            "tos404.img": whole,
+        })
+        self.assertEqual(self._choose(folder, "falcon030").name, "tos404.img")
+
+    def test_a_truncated_dump_loses_to_a_whole_one(self) -> None:
+        """A half-length dump still carries a perfectly good header.
+
+        So the header cannot settle this and the length has to: every genuine
+        dump of one release is the same size.
+        """
+        folder = self._folder({
+            "tos404-a.img": self._rom(256 * 1024),
+            "tos404-b.img": self._rom(512 * 1024),
+        })
+        self.assertEqual(self._choose(folder, "falcon030").name, "tos404-b.img")
+
+    def test_a_file_that_is_not_a_rom_is_never_offered(self) -> None:
+        """Better the bundled firmware than a machine that hangs."""
+        folder = self._folder({"tos404.img": bytes(12345)})
+        self.assertIsNone(self._choose(folder, "falcon030"))
+
+    def test_the_language_order_still_decides_between_whole_roms(self) -> None:
+        early = self._rom(192 * 1024, version=0x0104, base=0xFC0000)
+        folder = self._folder({
+            "tos104us.img": early,
+            "tos104uk.img": early,
+            "tos104fr.img": early,
+        })
+        self.assertEqual(self._choose(folder, "st").name, "tos104uk.img")

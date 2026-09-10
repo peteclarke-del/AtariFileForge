@@ -48,7 +48,6 @@ def create_images_blueprint(
         image = request.files.get("image")
         if not image or not image.filename:
             raise DiskError("Choose a media image to open.")
-        descriptor_file = request.files.get("descriptor")
         try:
             rom_component_names = json.loads(
                 request.form.get("romComponentNames", "[]")
@@ -60,11 +59,10 @@ def create_images_blueprint(
         session = open_image_upload(
             service,
             image,
-            descriptor_file if descriptor_file and descriptor_file.filename else None,
             target_hardware=request.form.get("targetHardware", "auto"),
             rom_options={
                 "layout": request.form.get("romLayout", "linear"),
-                "platform": request.form.get("romPlatform", "kickstart"),
+                "platform": request.form.get("romPlatform", "tos"),
                 "componentNames": rom_component_names,
             },
             force_kind=request.form.get("forceKind") or None,
@@ -75,12 +73,21 @@ def create_images_blueprint(
     @request_effect("lifecycle", "creating an image session")
     def create_image():
         data = payload()
+        # Each shape of media takes its own options, and the pane sends the
+        # group that belongs to the format it asked for. They are merged into
+        # one object here so the service has a single place to read them.
+        options: dict = {}
+        for group in ("rom", "hardDisk"):
+            if isinstance(data.get(group), dict):
+                options.update(data[group])
+        if data.get("bootable") is not None:
+            options["bootable"] = bool(data["bootable"])
         session = service.create_blank(
-            data.get("format", "adf"),
+            data.get("format", "ds-720k"),
             data.get("title", "BLANK"),
             data.get("capacity"),
             data.get("targetHardware", "auto"),
-            options=data.get("rom") if isinstance(data.get("rom"), dict) else None,
+            options=options or None,
         )
         return jsonify(image=service.summary(session))
 
@@ -90,11 +97,12 @@ def create_images_blueprint(
 
     @blueprint.get("/api/images/<image_id>/partitions")
     def image_partitions(image_id):
-        """List the partitions a hard drive's Rigid Disk Block declares.
+        """List the partitions a hard disk's own table declares.
 
-        Each row is presented as a drawer so the pane opens into it exactly as
-        it opens a directory, and carries the device name the partition mounts
-        as, its filing system, its size and whether the machine boots from it.
+        Each row is presented as a folder so the pane opens into it exactly as
+        it opens a directory, and carries the drive letter TOS assigns it, the
+        three-letter identifier or MBR type code, its extent and whether the
+        machine boots from it.
         """
         session = service.get(image_id)
         partitions = [
@@ -102,22 +110,36 @@ def create_images_blueprint(
                 "partition": index,
                 "name": str(item.get("device") or item.get("name") or f"Partition {index}"),
                 "type": "partition",
-                "format": item.get("format"),
+                "label": str(item.get("label") or ""),
+                # The three-letter identifier AHDI writes, or the two-digit
+                # MBR type code, is what a person recognises the partition by.
+                "identifier": str(item.get("id") or ""),
+                "id": str(item.get("id") or ""),
+                "typeCode": item.get("typeCode"),
+                "format": str(item.get("format") or ""),
+                # AHDI boots the first partition whose flag is set, so the
+                # only priority there is order.
+                "bootPriority": index if item.get("bootable") else None,
                 "length": int(item.get("sizeBytes") or 0),
+                "startSector": int(item.get("startSector") or 0),
+                "sizeSectors": int(item.get("sizeSectors") or 0),
                 "bootable": bool(item.get("bootable")),
-                "bootPriority": item.get("bootPriority"),
-                "automount": bool(item.get("automount")),
-                "lowCylinder": item.get("lowCylinder"),
-                "highCylinder": item.get("highCylinder"),
+                "byteSwapped": bool(item.get("byteSwapped")),
+                "gemdos": bool(item.get("gemdos")),
             }
             for index, item in enumerate(service.list_partitions(session))
         ]
         return jsonify(image=service.summary(session), partitions=partitions)
 
-    @blueprint.get("/api/images/<image_id>/rigid-disk")
-    def image_rigid_disk(image_id):
-        """Return the complete decoded Rigid Disk Block for inspection."""
-        return jsonify(rigidDisk=service.rigid_disk(service.get(image_id)))
+    @blueprint.get("/api/images/<image_id>/partition-table")
+    def image_partition_table(image_id):
+        """Return the complete decoded partition table for inspection.
+
+        The report names the scheme that was found, how many sectors the
+        table claims the drive holds, whether the image is byte-swapped, and
+        every partition the table reaches, chained tables included.
+        """
+        return jsonify(partitionTable=service.partition_table(service.get(image_id)))
 
     @blueprint.patch("/api/images/<image_id>")
     @image_mutation("renaming the image")
@@ -125,19 +147,6 @@ def create_images_blueprint(
         data = payload()
         session = service.get(image_id)
         service.rename_session(session, data.get("name", ""))
-        return jsonify(image=service.summary(session))
-
-    @blueprint.patch("/api/images/<image_id>/kickfs")
-    @image_mutation("changing the Kickstart ROM configuration")
-    def configure_kickfs(image_id):
-        data = payload()
-        session = service.get(image_id)
-        service.set_kickfs_properties(
-            session,
-            title=data.get("title", ""),
-            version=data.get("version", 1),
-            copyright_text=data.get("copyright", ""),
-        )
         return jsonify(image=service.summary(session))
 
     @blueprint.patch("/api/images/<image_id>/rom-layout")
@@ -177,7 +186,7 @@ def create_images_blueprint(
             if key in profile:
                 profile[key] = str(profile[key]).strip()[:2048]
         session.hardware_profile = profile
-        if session.kind in {"ffs", "ofs"} and data.get("targetHardware"):
+        if data.get("targetHardware"):
             session.target_hardware = service._target_hardware(str(data["targetHardware"]))
         service._persist_session(session)
         return jsonify(image=service.summary(session))
@@ -286,12 +295,13 @@ def create_images_blueprint(
     @blueprint.post("/api/images/<image_id>/convert")
     @request_effect("lifecycle", "creating a converted image session")
     def convert_image(image_id):
+        """Rebuild the disk an MSA, DIM or Pasti container describes."""
         data = payload()
-        converted, files = service.convert_dms(
+        converted, tracks = service.convert_container(
             service.get(image_id),
-            data.get("format", "adf"),
+            data.get("format", "st"),
         )
-        return jsonify(image=service.summary(converted), files=files)
+        return jsonify(image=service.summary(converted), files=tracks)
 
     @blueprint.get("/api/images/<image_id>/export/formats")
     def image_export_formats(image_id):
@@ -316,7 +326,7 @@ def create_images_blueprint(
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        service.compact(session, data.get("order"))
+        service.compact(session)
         return jsonify(
             image=service.summary(session),
             message="Free space compacted successfully",

@@ -12,17 +12,17 @@ from app.download_archive import build_download_archive, prepared_download
 
 class DownloadArchiveTests(unittest.TestCase):
     @staticmethod
-    def _hdf_session(root: Path) -> tuple[DiskService, ImageSession]:
+    def _hard_disk_session(root: Path) -> tuple[DiskService, ImageSession]:
         """A real partitioned drive, which is what a download packages."""
         service = DiskService(root / "work")
-        session = service.create_blank("ffs-hard", "Games", capacity="4MB")
-        session.name = "games.hdf"
+        session = service.create_blank("hd", "GAMES", capacity="4MB")
+        session.name = "games.img"
         session.dirty = True
         return service, session
 
     def test_prepare_builds_complete_archive_before_reporting_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            service, session = self._hdf_session(Path(directory))
+            service, session = self._hard_disk_session(Path(directory))
             progress = []
 
             archive_path, archive_name = build_download_archive(
@@ -40,14 +40,14 @@ class DownloadArchiveTests(unittest.TestCase):
             ))
             self.assertTrue(any(current and current >= 40 for _message, current, _total in progress))
             with zipfile.ZipFile(archive_path) as archive:
-                self.assertEqual(archive.namelist(), ["README.md", "games.hdf"])
-                self.assertEqual(archive.read("games.hdf"), session.path.read_bytes())
+                self.assertEqual(archive.namelist(), ["README.md", "games.img"])
+                self.assertEqual(archive.read("games.img"), session.path.read_bytes())
 
             self.assertEqual(prepared_download(session), (archive_path, archive_name))
 
     def test_prepared_archive_is_rejected_after_the_image_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            service, session = self._hdf_session(Path(directory))
+            service, session = self._hard_disk_session(Path(directory))
             build_download_archive(service, session)
 
             with session.path.open("r+b") as image:
@@ -59,7 +59,7 @@ class DownloadArchiveTests(unittest.TestCase):
 
     def test_accepted_compatibility_report_is_packaged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            service, session = self._hdf_session(Path(directory))
+            service, session = self._hard_disk_session(Path(directory))
             session.compatibility_reports = [{
                 "format": "atari-file-forge-compatibility-report",
                 "version": 1,
@@ -77,33 +77,32 @@ class DownloadArchiveTests(unittest.TestCase):
 
     def test_accepting_report_invalidates_previously_prepared_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            service, session = self._hdf_session(Path(directory))
+            service, session = self._hard_disk_session(Path(directory))
             build_download_archive(service, session)
             session.compatibility_reports = [{"acceptedAt": "2026-08-17T12:00:00+00:00"}]
             with self.assertRaisesRegex(DiskError, "Save it again"):
                 prepared_download(session)
 
-    def test_sparse_hardfile_archive_is_compressed_and_byte_exact(self) -> None:
+    def test_sparse_hard_disk_archive_stands_alone_and_is_byte_exact(self) -> None:
+        """A drive image is one file, so it is packaged on its own.
+
+        An Atari hard disk carries its own partition table in its first
+        sector, so nothing has to travel beside it to say what shape it is.
+        The archive therefore holds the README and the image and nothing
+        else, at the root rather than in a subdirectory, and the image comes
+        back byte for byte even though most of it was never written.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            image = root / "scsi0.hda"
-            descriptor = root / "scsi0.geo"
+            image = root / "games.img"
             with image.open("wb") as output:
-                output.write(b"FFS")
-                output.seek(32 * 1024 * 1024 - 1)
+                output.write(b"AHDI")
+                output.seek(8 * 1024 * 1024 - 1)
                 output.write(b"\0")
-            descriptor.write_bytes(b"geometry")
             service = DiskService(root / "work")
             service._optimise_sparse_file(image)
             service.prepare_download = lambda session, progress=None: image
-            session = ImageSession(
-                "b" * 32,
-                image.name,
-                "ffs",
-                image,
-                descriptor_name=descriptor.name,
-                descriptor_path=descriptor,
-            )
+            session = ImageSession("b" * 32, image.name, "hd", image)
 
             def write_readme(_service, _session, _path, _generated, **_checksums):
                 readme = root / "download-README.md"
@@ -113,12 +112,9 @@ class DownloadArchiveTests(unittest.TestCase):
             with patch("app.download_archive.write_download_readme", write_readme):
                 archive_path, _archive_name = build_download_archive(service, session)
 
-            self.assertLess(archive_path.stat().st_size, 200_000)
             with zipfile.ZipFile(archive_path) as archive:
-                self.assertEqual(
-                    archive.read("Hardfile0/scsi0.hda"),
-                    image.read_bytes(),
-                )
+                self.assertEqual(archive.namelist(), ["README.md", "games.img"])
+                self.assertEqual(archive.read("games.img"), image.read_bytes())
 
 
 if __name__ == "__main__":

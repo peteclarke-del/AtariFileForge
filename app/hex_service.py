@@ -17,14 +17,6 @@ MAX_COMPARE_OFFSETS = 100_000
 MAX_COMPARE_RANGES = 20_000
 
 
-def _target_path(session: ImageSession, target: str) -> Path:
-    if target == "image":
-        return session.path
-    if target == "descriptor" and session.descriptor_path is not None:
-        return session.descriptor_path
-    raise DiskError("That raw image component is not available.")
-
-
 def _version(path: Path) -> str:
     stat = path.stat()
     return f"{stat.st_size:x}-{stat.st_mtime_ns:x}"
@@ -107,8 +99,8 @@ def _compare_streams(
     }
 
 
-def compare_raw_image(session: ImageSession, candidate: BinaryIO, candidate_size: int, target: str = "image") -> dict:
-    path = _target_path(session, target)
+def compare_raw_image(session: ImageSession, candidate: BinaryIO, candidate_size: int) -> dict:
+    path = session.path
     with session.lock, path.open("rb") as source:
         report = _compare_streams(source, path.stat().st_size, candidate, candidate_size)
     report["version"] = _version(path)
@@ -131,13 +123,8 @@ def compare_paths(source_path: Path, candidate_path: Path, progress=None) -> dic
         )
 
 
-def raw_image_range(
-    session: ImageSession,
-    offset: int,
-    length: int,
-    target: str = "image",
-) -> dict:
-    path = _target_path(session, target)
+def raw_image_range(session: ImageSession, offset: int, length: int) -> dict:
+    path = session.path
     if length < 1 or length > MAX_HEX_READ:
         raise DiskError(f"Read between 1 and {MAX_HEX_READ:,} bytes at a time.")
     with session.lock:
@@ -152,8 +139,7 @@ def raw_image_range(
             "size": size,
             "data": data.hex().upper(),
             "version": _version(path),
-            "target": target,
-            "targetName": session.descriptor_name if target == "descriptor" else session.name,
+            "targetName": session.name,
             "readOnly": bool(session.hfe_read_only),
         }
 
@@ -188,9 +174,8 @@ def search_raw_image(
     start: int,
     direction: str,
     wrap: bool,
-    target: str = "image",
 ) -> dict:
-    path = _target_path(session, target)
+    path = session.path
     pattern = _search_pattern(query, mode)
     if direction not in {"forward", "backward"}:
         raise DiskError("Choose forward or backward search.")
@@ -260,13 +245,12 @@ def write_raw_image(
     expected_version: str,
     changes: object,
     confirmed: bool,
-    target: str = "image",
 ) -> dict:
     if not confirmed:
         raise DiskError("Raw image writes require explicit dangerous-change confirmation.")
     if session.hfe_read_only:
         raise DiskError("This HFE working image is protected because its track data cannot be rewritten safely.")
-    path = _target_path(session, target)
+    path = session.path
     with session.lock:
         size = path.stat().st_size
         if expected_version != _version(path):
@@ -280,7 +264,10 @@ def write_raw_image(
             os.fsync(image.fileno())
 
         session.invalidate_cached_views()
-        session.dms = None
+        # A raw write replaces the bytes a container header described, so the
+        # parsed container is dropped along with everything else derived from
+        # them.
+        session.container = None
         session.dirty = True
         service._append_warning(
             session,

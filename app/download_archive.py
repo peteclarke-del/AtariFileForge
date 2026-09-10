@@ -69,13 +69,6 @@ def build_download_archive(
         image_path,
         _mapped_progress(notify, "Calculating the image checksum", 10, 34),
     )
-    descriptor_checksum = None
-    if session.descriptor_path:
-        descriptor_checksum = sha256_path(
-            session.descriptor_path,
-            _mapped_progress(notify, "Calculating the GEO checksum", 34, 35),
-        )
-
     notify("Building the technical README and filesystem catalogue", 35, PROGRESS_TOTAL)
     readme_path = write_download_readme(
         service,
@@ -83,26 +76,20 @@ def build_download_archive(
         image_path,
         generated,
         image_checksum=image_checksum,
-        descriptor_checksum=descriptor_checksum,
     )
 
-    is_hardfile = bool(
-        session.descriptor_path and session.path.suffix.lower() in {".hdf", ".hda"}
-    )
+    # A hard-disk image is mostly zeroes. Storing one uncompressed would put
+    # half a gigabyte of nothing in the download, so a file whose allocated
+    # blocks account for less than half its length is deflated instead. A
+    # floppy is small and dense either way, and storing it keeps the archive
+    # byte-identical to the image inside it.
     image_stat = image_path.stat()
     allocated_size = int(getattr(image_stat, "st_blocks", 0)) * 512
-    compress_sparse_dat = bool(
-        is_hardfile
-        and allocated_size
-        and allocated_size < image_stat.st_size // 2
+    compress_sparse_image = bool(
+        allocated_size and allocated_size < image_stat.st_size // 2
     )
-    compression = zipfile.ZIP_DEFLATED if compress_sparse_dat else zipfile.ZIP_STORED
-    archive_root = "Hardfile0/" if is_hardfile else ""
-    files = [(readme_path, "README.md"), (image_path, f"{archive_root}{session.name}")]
-    if session.descriptor_path:
-        files.append(
-            (session.descriptor_path, f"{archive_root}{session.descriptor_name}")
-        )
+    compression = zipfile.ZIP_DEFLATED if compress_sparse_image else zipfile.ZIP_STORED
+    files = [(readme_path, "README.md"), (image_path, session.name)]
     if session.kind == "rom":
         project_path = session.path.parent / "rom-project.json"
         project_path.write_bytes(project_json(session.rom_project))
@@ -135,7 +122,7 @@ def build_download_archive(
         fraction = byte_current / byte_total if byte_total else 1
         notify(
             "Compressing the complete download ZIP"
-            if compress_sparse_dat
+            if compress_sparse_image
             else "Building the complete download ZIP",
             40 + round(59 * fraction),
             PROGRESS_TOTAL,
@@ -152,7 +139,7 @@ def build_download_archive(
             temporary,
             "w",
             compression=compression,
-            compresslevel=1 if compress_sparse_dat else None,
+            compresslevel=1 if compress_sparse_image else None,
             allowZip64=True,
         ) as archive:
             for path, archive_name in files:
@@ -167,12 +154,6 @@ def build_download_archive(
                     "imagePath": image_path.name,
                     "imageSize": image_path.stat().st_size,
                     "imageMtimeNs": image_path.stat().st_mtime_ns,
-                    "descriptorName": session.descriptor_name,
-                    "descriptorMtimeNs": (
-                        session.descriptor_path.stat().st_mtime_ns
-                        if session.descriptor_path
-                        else None
-                    ),
                     "compatibilityReportAcceptedAt": (
                         session.compatibility_reports[-1].get("acceptedAt")
                         if session.compatibility_reports
@@ -199,19 +180,12 @@ def prepared_download(session: ImageSession) -> tuple[Path, str]:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         image_path = session.path.parent / str(metadata["imagePath"])
         image_stat = image_path.stat()
-        descriptor_mtime = (
-            session.descriptor_path.stat().st_mtime_ns
-            if session.descriptor_path
-            else None
-        )
         valid = (
             archive_path.is_file()
             and image_path.is_file()
             and metadata.get("imageName") == session.name
-            and metadata.get("descriptorName") == session.descriptor_name
             and int(metadata.get("imageSize", -1)) == image_stat.st_size
             and int(metadata.get("imageMtimeNs", -1)) == image_stat.st_mtime_ns
-            and metadata.get("descriptorMtimeNs") == descriptor_mtime
             and metadata.get("compatibilityReportAcceptedAt") == (
                 session.compatibility_reports[-1].get("acceptedAt")
                 if session.compatibility_reports

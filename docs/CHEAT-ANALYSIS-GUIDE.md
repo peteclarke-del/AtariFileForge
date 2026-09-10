@@ -16,23 +16,33 @@ The result is deliberately called a candidate report. Static code cannot prove
 what a memory location means, and many games compress, encrypt, relocate or
 modify their own code. The analyser never changes the file.
 
-## ST BASIC evidence
+## BASIC evidence
 
-The BASIC pass examines the detokenised program and reports:
+The BASIC pass reads the detokenised listing rather than any one dialect's
+tokens, so a GFA BASIC, STOS or ST BASIC program is analysed the same way. It
+reports:
 
-- direct byte and word writes using `?` and `!` indirection;
+- direct byte, word and long writes, in every spelling the ST dialects use:
+  `POKE`, `DPOKE`, `LPOKE`, `DOKE`, `LOKE` and the GFA `BYTE{}`, `WORD{}` and
+  `LONG{}` forms;
 - semantically named gameplay variables such as lives, health, fuel and time;
-- assignments that increment or decrement those variables;
+- assignments that increment or decrement those variables, and the `DEC`,
+  `INC`, `SUB` and `ADD` statements that do the same thing without one;
 - zero and one comparisons that may lead to death, timeout or game-over code.
 
 A named variable is not enough on its own. The analyser scores independent
 signals such as a plausible initial value, an update, a zero or one test and a
 terminal path containing death, game-over or another gameplay clue. Opaque
 variables need a semantic terminal path. An unexplained bare write such as
-`?&70=3` is suppressed because it is more likely to be loader, display, sound
-or operating-system state. A write of an instruction byte such as NOP or RTS
-is retained as a possible trainer patch, with an explicit self-modifying-code
-warning.
+`POKE $70,3` is suppressed because it is more likely to be loader, display,
+sound or operating-system state. A write of a 68000 instruction such as `NOP`
+or `RTS` is retained as a possible trainer patch, with an explicit
+self-modifying-code warning.
+
+A write into the machine rather than into the game is named as such. The
+analyser knows where the TOS system variables, the ST and STE hardware
+registers, the SCC, the MFP, the keyboard and MIDI ACIAs, the TOS ROM and the
+cartridge port live, and a candidate touching any of them says which one.
 
 ## Machine-code evidence
 
@@ -43,7 +53,10 @@ or 68060 disassembly as the file editor. It looks for:
 - later decrements or load/subtract/store updates to that same location;
 - forward terminal branches and destination labels associated with death,
   game over, damage, time or another gameplay outcome;
-- saved symbols and comments that explicitly identify gameplay state;
+- and never a countdown in the ST's hardware registers, because an MFP timer
+  and a sound-envelope counter look exactly like a lives counter and are not
+  one;
+- saved symbols and annotations that explicitly identify gameplay state;
 - multi-byte and decimal counter components when their labels provide the
   necessary relationship.
 
@@ -82,10 +95,11 @@ treated as proof that it matches the selected bytes.
 Community disassemblies demonstrate why this distinction matters. A lives
 counter may be easy to locate, while a useful invulnerability patch can require
 following the branch that handles death and preserving deliberate suicide or
-restart behaviour. The [English Atari Board coders' forum](https://eab.abime.net/forumdisplay.php?f=34)
-carries worked examples of exactly this kind of analysis, and
-[Hall of Light](https://hol.abime.net) indexes the contemporary cheat and
-trainer releases for many titles.
+restart behaviour. The [Atari Forum coding
+board](https://www.atari-forum.com/viewforum.php?f=68) carries worked examples
+of exactly this kind of analysis, and the menu disks the Automation, Pompey
+Pirates and D-Bug groups released are themselves a record of which titles were
+trained and how.
 
 ## Safe workflow
 
@@ -93,7 +107,7 @@ trainer releases for many titles.
 2. Create a named checkpoint for the image.
 3. Open the file, run **Tools → Find cheat candidates** and filter the strongest evidence first.
 4. Open the file in the editor and inspect every reference to the variable or
-   address. Use saved symbols and comments where useful.
+   address. Use saved symbols and annotations where useful.
 5. Run or debug the parent image in the configured emulator. Use watchpoints
    and breakpoints to confirm that the candidate changes during the relevant
    event.

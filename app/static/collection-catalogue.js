@@ -18,14 +18,14 @@
       titles.push({ title: text(title), publisher: text(publisher), source, key: titleKey(title) });
     };
     // What names software on an Atari volume is the volume's own title and
-    // the drawers installed at its root. A file deeper in the tree is part of
+    // the folders installed at its root. A file deeper in the tree is part of
     // a title rather than a title of its own, so it is not indexed as one.
     add(manifest.image?.title || manifest.image?.name, "", "image");
     (manifest.records || []).forEach(record => {
       if (record.recordType === "partition") add(record.title || record.device, "", "partition");
       if (record.recordType === "rom-bank" && !record.empty) add(record.title, "", "rom-bank");
-      if (record.recordType === "directory" && !String(record.path || "").includes("/")) {
-        add(record.path, "", "drawer");
+      if (record.recordType === "directory" && !/[\\/]/.test(String(record.path || ""))) {
+        add(record.path, "", "folder");
       }
     });
     return [...new Map(titles.map(item => [`${item.key}|${item.publisher.toLowerCase()}|${item.source}`, item])).values()];

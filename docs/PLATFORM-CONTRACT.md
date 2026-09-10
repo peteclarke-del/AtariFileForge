@@ -54,10 +54,10 @@ desktop smoke test for native file selection, downloading and emulator windows.
 Platform contract version 5 records native file-manager drag and drop, reviewed
 local-path opening and durable WebView state as explicit desktop adapters.
 Selections from the GTK chooser, file associations and file-manager drops are
-presented to the shared frontend before opening. The user can review FFS target
+presented to the shared frontend before opening. The user can review the target
 hardware, distinguish independent ROMs from a physical component set and choose
 linear or byte-interleaved ROM layout where valid. The native host then executes
-those reviewed plans serially. Image parsing, HDA/GEO pairing, filename policy,
+those reviewed plans serially. Image parsing, partition selection, filename policy,
 private working-copy creation and every operation after opening remain shared.
 Hardware deployment continues to use the same target planner, isolated
 snapshot, ZIP builder and workbench interface in both hosts.

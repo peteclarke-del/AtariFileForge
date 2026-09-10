@@ -102,4 +102,4 @@ def checked_url(url: object, message: str = "The catalogue supplied an invalid U
     return value
 
 
-__all__ = ["ALLOWED_SCHEMES", "http_url", "private_addresses_allowed"]
+__all__ = ["ALLOWED_SCHEMES", "checked_url", "http_url", "private_addresses_allowed"]

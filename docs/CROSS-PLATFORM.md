@@ -93,7 +93,8 @@ attention when moving away from Linux:
 - **`hxcfe`**, the HxCFloppyEmulator converter, is a C program built from
   source by `tools/build-hxc-runtime.sh`. That script targets POSIX shells and
   produces a Linux binary. HFE and SCP support needs an `hxcfe` on `PATH`;
-  everything else, including OFS, FFS, HDF, DMS and ROM work, runs without it.
+  everything else, including floppy, hard-disk, container and ROM work, runs
+  without it.
 
 An edition without `hxcfe` reports the absence clearly when an HFE or SCP
 operation is attempted rather than failing obscurely.

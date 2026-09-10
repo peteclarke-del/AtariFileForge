@@ -31,38 +31,39 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(DiskError, "more than"):
             validated_zip_members(archive)
 
-    def test_hdf_import_expands_every_supported_disk_and_ignores_extras(self):
+    def test_import_expands_every_supported_disk_and_ignores_extras(self):
         upload = zip_upload(
-            "Games (1984)(Commodore).zip",
+            "Games (1987)(Atari).zip",
             {
-                "README.txt": b"notes",
-                "disks/Game A.adf": b"A" * 204800,
-                "disks/Game B.adz": b"B" * 409600,
+                "README.TXT": b"notes",
+                # 80 tracks, two sides, nine sectors: a 720 KB ST floppy.
+                "disks/Game A.st": b"A" * 737280,
+                "disks/Game B.msa": b"B" * 400000,
             },
         )
 
         items = [
             (item.filename, len(item.stream.read()), item.metadata_names)
-            for item in iter_upload_images([upload], {".adf", ".adz"})
+            for item in iter_upload_images([upload], {".st", ".msa"})
         ]
 
         self.assertEqual(
             items,
             [
                 (
-                    "Game A.adf",
-                    204800,
+                    "Game A.st",
+                    737280,
                     [
-                        "disks/Game A.adf",
-                        "Games (1984)(Commodore).zip",
+                        "disks/Game A.st",
+                        "Games (1987)(Atari).zip",
                     ],
                 ),
                 (
-                    "Game B.adz",
-                    409600,
+                    "Game B.msa",
+                    400000,
                     [
-                        "disks/Game B.adz",
-                        "Games (1984)(Commodore).zip",
+                        "disks/Game B.msa",
+                        "Games (1987)(Atari).zip",
                     ],
                 ),
             ],
@@ -71,11 +72,11 @@ class ArchiveTests(unittest.TestCase):
     def test_single_image_import_explains_a_multi_image_zip(self):
         upload = zip_upload(
             "two.zip",
-            {"one.adf": b"1", "two.adf": b"2"},
+            {"one.st": b"1", "two.st": b"2"},
         )
 
         with self.assertRaisesRegex(DiskError, "contains 2 supported images"):
-            with open_single_upload_image(upload, {".adf"}):
+            with open_single_upload_image(upload, {".st"}):
                 pass
 
 

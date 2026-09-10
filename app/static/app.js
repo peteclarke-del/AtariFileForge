@@ -1,24 +1,23 @@
 const {
+  drivePath,
   entrySelectionKey,
   fullPath,
-  isOfsPane,
+  isGemdosPane,
   newPaneState,
   normalisePage,
   parentPath,
   pathNameWithoutExtension,
-  restoredOfsPath,
+  restoredGemdosPath,
   selectionKeys,
   setSelection,
 } = window.AtariWorkspace;
 const { entryIcon, fileKindKey, FILE_ICONS, PANE_ICONS } = window.AtariFileVisuals;
 const { newUuid } = window.AtariIdentifiers;
-const { formatProtection, protectionFlags, protectionHex } = window.AtariMetadata;
+const { attributeFlags, attributeHex, formatAttributes, formatDatestamp, parseDatestamp } = window.AtariMetadata;
 const {
-  allocateFilesToOfsDisks,
   ignoredFolderFile,
-  normaliseProtection,
+  normaliseAttributes,
   targetNameRule,
-  uniqueOfsNames,
 } = window.AtariImportPlanning;
 
 const panes = [newPaneState()];
@@ -89,7 +88,7 @@ const workspacePersistence = window.AtariWorkspacePersistence.create({
   storage: persistentStorage,
   storageKey: OPEN_PANES_STORAGE_KEY,
   newPaneState,
-  restoredOfsPath,
+  restoredGemdosPath,
   api,
   rebuildPaneHosts,
   reconcilePaneWindows: () => paneWindowManager.reconcile(),
@@ -134,7 +133,7 @@ function retainEditorDocument(index, pane, entry, path, view = "source") {
   const existing = editorDocuments.get(key) || {};
   editorDocuments.set(key, {
     ...existing, key, index, imageId: pane.image.id, imageName: pane.image.name,
-    path, directory: pane.path || "$", name: entry.name, partition: pane.partition, side: pane.side, view,
+    path, directory: pane.path, name: entry.name, partition: pane.partition, side: pane.side, view,
   });
   editorWorkspace.state.active = key;
   persistEditorDocuments();
@@ -154,7 +153,7 @@ async function activateEditorDocument(key, force = false) {
   }
   pane.partition = document.partition;
   pane.side = document.side;
-  pane.path = document.directory || "$";
+  pane.path = document.directory || "";
   await loadDirectory(document.index);
   await openFileEditor(document.index, document.name, null, document.path);
 }
@@ -192,8 +191,7 @@ function installEditorDocumentTabs(root, pane) {
     if (!result) return;
     if (result.partition != null) pane.partition = Number(result.partition);
     if (result.side != null) pane.side = Number(result.side);
-    const split = result.path.lastIndexOf(".");
-    pane.path = split > 0 ? result.path.slice(0, split) : "$";
+    pane.path = parentPath(result.path);
     await loadDirectory(panes.indexOf(pane));
     await openFileEditor(panes.indexOf(pane), result.name, null, result.path);
   });
@@ -350,33 +348,109 @@ function paneLabel(index) {
   return `Pane ${index + 1}${panes[index].image ? ` · ${panes[index].image.name}` : " · Empty"}`;
 }
 
+//: The floppy geometries a TOS machine can format, smallest first. A single
+//: sided drive can only reach the first three; every double sided drive can
+//: read all of the 720K, 800K and 880K formats, and only the later Ajax
+//: controller reaches 1.44M.
+const FLOPPY_GEOMETRIES = Object.freeze([
+  { value: "ss-360k", label: "360K", size: 368640, singleSided: true, hfe: "" },
+  { value: "ss-400k", label: "400K", size: 409600, singleSided: true, hfe: "hfe-st-400k" },
+  { value: "ss-440k", label: "440K", size: 450560, singleSided: true, hfe: "hfe-st-440k" },
+  { value: "ds-720k", label: "720K", size: 737280, singleSided: false, hfe: "hfe-st-720k" },
+  { value: "ds-800k", label: "800K", size: 819200, singleSided: false, hfe: "hfe-st-800k" },
+  { value: "ds-880k", label: "880K", size: 901120, singleSided: false, hfe: "hfe-st-880k" },
+  { value: "hd-1440k", label: "1.44M", size: 1474560, singleSided: false, hfe: "hfe-st-1440k" },
+]);
+
+function floppyGeometryForSize(size) {
+  const bytes = Number(size || 0);
+  return [...FLOPPY_GEOMETRIES].reverse().find(entry => bytes >= entry.size) || FLOPPY_GEOMETRIES[3];
+}
+
 function matchingBlankImageFormat(pane) {
   const image = pane.image;
-  if (!image) return { value: "adf", label: "OFS ADF" };
-  if (image.kind === "hdf") return { value: "hdf", label: "HDF" };
+  if (!image) return { value: "ds-720k", label: "720K floppy" };
+  if (image.kind === "hd") return { value: "hd", label: "Hard drive" };
   if (image.kind === "rom") return { value: "rom", label: "ROM" };
-  if (image.kind === "kickfs") return { value: "kickfs", label: "Atari Kickstart ROM" };
-  if (image.kind === "ofs" || image.kind === "ffs") {
-    if (image.hasDescriptor) return { value: "hardfile", label: "UAE hardfile HDA + GEO" };
-    if (image.hardDisk || image.targetHardware === "tos") return { value: "ffs-hard", label: "TOS HDF" };
-    // A floppy's DOS type is not carried in the summary, so a new blank
-    // matches the filing system and the density and takes the international
-    // variant, which is what a modern Workbench formats.
-    const highDensity = image.size >= 1802240;
-    const ofs = image.kind === "ofs";
-    const value = ofs
-      ? (highDensity ? "adf-hd" : "adf")
-      : (highDensity ? "ffs-hd" : "ffs-intl");
-    const label = `${ofs ? "OFS" : "FFS"} ADF · ${highDensity ? "1.76 MiB" : "880 KiB"}`;
-    if (image.containerFormat === "hfe") {
-      const wrapped = ofs
-        ? (highDensity ? "hfe-adf-hd" : "hfe-adf")
-        : (highDensity ? "hfe-ffs-hd" : "hfe-ffs-intl");
-      return { value: wrapped, label: `HFE ${label}` };
+  if (image.kind === "tosrom") return { value: "cartridge", label: "Cartridge ROM" };
+  if (image.kind === "gemdos") {
+    if (image.hardDisk || image.targetHardware === "hd") return { value: "hd", label: "Hard drive" };
+    if (image.targetHardware === "volume") return { value: "volume", label: "Bare volume" };
+    // A GEMDOS floppy is described by its geometry alone: FAT12 on every one
+    // of them, so a new blank simply matches the shape of the open disk and
+    // stays in the container it arrived in.
+    const geometry = floppyGeometryForSize(image.size);
+    if (image.containerFormat === "hfe" && geometry.hfe) {
+      return { value: geometry.hfe, label: `HFE ${geometry.label} floppy` };
     }
-    return { value, label };
+    return { value: geometry.value, label: `${geometry.label} floppy` };
   }
-  return { value: "adf", label: "OFS ADF" };
+  return { value: "ds-720k", label: "720K floppy" };
+}
+
+//: The floppy containers a pane can open. Each holds the sectors of one
+//: disk in its own packing, so a pane shows the container project rather
+//: than a mounted volume until the sectors are converted.
+const CONTAINER_KINDS = Object.freeze(["msa", "dim", "stx"]);
+//: Media whose bytes this build never writes back: a Pasti capture keeps
+//: information a sector image cannot hold, and a CD and a TOS ROM are read
+//: from rather than edited.
+const READ_ONLY_KINDS = Object.freeze(["stx", "iso", "tosrom"]);
+const CONTAINER_LABELS = Object.freeze({
+  msa: "Magic Shadow Archiver image",
+  dim: "FastCopy Pro image",
+  stx: "Pasti capture",
+});
+
+//: The badge colour a pane wears. A mounted partition looks like the GEMDOS
+//: volume it is, and a TOS ROM shares the ROM colour.
+function paneFormatClass(pane) {
+  const kind = pane.image?.kind || "";
+  if (kind === "hd" && pane.partition !== null) return "gemdos";
+  if (kind === "tosrom") return "rom";
+  return kind;
+}
+
+//: The one line that describes a partition table: which scheme it uses, how
+//: many partitions it declares, and whether the drive was written with its
+//: words the other way round, which some ACSI adapters do.
+const PARTITION_SCHEMES = Object.freeze({
+  ahdi: "AHDI partition table",
+  xgm: "AHDI partition table with an XGM extension",
+  icd: "ICD partition table",
+  mbr: "MBR partition table",
+});
+
+//: What the pane footer says while a drive is showing its partition table:
+//: the invitation, plus the size the drive declares when the table records
+//: one, because a table that disagrees with the file it lives in is the
+//: first thing worth knowing about a drive that will not mount.
+function paneTableDescription(pane) {
+  const declared = Number(pane.partitionTable?.hdSize || 0);
+  return declared > 0
+    ? `Select a partition to browse the volume it mounts · the table declares ${humanSize(declared)}`
+    : "Select a partition to browse the volume it mounts";
+}
+
+//: The root directory of a GEMDOS volume is a fixed table rather than a file
+//: of its own, so it runs out of entries long before the disk runs out of
+//: space: 112 on a 720K floppy and 224 on a 1.44M one. A folder further down
+//: has no such limit, so the count is only shown at the root.
+function rootEntryNote(pane) {
+  const limit = Number(pane.image?.filesystemCapabilities?.directoryEntryLimit || 0);
+  if (!limit || pane.path !== "" || pane.archivePath) return "";
+  return ` · ${pane.entries.length} of ${limit} root entries`;
+}
+
+function partitionTableLabel(table) {
+  if (!table) return "Partition table";
+  const scheme = PARTITION_SCHEMES[String(table.scheme || "").toLowerCase()] || "Partition table";
+  const count = Array.isArray(table.partitions) ? table.partitions.length : null;
+  return [
+    scheme,
+    count == null ? "" : `${count} partition${count === 1 ? "" : "s"}`,
+    table.byteSwapped ? "byte-swapped" : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function paneDragHandle(index) {
@@ -441,6 +515,18 @@ async function openHexEditor(index, initialOffset = 0, { host: requestedHost = n
   });
   if (panes[index] === pane) await onClose?.();
   if (panes[index] === pane) await refreshCurrentView(index);
+}
+
+//: How the drive declares its partitions: which table it carries, whether
+//: its words are byte-swapped, and how large the drive says it is. It is
+//: read alongside the partition listing so the pane can say what shape the
+//: drive is in rather than only what is on it.
+async function fetchPartitionTable(imageId) {
+  try {
+    return (await api(`/api/images/${imageId}/partition-table`)).partitionTable;
+  } catch (_error) {
+    return null;
+  }
 }
 
 async function fetchCapacity(imageId, partition = null) {
@@ -517,11 +603,17 @@ async function showPhysicalFloppyDialog(index) {
       ? "Every written sector will be read back and verified automatically."
       : "This flux-level image cannot be verified with a sector read-back. Test the disk in suitable hardware afterwards.";
     const unavailable = status.available ? "" : `<div class="help-warning"><strong>Greaseweazle is not ready.</strong> ${esc(status.detail)}</div>`;
+    // The capture formats and the geometries are whatever the desktop
+    // endpoint reports, so a build that grows a format needs no change here.
+    const captureFormats = status.media.captureFormats || status.captureFormats || [];
+    const geometries = status.media.geometries || status.geometries || [];
     showModal(`<div class="analysis-dialog physical-floppy-dialog"><header><div><small>PHYSICAL MEDIA</small><h2>Write ${esc(status.media.name)}</h2></div></header>
       <p>This will write the current working image to a real floppy disk. Unsaved image changes are included.</p>
       <dl class="physical-floppy-summary"><div><dt>Image type</dt><dd>${esc(status.media.format)}</dd></div><div><dt>Verification</dt><dd>${status.media.automaticVerification ? "Automatic sector verification" : "Not available for flux images"}</dd></div></dl>
       ${unavailable}
       <label class="field"><span>Physical drive</span><select name="physicalDrive" ${status.available ? "" : "disabled"}>${status.drives.map(drive => `<option value="${esc(drive.id)}">${esc(drive.label)}</option>`).join("")}</select></label>
+      ${captureFormats.length ? `<label class="field"><span>Written as</span><select name="captureFormat" ${status.available ? "" : "disabled"}>${captureFormats.map(format => `<option value="${esc(format.id)}">${esc(format.label)}</option>`).join("")}</select></label>` : ""}
+      ${geometries.length ? `<label class="field" data-geometry-field><span>Geometry</span><select name="captureGeometry" ${status.available ? "" : "disabled"}>${geometries.map(geometry => `<option value="${esc(geometry.id)}">${esc(geometry.label)}</option>`).join("")}</select><small>A sector image carries no geometry of its own, so the tracks, sides and sectors have to be stated before the disk is cut.</small></label>` : ""}
       <div class="help-warning"><strong>This is destructive.</strong> All existing data on the disk in the selected drive will be overwritten. ${esc(verification)}</div>
       <label class="check-field physical-floppy-confirm"><input type="checkbox" name="physicalConfirmed" required ${status.available ? "" : "disabled"}> I understand that the physical disk will be overwritten.</label>
       <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button danger" value="write" ${status.available ? "" : "disabled"}>Write and ${status.media.automaticVerification ? "verify" : "finish unverified"}</button></div></div>`, async form => {
@@ -531,7 +623,12 @@ async function showPhysicalFloppyDialog(index) {
           operationId => api(`/api/desktop/images/${pane.image.id}/physical-floppy`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ drive: form.get("physicalDrive"), operationId }),
+            body: JSON.stringify({
+              drive: form.get("physicalDrive"),
+              format: form.get("captureFormat") || "",
+              geometry: form.get("captureGeometry") || "",
+              operationId,
+            }),
           }),
           { abortMode: "physical" },
         );
@@ -542,6 +639,17 @@ async function showPhysicalFloppyDialog(index) {
           <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div></div>`, null, { replace: true });
         return false;
       }, { replace: true });
+    // A geometry only has to be stated for a sector image; a track or flux
+    // capture already carries its own.
+    const formatSelect = modalContent.querySelector('[name="captureFormat"]');
+    const geometryField = modalContent.querySelector("[data-geometry-field]");
+    if (formatSelect && geometryField) {
+      const refreshGeometry = () => {
+        geometryField.hidden = !["st", "msa"].includes(formatSelect.value);
+      };
+      formatSelect.addEventListener("change", refreshGeometry);
+      refreshGeometry();
+    }
   } catch (error) {
     modal.close();
     toast(`Could not prepare the physical write: ${error.message}`, true);
@@ -553,7 +661,7 @@ function clipboardItemsForPane(index) {
   if (!pane?.image) return [];
   // A partition table has nothing to put on a clipboard: partitions are
   // declared by the drive, not moved between drives.
-  if (pane.image.kind === "hdf" && pane.partition === null) return [];
+  if (pane.image.kind === "hd" && pane.partition === null) return [];
   if (pane.image.kind === "rom") {
     return selectedEntries(index).map(entry => ({
       pane: index,
@@ -594,9 +702,9 @@ function rowIsPendingCut(pane, entry) {
 }
 
 function canPasteIntoPane(pane) {
-  if (!workspaceClipboard || !pane?.image || pane.image.readOnly || ["dms", "iso"].includes(pane.image.kind)) return false;
+  if (!workspaceClipboard || !pane?.image || pane.image.readOnly || READ_ONLY_KINDS.includes(pane.image.kind) || CONTAINER_KINDS.includes(pane.image.kind)) return false;
   // A partition table is not a place files can be pasted; a volume always is.
-  return !(pane.image.kind === "hdf" && pane.partition === null);
+  return !(pane.image.kind === "hd" && pane.partition === null);
 }
 
 function selectRow(index, key, { toggle = false, range = false } = {}) {
@@ -662,50 +770,49 @@ function renderPane(index, preserveScroll = false) {
 
   const selected = selectedEntry(index);
   const selectedKeys = new Set(selectionKeys(pane));
-  const isPartitionIndex = pane.image.kind === "hdf" && pane.partition === null;
-  const isDrive = pane.image.kind === "hdf";
-  const isDMS = pane.image.kind === "dms";
-  //: A CD is read-only by nature, so it offers browsing and copying out and
-  //: none of the controls that would write to it.
-  const isIso = pane.image.kind === "iso";
+  const isPartitionIndex = pane.image.kind === "hd" && pane.partition === null;
+  const isDrive = pane.image.kind === "hd";
+  //: A floppy container holds the sectors of one disk rather than a mounted
+  //: volume, so it is browsed as a project and converted rather than edited
+  //: in place. A Pasti capture is read-only by nature.
+  const isContainer = CONTAINER_KINDS.includes(pane.image.kind);
   const isRom = pane.image.kind === "rom";
-  const isKickfs = pane.image.kind === "kickfs";
-  const isFfsHdd = pane.image.kind === "ffs" && pane.image.hardDisk;
-  // Installing anything -- Workbench, a staged title, WHDLoad -- needs a
-  // writable GEMDOS volume to install into.
+  const isTosRom = pane.image.kind === "tosrom";
+  const isHardDiskVolume = pane.image.kind === "gemdos" && Boolean(pane.image.hardDisk);
+  // Staging a disk, installing a title or preparing a drive all need a
+  // writable GEMDOS volume to work on.
   const acceptsInstall = paneAcceptsInstall(pane);
   const isArchive = Boolean(pane.archivePath);
-  const isOfs = isOfsPane(pane);
-  // Every GEMDOS volume nests drawers, OFS included, so the only views
-  // without them are the ones with no directory structure at all.
-  const supportsFolders = !isPartitionIndex && !isDMS && !isArchive && !isRom && !isKickfs;
+  const isGemdos = isGemdosPane(pane);
+  // Every GEMDOS volume nests folders, so the only views without them are
+  // the ones with no directory structure at all.
+  const supportsFolders = !isPartitionIndex && !isContainer && !isArchive && !isRom && !isTosRom;
   const canFolder = supportsFolders && !pane.image.readOnly;
-  const canEdit = !isPartitionIndex && !isDMS && !isArchive && !pane.image.readOnly;
-  const isDsd = pane.image.doubleSided;
-  const kind = pane.image.kind === "hdf" && pane.partition !== null ? "ofs" : pane.image.kind;
+  const canEdit = !isPartitionIndex && !isContainer && !isArchive && !pane.image.readOnly;
+  const kind = paneFormatClass(pane);
+  const driveLetter = pane.partitionName || pane.image.driveLetter || "";
   const location = isArchive
-    ? `${pane.archiveName} · /${pane.archiveMember || ""}`
+    ? `${pane.archiveName} · \\${pane.archiveMember || ""}`
     : isPartitionIndex
-    ? "HDF disk index"
-    : isDMS
-      ? "DiskMasher archive"
+    ? partitionTableLabel(pane.partitionTable)
+    : isContainer
+      ? `${CONTAINER_LABELS[pane.image.kind] || "Floppy container"} · ${pane.image.readOnly ? "read-only" : "convert to browse"}`
       : isRom
         ? `${pane.image.rom?.platform || "Atari"} · ${pane.image.rom?.bankCount || 0} bank(s)`
-      : isKickfs
-        ? `${pane.image.kickfs?.title || "Kickstart ROM"} · version ${pane.image.kickfs?.version ?? 0} · flat data ROM`
+      : isTosRom
+        ? `${pane.image.tosrom?.title || "TOS ROM"} · version ${pane.image.tosrom?.version ?? 0} · read-only segments`
       : pane.partition !== null
-        ? `${pane.partitionName || `Partition ${pane.partition}`}: · ${pane.path || ":"}`
+        ? `${pane.partitionName || `Partition ${pane.partition}`} · ${drivePath(driveLetter, pane.path)}`
         : pane.image.filesystemCapabilities
-          ? `${pane.image.filesystemCapabilities.format} · ${pane.path || ":"}`
-          : `Volume root · ${pane.path || ":"}`;
-  const hasParentEntry = isArchive || (!isPartitionIndex && !isDMS && !isRom && (
+          ? `${pane.image.filesystemCapabilities.format} · ${drivePath(driveLetter, pane.path)}${rootEntryNote(pane)}`
+          : `Volume root · ${drivePath(driveLetter, pane.path)}${rootEntryNote(pane)}`;
+  const hasParentEntry = isArchive || (!isPartitionIndex && !isContainer && !isRom && (
     pane.partition !== null || pane.path !== ""
   ));
   const parentRow = hasParentEntry ? `<tr class="file-row parent-row" aria-label="Parent directory" tabindex="0" draggable="false" data-parent="1" data-key=".." data-name=".." data-type="dir" data-partition="">
     <td class="file-name-cell"><div class="file-name-wrap"><span class="file-icon dir" title="Parent directory">${FILE_ICONS.folderUp}</span><strong>..</strong></div></td>
     <td class="meta">Parent directory</td>
     <td class="meta">-</td>
-    <td class="meta address-cell">-</td>
     <td class="meta address-cell">-</td>
     <td><span class="pill">-</span></td>
   </tr>` : "";
@@ -722,9 +829,9 @@ function renderPane(index, preserveScroll = false) {
       : entry.filetype || entry.contentKind || "-";
     const attr = entryType === "partition"
       ? (entry.bootable ? "Boot" : "-")
-      : entry.attr || (entry.protection != null ? formatProtection(entry.protection) : "");
+      : entry.attributes || (entry.attr != null ? formatAttributes(entry.attr) : "");
     const entryKey = entrySelectionKey(entry);
-    const rowActionable = !isArchive && !isVirtual && !pane.image.readOnly && !isDMS && !isPartitionIndex && canEdit;
+    const rowActionable = !isArchive && !isVirtual && !pane.image.readOnly && !isContainer && !isPartitionIndex && canEdit;
     const accessActionable = rowActionable;
     const downloadable = !isPartitionIndex && !isDir && !isVirtual && !isRom;
     const openHint = isArchiveFile ? ' title="Double-click to browse this archive"' : downloadable ? ' title="Double-click to open"' : "";
@@ -737,22 +844,24 @@ function renderPane(index, preserveScroll = false) {
       ${!isRom || entry.header ? `<button class="row-action row-rename" type="button" draggable="false" title="Rename ${esc(actionName)}" aria-label="Rename ${esc(actionName)}" ${multiSelection ? "hidden" : ""}>✎</button>` : ""}
       ${rowActionable ? `<button class="row-action delete row-delete" type="button" draggable="false" title="Delete ${esc(actionName)}" aria-label="Delete ${esc(actionName)}" ${hideGroupAction ? "hidden" : ""}>×</button>` : ""}
     </span>` : "";
-    const accessCell = `<td class="access-cell"><span class="pill">${esc(attr || detail)}</span>${accessActionable && !isRom ? `<span class="access-actions" ${hideGroupAction ? "hidden" : ""}>
-      <button class="row-action row-read-write" type="button" draggable="false" title="${isKickfs ? "Make loadable" : "Mark read / write"} · ${esc(actionName)}" aria-label="${isKickfs ? "Make loadable" : "Mark read / write"} ${esc(actionName)}">◇</button>
-      <button class="row-action row-read-only" type="button" draggable="false" title="${isKickfs ? "Mark execute-only" : "Mark read-only"} · ${esc(actionName)}" aria-label="${isKickfs ? "Mark run-only" : "Mark read-only"} ${esc(actionName)}">◆</button>
+    const accessCell = `<td class="access-cell" data-label="Attributes"><span class="pill" title="GEMDOS attributes · read-only, hidden, system, volume label, directory, archive">${esc(attr || detail)}</span>${accessActionable && !isRom ? `<span class="access-actions" ${hideGroupAction ? "hidden" : ""}>
+      <button class="row-action row-read-write" type="button" draggable="false" title="Clear the read-only attribute · ${esc(actionName)}" aria-label="Clear the read-only attribute on ${esc(actionName)}">◇</button>
+      <button class="row-action row-read-only" type="button" draggable="false" title="Set the read-only attribute · ${esc(actionName)}" aria-label="Set the read-only attribute on ${esc(actionName)}">◆</button>
     </span>` : ""}</td>`;
-    const editableMetadata = !isVirtual && !isArchive && !pane.image.readOnly && !isDMS && !isRom;
+    const editableMetadata = !isVirtual && !isArchive && !pane.image.readOnly && !isContainer && !isRom && !isTosRom;
     const romHeader = entry.header || null;
     const romOffset = Number.isFinite(Number(entry.fileOffset)) ? Number(entry.fileOffset) : Number(entry.bank || 0) * Number(pane.image.rom?.bankSize || entry.length || 0);
-    const romMapped = pane.image.rom?.platform === "kickstart" && Number(entry.length) <= 16384
-      ? `Mapped 40960-&amp;${(0x8000 + Math.max(0, Number(entry.length) - 1)).toString(16).toUpperCase().padStart(4, "0")}`
+    // A cartridge is decoded at $FA0000 on every ST-family machine; anything
+    // else is a bank of bytes with no fixed home in the address space.
+    const romMapped = pane.image.rom?.platform === "cartridge" && Number(entry.length) <= 131072
+      ? `Mapped &amp;FA0000-&amp;${(0xFA0000 + Math.max(0, Number(entry.length) - 1)).toString(16).toUpperCase().padStart(6, "0")}`
       : "No fixed CPU mapping";
     const romPurpose = entry.empty
       ? "Available erased bank"
       : romHeader
         ? `${esc(romHeader.roles)} · ${esc(romHeader.processor)}`
         : entry.extensionHeader
-          ? "TOS extension ROM"
+          ? "Cartridge or expansion ROM header"
           : "Unrecognised header / raw bytes";
     const romEntries = romHeader
       ? [["Language", romHeader.languageEntry], ["Service", romHeader.serviceEntry]].filter(([_label, value]) => Number.isFinite(Number(value))).map(([label, value]) => `${label} &amp;${Number(value).toString(16).toUpperCase()}`).join(" · ")
@@ -768,8 +877,9 @@ function renderPane(index, preserveScroll = false) {
     const romMatches = entry.matchingBanks?.length ? `Identical to bank${entry.matchingBanks.length === 1 ? "" : "s"} ${entry.matchingBanks.join(", ")}` : "Unique bank contents";
     const cells = isPartitionIndex
       ? `<td class="file-name-cell"><div class="file-name-wrap"><span class="file-icon ${visual.kind}" title="${esc(visual.label)}">${icon}</span><strong>${esc(entry.name)}</strong></div></td>
-      <td class="meta">${esc(entry.format || "Unknown")}</td>
+      <td class="meta">${esc(entry.identifier || entry.filetype || "Unknown")}</td>
       <td class="meta">${esc(humanSize(entry.length))}</td>
+      <td class="meta">${esc(entry.format || "Unknown filing system")}</td>
       <td><span class="pill">${entry.bootable ? `Boot priority ${Number(entry.bootPriority ?? 0)}` : "No"}</span></td>`
       : isRom ? `<td class="rom-bank-cell" data-label="Bank and address"><strong>Bank ${String(entry.bank).padStart(3, "0")}</strong><small>File &amp;${romOffset.toString(16).toUpperCase().padStart(6, "0")}</small><small>${romMapped}</small></td>
         <td class="file-name-cell rom-identity-cell" data-label="Identity"><div class="file-name-wrap"><span class="file-icon ${visual.kind}" title="${esc(visual.label)}">${icon}</span><strong>${esc(entry.name)}</strong>${rowActions}</div><small>${romIdentityDetail}</small></td>
@@ -778,12 +888,11 @@ function renderPane(index, preserveScroll = false) {
       : `<td class="file-name-cell"><div class="file-name-wrap"><span class="file-icon ${visual.kind}" title="${esc(visual.label)}">${icon}</span><strong>${esc(entry.name)}</strong>
         ${downloadAction}${rowActions}
       </div></td>
-      <td class="meta">${esc(isVirtual ? "OFS catalogue" : isDir ? (isArchive ? (pane.archiveKind === "dms" ? "DMS folder" : "Archive folder") : "Directory") : isArchiveFile ? "Archive" : isArchive ? (pane.archiveKind === "dms" ? "DMS file" : "Archive file") : "File")}</td>
+      <td class="meta">${esc(isVirtual ? "Grouped results" : isDir ? (isArchive ? "Container folder" : "Folder") : isArchiveFile ? "Container" : isArchive ? "Container file" : "File")}</td>
       <td class="meta">${esc(size)}</td>
-      <td class="meta">${esc(entry.datestamp || "-")}</td>
-      <td class="meta comment-cell" data-label="Comment">${editableMetadata
-        ? `<button type="button" class="metadata-edit" title="Edit the protection bits and comment">${esc(entry.comment || "-")}</button>`
-        : esc(entry.comment || "-")}</td>
+      <td class="meta datestamp-cell" data-label="Modified">${editableMetadata
+        ? `<button type="button" class="metadata-edit" title="Edit the GEMDOS attributes and datestamp">${esc(entry.datestamp || "-")}</button>`
+        : esc(entry.datestamp || "-")}</td>
       ${accessCell}`;
     return `<tr class="file-row${selectedKeys.has(entryKey) ? " selected" : ""}${isVirtual ? " virtual-catalogue-row" : ""}${entry.catalogueBreak ? " catalogue-break" : ""}${rowIsPendingCut(pane, entry) ? " clipboard-cut" : ""}"${openHint}
       aria-selected="${selectedKeys.has(entryKey)}"
@@ -802,10 +911,10 @@ function renderPane(index, preserveScroll = false) {
   const clipboardTools = `<details class="tool-menu edit-tools">
     <summary class="tool"><b>✎</b><span>Edit</span></summary>
     <div class="tool-menu-panel">
-      <button class="menu-command clipboard-cut-action" ${!isArchive && clipboardSelection.length && !pane.image.readOnly && !isDMS ? "" : "disabled"} title="Cut selected items"><b>✂</b><span>Cut <small>Ctrl/Cmd+X</small></span></button>
+      <button class="menu-command clipboard-cut-action" ${!isArchive && clipboardSelection.length && !pane.image.readOnly && !isContainer ? "" : "disabled"} title="Cut selected items"><b>✂</b><span>Cut <small>Ctrl/Cmd+X</small></span></button>
       <button class="menu-command clipboard-copy-action" ${!isArchive && clipboardSelection.length ? "" : "disabled"} title="Copy selected items"><b>⧉</b><span>Copy <small>Ctrl/Cmd+C</small></span></button>
       <button class="menu-command clipboard-paste-action" ${!isArchive && canPasteIntoPane(pane) ? "" : "disabled"} title="Paste once into this location"><b>▣</b><span>Paste <small>Ctrl/Cmd+V</small></span></button>
-      ${pane.image.readOnly || isDMS ? "" : `<span class="menu-separator" role="separator"></span>
+      ${pane.image.readOnly || isContainer ? "" : `<span class="menu-separator" role="separator"></span>
         <button class="menu-command undo-image" ${pane.image.checkpoints?.canUndo ? "" : "disabled"}><b>↶</b><span>Undo last change</span></button>
         <button class="menu-command manage-checkpoints"><b>◉</b><span>Checkpoints…</span></button>`}
     </div>
@@ -817,9 +926,9 @@ function renderPane(index, preserveScroll = false) {
       <button class="menu-command menu-load-image"><b>▤</b><span>Open image…</span></button>
       <button class="menu-command menu-save-image"><b>⇩</b><span>Save image</span></button>
       ${pane.image.exportFormats?.length ? `<button class="menu-command menu-export-image"><b>⇄</b><span>Export as…</span></button>` : ""}
-      ${isDMS || pane.image.readOnly ? "" : `<span class="menu-separator" role="separator"></span>`}
+      ${isContainer || pane.image.readOnly ? "" : `<span class="menu-separator" role="separator"></span>`}
       ${isPartitionIndex ? ""
-        : !isDMS && !pane.image.readOnly ? `<button class="menu-command import-file"><b>＋</b><span>${isRom ? "Insert ROM bank(s)…" : "Insert File…"}</span></button>
+        : !isContainer && !pane.image.readOnly ? `<button class="menu-command import-file"><b>＋</b><span>${isRom ? "Insert ROM bank(s)…" : "Insert File…"}</span></button>
           <button class="menu-command import-folder"><b>▣</b><span>Insert Folder &amp; Contents…</span></button>
           ${isRom
             ? `<button class="menu-command append-rom-bank"><b>▥</b><span>Append empty bank</span></button>`
@@ -833,10 +942,9 @@ function renderPane(index, preserveScroll = false) {
     <div class="tool-menu-panel">
       <button class="menu-command view-refresh"><b>↻</b><span>Refresh current view</span></button>
       ${pane.partition !== null ? '<button class="menu-command view-partitions"><b>▦</b><span>Return to the partition table</span></button>' : ""}
-      ${isDsd ? `<button class="menu-command switch-side"><b>⇄</b><span>Switch to side ${pane.side === 2 ? "0" : "2"}</span></button>` : ""}
     </div>
   </details>`;
-  const onlineLibraryAction = isArchive || isDMS || isRom || pane.image.readOnly ? "" :
+  const onlineLibraryAction = isArchive || isContainer || isRom || pane.image.readOnly ? "" :
     `<button class="menu-command online-library" ><b>⌕</b><span>Find software online…</span></button>`;
   const libraryTools = `<details class="tool-menu library-tools">
     <summary class="tool"><b>⌕</b><span>Library</span></summary>
@@ -853,21 +961,23 @@ function renderPane(index, preserveScroll = false) {
       ${!isArchive && !isRom && !isPartitionIndex ? `<button class="menu-command inspect-file" ${selected && selected.type !== "dir" && selected.type !== "directory" ? "" : "disabled"}><b>⌕</b><span>Open selected file</span></button><button class="menu-command inspect-dependencies" ${selected && selected.type !== "dir" && selected.type !== "directory" ? "" : "disabled"}><b>⛓</b><span>Check loader dependencies</span></button>` : ""}
       <button class="menu-command find-duplicates"><b>≡</b><span>${isPartitionIndex ? "Check for duplicate games" : "Find duplicates / variants"}</span></button>
       <button class="menu-command compare-image" ${panes.some((other, otherIndex) => otherIndex !== index && other.image?.id && other.image.id !== pane.image.id) ? "" : 'disabled title="Open another image to compare."'}><b>⇄</b><span>Compare with open image…</span></button>
-      <button class="menu-command apply-image-patch" ${pane.image.readOnly || isDMS ? "disabled" : ""}><b>⇥</b><span>Apply guarded patch…</span></button>
+      <button class="menu-command apply-image-patch" ${pane.image.readOnly || isContainer ? "disabled" : ""}><b>⇥</b><span>Apply guarded patch…</span></button>
       <button class="menu-command export-manifest"><b>⇩</b><span>Export collection manifest</span></button>
     </div>
   </details>`;
-  const emulatorMediaApplicable = !isArchive && !isRom && !isKickfs;
+  const emulatorMediaApplicable = !isArchive && !isRom && !isTosRom;
   const emulatorTargetName = isDrive
     ? "hard drive"
-    : isDMS ? "DMS archive" : "image";
+    : isContainer ? "floppy container" : "image";
   const emulatorActions = emulatorMediaApplicable
     ? `<span class="menu-separator" role="separator"></span>
         <button class="menu-command run-pane-emulator"><b>▶</b><span>Run ${emulatorTargetName}…</span></button>
         <button class="menu-command debug-pane-emulator"><b>⌁</b><span>Debug ${emulatorTargetName}…</span></button>`
     : "";
-  const physicalSuffix = String(pane.image.name || "").toLowerCase().match(/\.(adf|adz|hfe|scp|ipf|img)$/);
-  const physicalMediaApplicable = !isFfsHdd && Boolean(physicalSuffix);
+  // A hard drive cannot be written to a floppy drive, so only the floppy
+  // containers offer a physical write.
+  const physicalSuffix = String(pane.image.name || "").toLowerCase().match(/\.(st|msa|dim|stx|hfe|scp|ipf)$/);
+  const physicalMediaApplicable = !isDrive && !isHardDiskVolume && Boolean(physicalSuffix);
   const physicalHostAvailable = hasHostCapability("physical-floppy-write");
   const physicalFloppyAction = physicalMediaApplicable
     ? `<span class="menu-separator" role="separator"></span><button class="menu-command write-physical-floppy" ${physicalHostAvailable ? "" : 'disabled title="Physical drives are available in the native Linux host."'}><b>▣</b><span>Write physical floppy…</span></button>`
@@ -880,13 +990,13 @@ function renderPane(index, preserveScroll = false) {
       ${physicalFloppyAction}
       <button class="menu-command build-deployment"><b>⇩</b><span>Build hardware deployment…</span></button>
       ${isPartitionIndex ? "" : `<button class="menu-command validate-image"><b>✓</b><span>${isRom ? "Check ROM structure" : "Check filesystem"}</span></button>`}
-      ${isFfsHdd ? '<button class="menu-command audit-ffs-installations"><b>⌁</b><span>Check installed disk software…</span></button>' : ""}
+      ${(isHardDiskVolume || acceptsInstall) && DRIVE_SOFTWARE_AUDIT_AVAILABLE ? '<button class="menu-command audit-drive-software"><b>⌁</b><span>Check installed drive software…</span></button>' : ""}
       ${acceptsInstall ? `<span class="menu-separator" role="separator"></span>
-        <button class="menu-command install-workbench"><b>⌘</b><span>Install Workbench…</span></button>
-        <button class="menu-command install-tos-cd"><b>◎</b><span>Install TOS 3.5 or 3.9…</span></button>
-        <button class="menu-command staged-installations"><b>▤</b><span>Staged installations…</span></button>`
-        : '<button class="menu-command staged-installations"><b>▤</b><span>Staged installations…</span></button>'}
-      ${isArchive ? "" : isRom ? '<button class="menu-command rom-workbench"><b>⌬</b><span>ROM Workbench…</span></button><button class="menu-command configure-rom"><b>▥</b><span>ROM layout…</span></button>' : isKickfs ? `${pane.image.readOnly ? "" : '<button class="menu-command configure-kickfs"><b>▥</b><span>Kickstart ROM properties…</span></button>'}` : isPartitionIndex || isDMS ? (isDMS ? '<button class="menu-command dms-project"><b>≋</b><span>DMS archive project…</span></button><button class="menu-command convert-dms"><b>⇥</b><span>Convert archive to disk</span></button>' : "") : pane.image.readOnly ? "" : '<button class="menu-command compact-image"><b>≋</b><span>Compact filesystem</span></button>'}
+        <button class="menu-command prepare-drive"><b>⌘</b><span>Prepare this drive…</span></button>
+        <button class="menu-command run-title-installer"><b>◎</b><span>Run a title's own installer…</span></button>
+        <button class="menu-command staged-installations"><b>▤</b><span>Staged disks…</span></button>`
+        : '<button class="menu-command staged-installations"><b>▤</b><span>Staged disks…</span></button>'}
+      ${isArchive ? "" : isRom ? '<button class="menu-command rom-workbench"><b>⌬</b><span>ROM Workbench…</span></button><button class="menu-command configure-rom"><b>▥</b><span>ROM layout…</span></button>' : isTosRom ? "" : isPartitionIndex || isContainer ? (isContainer ? '<button class="menu-command container-project"><b>≋</b><span>Container project…</span></button><button class="menu-command convert-container"><b>⇥</b><span>Convert container…</span></button>' : "") : pane.image.readOnly ? "" : '<button class="menu-command compact-image"><b>≋</b><span>Compact filesystem</span></button>'}
     </div>
   </details>`;
   const exportControl = exportAvailability(pane.image);
@@ -919,12 +1029,12 @@ function renderPane(index, preserveScroll = false) {
     <nav class="toolbar" aria-label="Pane menus">
       ${toolbarMarkup}
     </nav>
-    <div class="breadcrumbs">${isArchive ? archiveCrumbs(pane) : isPartitionIndex ? '<span class="crumb current">All disks</span>' : isRom ? '<span class="crumb current">ROM bank inventory</span>' : pane.partition !== null ? `<button class="crumb hdf-home">All disks</button><span>›</span>${crumbs(pane.path, isOfs)}` : crumbs(pane.path, isOfs)}</div>
+    <div class="breadcrumbs">${isArchive ? archiveCrumbs(pane) : isPartitionIndex ? '<span class="crumb current">All drives</span>' : isRom ? '<span class="crumb current">ROM bank inventory</span>' : pane.partition !== null ? `<button class="crumb drive-home">All drives</button><span>›</span>${crumbs(pane.path, false, driveLetter)}` : crumbs(pane.path, false, driveLetter)}</div>
     ${isRom ? `<aside class="rom-pane-guide" aria-label="ROM pane guidance"><span><b>ⓘ Info</b> decodes headers, commands, strings and modules</span><span><b>Double-click</b> opens the bank in Hex</span><span><b>Tools → ROM Workbench</b> analyses code, revisions and hardware</span><span><b>ROM layout</b> changes bank interpretation without rewriting bytes</span></aside>` : ""}
-    ${isKickfs ? `<aside class="rom-pane-guide" aria-label="Kickstart ROM pane guidance"><span><b>Flat catalogue</b> · case-sensitive names, maximum 10 characters</span><span><b>Access</b> switches between readable and execute-only</span><span><b>Kickstart ROM properties</b> edits title, version and copyright</span><span><b>Check filesystem</b> verifies every block CRC</span></aside>` : ""}
+    ${isTosRom ? `<aside class="rom-pane-guide" aria-label="TOS ROM pane guidance"><span><b>Read-only segments</b> · the operating system as TOS lays it out in ROM</span><span><b>Double-click</b> opens a segment in Hex</span><span><b>Check ROM structure</b> verifies the header and its checksum</span><span><b>A TOS ROM is never written</b> · export the bytes to change them elsewhere</span></aside>` : ""}
     <div class="list-wrap">
       ${loadingMarkup(pane)}
-      ${(parentRow || rows) ? `<table class="file-list${isPartitionIndex ? " partition-list" : ""}${isRom ? " rom-bank-list" : " catalogue-file-list"}" role="grid" aria-label="${isPartitionIndex ? "Hard drive partitions" : isRom ? "ROM bank inventory" : "Files in " + esc(location)}"><thead><tr>${isPartitionIndex ? "<th>Device</th><th>Filing system</th><th>Size</th><th>Boot</th>" : isRom ? "<th>Bank and address</th><th>Identity</th><th>Purpose and entry points</th><th>Contents</th>" : '<th>Name</th><th>Kind</th><th>Size</th><th title="Datestamp of the last change">Modified</th><th title="File comment">Comment</th><th>Protection</th>'}</tr></thead><tbody>${parentRow}${rows}</tbody></table>` : '<div class="empty-list">Nothing here yet.<br>Drop a host file into this pane to add it.</div>'}
+      ${(parentRow || rows) ? `<table class="file-list${isPartitionIndex ? " partition-list" : ""}${isRom ? " rom-bank-list" : " catalogue-file-list"}" role="grid" aria-label="${isPartitionIndex ? "Hard drive partitions" : isRom ? "ROM bank inventory" : "Files in " + esc(location)}"><thead><tr>${isPartitionIndex ? "<th>Drive</th><th>Identifier</th><th>Size</th><th>Filing system</th><th>Boot</th>" : isRom ? "<th>Bank and address</th><th>Identity</th><th>Purpose and entry points</th><th>Contents</th>" : '<th>Name</th><th>Kind</th><th>Size</th><th title="Datestamp of the last change">Modified</th><th title="GEMDOS attribute byte">Attributes</th>'}</tr></thead><tbody>${parentRow}${rows}</tbody></table>` : '<div class="empty-list">Nothing here yet.<br>Drop a host file into this pane to add it.</div>'}
     </div>
     <footer class="pane-foot"><span>${pane.image.readOnly ? "Read-only safe view · " : ""}${selectedKeys.size ? `${selectedKeys.size} selected · ` : ""}${pane.entries.length} ${isPartitionIndex ? `partition${pane.entries.length === 1 ? "" : "s"}` : isRom ? `bank${pane.entries.length === 1 ? "" : "s"}` : "objects"} · ${esc(pane.description || "")}</span>${capacityMarkup(pane.capacity)}</footer>`;
 
@@ -964,22 +1074,20 @@ function renderPane(index, preserveScroll = false) {
   host.querySelector(".new-empty-file")?.addEventListener("click", () => guardedPaneAction(index, () => createEmptyFile(index)));
   host.querySelector(".append-rom-bank")?.addEventListener("click", () => guardedPaneAction(index, () => appendBlankRomBank(index)));
   host.querySelector(".configure-rom")?.addEventListener("click", () => guardedPaneAction(index, () => configureRomLayout(index)));
-  host.querySelector(".configure-kickfs")?.addEventListener("click", () => guardedPaneAction(index, () => configureKickfs(index)));
   host.querySelector(".rom-workbench")?.addEventListener("click", () => guardedPaneAction(index, () => showRomWorkbench(index)));
-  host.querySelector(".switch-side")?.addEventListener("click", () => switchDsdSide(index));
   host.querySelector(".online-library")?.addEventListener("click", () => guardedPaneAction(index, () => showOnlineLibrary(index)));
   host.querySelector(".collection-catalogue")?.addEventListener("click", () => showCollectionCatalogue(index));
   host.querySelector(".validate-image")?.addEventListener("click", () => guardedPaneAction(index, () => validateImage(index)));
-  host.querySelector(".audit-ffs-installations")?.addEventListener("click", () => guardedPaneAction(index, () => showFfsInstallationAudit(index)));
+  host.querySelector(".audit-drive-software")?.addEventListener("click", () => guardedPaneAction(index, () => showDriveSoftwareAudit(index)));
   host.querySelector(".staged-installations")?.addEventListener("click", () => guardedPaneAction(index, () => showStagedInstallations(index)));
-  host.querySelector(".install-workbench")?.addEventListener("click", () => guardedPaneAction(index, () => showWorkbenchInstall(index)));
-  host.querySelector(".install-tos-cd")?.addEventListener("click", () => guardedPaneAction(index, () => showAtariosCdInstall(index)));
+  host.querySelector(".prepare-drive")?.addEventListener("click", () => guardedPaneAction(index, () => showPrepareDrive(index)));
+  host.querySelector(".run-title-installer")?.addEventListener("click", () => guardedPaneAction(index, () => showTitleInstaller(index)));
   host.querySelector(".open-hex-editor")?.addEventListener("click", () => guardedPaneAction(index, () => openHexEditor(index)));
   host.querySelector(".run-pane-emulator")?.addEventListener("click", () => guardedPaneAction(index, () => launchPaneEmulator(index, false)));
   host.querySelector(".debug-pane-emulator")?.addEventListener("click", () => guardedPaneAction(index, () => launchPaneEmulator(index, true)));
   host.querySelector(".write-physical-floppy")?.addEventListener("click", () => guardedPaneAction(index, () => showPhysicalFloppyDialog(index)));
-  host.querySelector(".convert-dms")?.addEventListener("click", () => guardedPaneAction(index, () => convertDMS(index)));
-  host.querySelector(".dms-project")?.addEventListener("click", () => guardedPaneAction(index, () => showDmsProject(index)));
+  host.querySelector(".convert-container")?.addEventListener("click", () => guardedPaneAction(index, () => convertContainer(index)));
+  host.querySelector(".container-project")?.addEventListener("click", () => guardedPaneAction(index, () => showContainerProject(index)));
   host.querySelector(".compact-image")?.addEventListener("click", () => guardedPaneAction(index, () => compactImage(index)));
   host.querySelector(".undo-image")?.addEventListener("click", () => guardedPaneAction(index, () => undoLastChange(index)));
   host.querySelector(".manage-checkpoints")?.addEventListener("click", () => guardedPaneAction(index, () => showCheckpointManager(index)));
@@ -1007,7 +1115,7 @@ function renderPane(index, preserveScroll = false) {
   host.querySelectorAll(".crumb[data-path]").forEach(button => button.onclick = () => navigate(index, button.dataset.path));
   host.querySelectorAll(".crumb[data-archive-member]").forEach(button => button.onclick = () => navigateArchive(index, button.dataset.archiveMember));
   host.querySelectorAll(".file-row").forEach(row => wireRow(row, index));
-  if ((pane.image.kind === "ofs") || (pane.image.kind === "hdf" && pane.partition !== null)) {
+  if (isGemdos) {
     const diskHandle = host.querySelector(".format-icon");
     diskHandle.draggable = true;
     diskHandle.classList.add("disk-transfer-handle");
@@ -1025,9 +1133,9 @@ function renderPane(index, preserveScroll = false) {
   const listWrap = host.querySelector(".list-wrap");
   if (preserveScroll) listWrap.scrollTop = previousScrollTop;
   if (isPartitionIndex) {
-    if (!preserveScroll && pane.hdfScrollTop) listWrap.scrollTop = pane.hdfScrollTop;
+    if (!preserveScroll && pane.driveScrollTop) listWrap.scrollTop = pane.driveScrollTop;
     listWrap.addEventListener("scroll", () => {
-      pane.hdfScrollTop = listWrap.scrollTop;
+      pane.driveScrollTop = listWrap.scrollTop;
     }, { passive: true });
   }
   refreshImageComparisonActions();
@@ -1118,7 +1226,7 @@ function wireRow(row, index) {
     event.stopPropagation();
     selectForAction(false);
     editFileMetadata(index, selectedEntry(index)).catch(error => {
-      toast(`Could not change the catalogue addresses: ${error.message}`, true);
+      toast(`Could not change the attributes: ${error.message}`, true);
     });
   }));
   row.querySelector(".row-rename")?.addEventListener("click", event => {
@@ -1260,7 +1368,7 @@ function refreshSelectionDisplay(index) {
   const host = document.querySelector(`.pane[data-pane="${index}"]`);
   const selectedKeys = new Set(selectionKeys(pane));
   const selected = selectedEntry(index);
-  const isPartitionIndex = pane.image?.kind === "hdf" && pane.partition === null;
+  const isPartitionIndex = pane.image?.kind === "hd" && pane.partition === null;
 
   host.querySelectorAll(".file-row").forEach(row => {
     const isSelected = selectedKeys.has(row.dataset.key);
@@ -1282,7 +1390,7 @@ function refreshSelectionDisplay(index) {
   disable(".inspect-file", !hasInspectableSelection);
   disable(".inspect-dependencies", !hasInspectableSelection);
   const clipboardSelection = clipboardItemsForPane(index);
-  disable(".clipboard-cut-action", !clipboardSelection.length || pane.image.readOnly || ["dms", "iso"].includes(pane.image.kind));
+  disable(".clipboard-cut-action", !clipboardSelection.length || pane.image.readOnly || READ_ONLY_KINDS.includes(pane.image.kind));
   disable(".clipboard-copy-action", !clipboardSelection.length);
   disable(".clipboard-paste-action", !canPasteIntoPane(pane));
 
@@ -1314,9 +1422,9 @@ function wireDropZone(host, index) {
     const diskSource = openDisk ? JSON.parse(openDisk) : null;
     if (diskSource && paneHoldsVolume(panes[index])) {
       if (diskSource.image === panes[index].image.id) {
-        return toast("Choose a different FFS image as the destination.", true);
+        return toast("Choose a different volume as the destination.", true);
       }
-      return copyDiskImageToFfs(index, diskSource);
+      return copyDiskImageToVolume(index, diskSource);
     }
     const internalBatch = event.dataTransfer.getData("application/x-atari-files");
     if (internalBatch) return transferFiles(index, JSON.parse(internalBatch));
@@ -1328,12 +1436,10 @@ function wireDropZone(host, index) {
     if (dropped.some(item => item.relativePath.includes("/")) && panes[index].image) {
       return addSelectedHostFolder(index, dropped);
     }
-    const images = files.filter(file => formats.isImportableImage(file.name) || formats.isDescriptor(file.name));
+    const images = files.filter(file => formats.isImportableImage(file.name));
     if (!panes[index].image) return openFiles(index, files);
     if (images.length && paneHoldsVolume(panes[index])) {
-      for (const file of files.filter(item => !formats.isDescriptor(item.name))) {
-        await importHostFile(index, file);
-      }
+      for (const file of files) await importHostFile(index, file);
       return;
     }
     if (images.length) return openFiles(index, files);
@@ -1341,7 +1447,7 @@ function wireDropZone(host, index) {
   };
 }
 
-async function copyDiskImageToFfs(index, source) {
+async function copyDiskImageToVolume(index, source) {
   const target = panes[index];
   const rule = targetNameRule(target, formats.stem(source.name));
   const preview = await paneOperation(
@@ -1350,19 +1456,19 @@ async function copyDiskImageToFfs(index, source) {
     () => api(`/api/images/${source.image}/preview`)
   );
   return showImageExtractionPlan(index, {
-    heading: `Copy ${source.name} into FFS`,
+    heading: `Copy ${source.name} onto this volume`,
     sourceName: source.name,
     preview,
     suggestedName: rule.suggested,
     allowRaw: false,
     allowInstall: paneAcceptsInstall(target),
     submitLabel: "Copy image contents",
-    onExtract: plan => performDiskImageToFfsCopy(index, source, plan),
+    onExtract: plan => performDiskImageToVolumeCopy(index, source, plan),
     onInstall: plan => performInstall(index, source.image, source.name, plan),
   });
 }
 
-async function performDiskImageToFfsCopy(index, source, plan) {
+async function performDiskImageToVolumeCopy(index, source, plan) {
   const target = panes[index];
   const destinationLabel = plan.createDirectory ? plan.directoryName : plan.targetPath;
   const data = await trackedPaneOperation(index, `Copying ${source.name} into ${destinationLabel}…`, operationId =>
@@ -1486,7 +1592,8 @@ async function returnToPartitions(index) {
     if (panes[index] !== pane || pane.requestToken !== requestToken || pane.partition !== null) return;
     pane.entries = data.partitions;
     pane.capacity = await fetchCapacity(pane.image.id);
-    pane.description = "Select a partition to browse the volume it mounts";
+    pane.partitionTable = await fetchPartitionTable(pane.image.id);
+    pane.description = paneTableDescription(pane);
   } catch (error) {
     if (panes[index] === pane && pane.requestToken === requestToken) toast(error.message, true);
   } finally {
@@ -1500,7 +1607,7 @@ async function returnToPartitions(index) {
 async function refreshCurrentView(index) {
   const pane = panes[index];
   if (!pane.image) return;
-  if (pane.image.kind === "hdf" && pane.partition === null) {
+  if (pane.image.kind === "hd" && pane.partition === null) {
     const selected = selectionKeys(pane);
     const selectionAnchor = pane.selectionAnchor;
     const requestToken = (pane.requestToken || 0) + 1;
@@ -1513,8 +1620,9 @@ async function refreshCurrentView(index) {
       if (panes[index] !== pane || pane.requestToken !== requestToken) return;
       pane.entries = data.partitions;
       pane.capacity = await fetchCapacity(pane.image.id);
+      pane.partitionTable = await fetchPartitionTable(pane.image.id);
       setSelection(pane, selected, selectionAnchor);
-      pane.description = "Select a partition to browse the volume it mounts";
+      pane.description = paneTableDescription(pane);
       toast("Partition table refreshed");
     } catch (error) {
       if (panes[index] === pane && pane.requestToken === requestToken) toast(error.message, true);
@@ -1702,22 +1810,18 @@ function chooseImage(index) {
   let selection = { files: [] };
   showModal(`
     <h2>Open a media image</h2>
-    <p>Choose a disk, CD, dms, ROM or matching image set, such as an HDA with its GEO descriptor. ZIP distributions are also supported.</p>
+    <p>Choose a floppy container, a hard-disk image, a CD or a ROM. A hard-disk image is a single file with its partition table inside it, and ZIP distributions are also supported.</p>
     <div class="field"><label>Image file</label>
       <input type="file" name="images" accept="${esc(formats.accept)}" multiple>
       <div class="file-selection-summary" data-selected-files aria-live="polite"></div>
     </div>
-    <div class="field"><label>FFS target hardware</label>
+    <div class="field"><label>Target media</label>
       <select name="targetHardware">
-        <option value="auto">Auto / inspect only</option>
-        <option value="hardfile">Hardfile HDA + GEO · Atari 600 / Atari / Master</option>
-        <option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option>
-        <option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option>
-        <option value="tos">Atari 4000 / TOS</option>
+        ${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
       </select>
-      <small>Used for FFS validation and hardware-safe repairs. It is ignored for OFS, HDF, DMS, HFE and ROM images.</small>
+      <small>Used for validation and for hardware-safe repairs. It is ignored when the bytes already say what the image is.</small>
     </div>
-    <div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for headerless custom ROMs stored as BIN or another generic name. No filesystem probing will be attempted.</small></div>
+    <div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for a headerless cartridge or expansion ROM stored as BIN or another generic name. No filesystem probing will be attempted.</small></div>
     <div class="modal-actions">
       <button class="button ghost" value="cancel">Cancel</button>
       <button class="button primary" value="open" data-open-selection disabled>Open selected image</button>
@@ -1725,7 +1829,7 @@ function chooseImage(index) {
   form => {
     const files = selection.files;
     if (!files.length) throw new Error("Choose a media image to open.");
-    // Let showModal finish closing this dialog before an HDA/GEO pairing
+    // Let showModal finish closing this dialog before the target-media
     // dialog is opened. Opening the replacement synchronously here lets the
     // first dialog's promise handler close the new one as well.
     const targetHardware = form.get("targetHardware") || "auto";
@@ -1744,107 +1848,32 @@ function chooseImage(index) {
   });
 }
 
-function promptFfsTargetHardware(index, files) {
+//: What the image is meant to be, which decides how it is validated and
+//: which repairs are safe. A floppy container, a partitioned hard drive, a
+//: single bare volume with no partition table, or a TOS ROM.
+const TARGET_MEDIA = Object.freeze([
+  ["auto", "Auto · identify from the bytes"],
+  ["floppy", "Floppy · 360K to 1.44M, FAT12"],
+  ["hd", "Hard drive · AHDI or MBR partitions"],
+  ["volume", "Bare volume · one FAT16 partition with no table"],
+  ["tos", "TOS ROM"],
+]);
+
+function promptTargetMedia(index, files) {
   const closed = showModal(`
-    <h2>Choose FFS target hardware</h2>
-    <p>The selected hardware profile controls filesystem validation and repairs. Choose the machine that will use the finished image.</p>
-    <div class="field"><label>Target hardware</label>
+    <h2>Choose the target media</h2>
+    <p>What the image is meant to be decides how its filing system is checked and which repairs are safe. Choose the shape the finished image should have.</p>
+    <div class="field"><label>Target media</label>
       <select name="targetHardware">
-        <option value="hardfile">Hardfile HDA + GEO · Atari 600 / Atari / Master</option>
-        <option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option>
-        <option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option>
-        <option value="tos">Atari 4000 / TOS</option>
-        <option value="auto">Auto / inspect only</option>
+        ${TARGET_MEDIA.slice(1).concat([TARGET_MEDIA[0]]).map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
       </select>
     </div>
-    <div class="help-note"><strong>Normal FFS vs Hardfile:</strong> choose the machine profile for a normal FFS disk. Choose Hardfile for an HDA/GEO hard drive; it works with Atari 600, Atari 500 and 1200 hosts and also enforces the official Hardfile file layout.</div>
+    <div class="help-note"><strong>A drive with a table, or one volume on its own:</strong> choose Hard drive for an image whose first sector holds an AHDI or MBR partition table, and Bare volume for a file that is nothing but the FAT16 volume itself, which some ACSI and IDE setups use.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open">Validate and open</button></div>`,
   form => {
     const targetHardware = form.get("targetHardware") || "auto";
     setTimeout(() => openFiles(index, files, targetHardware), 0);
   });
-}
-
-function promptAtariScsiPair(
-  index,
-  image = null,
-  descriptor = null,
-  warning = "",
-  targetHardware = "auto"
-) {
-  panes[index].loading = false;
-  panes[index].loadingMessage = "";
-  renderPane(index);
-  let imageSelection = { files: [] };
-  let descriptorSelection = { files: [] };
-  showModal(`
-    <h2>Open the HDA and GEO together</h2>
-    <p>Hardfile HDA images store their drive geometry in a companion GEO file. The file you already selected has been retained; choose only its missing companion.</p>
-    ${warning ? `<div class="scan-notes"><span>${esc(warning)}</span></div>` : ""}
-    <div class="pair-file-drop" data-pair-drop>Drop the matching HDA and GEO here together</div>
-    <div class="field"><label>HDA image${image ? " · selected" : ""}</label>
-      ${image ? `<small class="prefilled-file">${esc(image.name)} · ${humanSize(image.size)}</small>` : ""}
-      <input type="file" name="image" accept=".hda">
-      <div class="file-selection-summary compact" data-selected-hda aria-live="polite"></div>
-      ${image ? "<small>Optional: choose a different HDA to replace the retained file.</small>" : ""}
-    </div>
-    <div class="field"><label>Matching GEO descriptor${descriptor ? " · selected" : ""}</label>
-      ${descriptor ? `<small class="prefilled-file">${esc(descriptor.name)} · ${humanSize(descriptor.size)}</small>` : ""}
-      <input type="file" name="descriptor" accept=".geo">
-      <div class="file-selection-summary compact" data-selected-geo aria-live="polite"></div>
-      ${descriptor ? "<small>Optional: choose a different GEO to replace the retained file.</small>" : ""}
-    </div>
-    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open" data-open-pair disabled>Open HDA + GEO</button></div>`,
-  async () => {
-    const chosenImage = imageSelection.files[0]
-      ? imageSelection.files[0]
-      : image;
-    const chosenDescriptor = descriptorSelection.files[0]
-      ? descriptorSelection.files[0]
-      : descriptor;
-    if (!(chosenImage instanceof File) || !chosenImage.name.toLowerCase().endsWith(".hda")) {
-      throw new Error("Choose the Hardfile HDA image.");
-    }
-    if (!(chosenDescriptor instanceof File) || !chosenDescriptor.name.toLowerCase().endsWith(".geo")) {
-      throw new Error("Choose the matching GEO file.");
-    }
-    if (formats.stem(chosenDescriptor.name).toLowerCase() !== formats.stem(chosenImage.name).toLowerCase()) {
-      throw new Error(`Choose ${formats.stem(chosenImage.name)}.geo for this HDA image.`);
-    }
-    await openFiles(index, [chosenImage, chosenDescriptor], targetHardware);
-  });
-  const pairButton = modalContent.querySelector("[data-open-pair]");
-  const updatePairButton = () => {
-    pairButton.disabled = !(imageSelection.files[0] || image)
-      || !(descriptorSelection.files[0] || descriptor);
-  };
-  const datSummary = modalContent.querySelector("[data-selected-hda]");
-  const dscSummary = modalContent.querySelector("[data-selected-geo]");
-  imageSelection = trackFileInput(
-    modalContent.querySelector('input[name="image"]'),
-    datSummary
-  );
-  descriptorSelection = trackFileInput(
-    modalContent.querySelector('input[name="descriptor"]'),
-    dscSummary
-  );
-  acceptFileDrop(datSummary, files => {
-    const selected = files.find(file => file.name.toLowerCase().endsWith(".hda"));
-    if (selected) imageSelection.setFiles([selected]);
-  });
-  acceptFileDrop(dscSummary, files => {
-    const selected = files.find(file => file.name.toLowerCase().endsWith(".geo"));
-    if (selected) descriptorSelection.setFiles([selected]);
-  });
-  acceptFileDrop(modalContent.querySelector("[data-pair-drop]"), files => {
-    const selectedImage = files.find(file => file.name.toLowerCase().endsWith(".hda"));
-    const selectedDescriptor = files.find(file => file.name.toLowerCase().endsWith(".geo"));
-    if (selectedImage) imageSelection.setFiles([selectedImage]);
-    if (selectedDescriptor) descriptorSelection.setFiles([selectedDescriptor]);
-  });
-  datSummary.addEventListener("selectionchange", updatePairButton);
-  dscSummary.addEventListener("selectionchange", updatePairButton);
-  updatePairButton();
 }
 
 async function openFiles(index, files, targetHardware = null) {
@@ -1867,7 +1896,7 @@ async function openFiles(index, files, targetHardware = null) {
         <option value="concatenate">One component set · consecutive banks</option>
         ${canInterleave ? `<option value="interleave">${romFiles.length} byte-wide chips / interleave into logical byte order</option>` : ""}
         <option value="first">Open only the first selected file</option>
-      </select><small>${canInterleave ? "Atari 4000 ROM sets commonly use four byte-wide chip files." : "Byte interleaving requires two or four components of exactly equal size."}</small></div>
+      </select><small>${canInterleave ? "A TOS ROM set is usually two byte-wide chips, one holding the even bytes and one the odd." : "Byte interleaving requires two or four components of exactly equal size."}</small></div>
       <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open">Open selected ROMs</button></div>`,
     async form => {
       if (form.get("romSetMode") === "separate") {
@@ -1899,45 +1928,19 @@ async function openFiles(index, files, targetHardware = null) {
       const combined = new File([bytes], `${formats.stem(romFiles[0].name)}-set.rom`, { type: "application/octet-stream" });
       combined.atariRomLayout = layout;
       combined.atariForceKind = "rom";
-      combined.atariRomPlatform = layout === "linear" ? "kickstart" : "cartridge";
+      combined.atariRomPlatform = layout === "linear" ? "tos" : "cartridge";
       combined.atariRomComponents = romFiles.map(file => file.name);
       setTimeout(() => openFiles(index, [combined], targetHardware), 0);
     });
   }
-  let image = files.find(file => !formats.isDescriptor(file.name));
-  const descriptor = files.find(file => formats.isDescriptor(file.name));
-  if (!image) {
-    if (descriptor) {
-      promptAtariScsiPair(index, null, descriptor, "", targetHardware || "auto");
-      return;
-    }
-    return;
-  }
-  if (targetHardware === null && formats.isPotentialFfsImage(image.name)) {
-    return promptFfsTargetHardware(index, files);
+  const image = files[0];
+  if (!image) return;
+  if (targetHardware === null && formats.isPotentialGemdosImage(image.name)) {
+    return promptTargetMedia(index, files);
   }
   targetHardware ||= "auto";
-  if (
-    image.name.toLowerCase().endsWith(".hda")
-    && descriptor
-    && formats.stem(descriptor.name).toLowerCase() !== formats.stem(image.name).toLowerCase()
-  ) {
-    promptAtariScsiPair(
-      index,
-      image,
-      descriptor,
-      `${image.name} and ${descriptor.name} do not have matching base names. Replace the incorrect file.`,
-      targetHardware
-    );
-    return;
-  }
-  if (image.name.toLowerCase().endsWith(".hda") && !descriptor) {
-    promptAtariScsiPair(index, image, null, "", targetHardware);
-    return;
-  }
   const form = new FormData();
   form.append("image", image);
-  if (descriptor) form.append("descriptor", descriptor);
   form.append("targetHardware", targetHardware);
   if (image.atariForceKind) form.append("forceKind", image.atariForceKind);
   if (image.atariRomLayout) {
@@ -1987,38 +1990,40 @@ async function openFiles(index, files, targetHardware = null) {
 async function acceptImage(index, image) {
   const currentPane = panes[index];
   const preservedWindowState = currentPane?.windowState || null;
-  const preserveHdfRoot = Boolean(
+  const preserveDriveRoot = Boolean(
     currentPane?.image?.id === image.id
-    && currentPane.image.kind === "hdf"
+    && currentPane.image.kind === "hd"
     && currentPane.partition === null
   );
-  const preservedSelection = preserveHdfRoot ? selectionKeys(currentPane) : [];
-  const preservedAnchor = preserveHdfRoot ? currentPane.selectionAnchor : null;
-  const preservedScrollTop = preserveHdfRoot
+  const preservedSelection = preserveDriveRoot ? selectionKeys(currentPane) : [];
+  const preservedAnchor = preserveDriveRoot ? currentPane.selectionAnchor : null;
+  const preservedScrollTop = preserveDriveRoot
     ? document.querySelector(`.pane[data-pane="${index}"] .list-wrap`)?.scrollTop || 0
     : 0;
   panes[index] = newPaneState(image);
   const pane = panes[index];
   pane.windowState = preservedWindowState;
-  if (preserveHdfRoot) pane.hdfScrollTop = preservedScrollTop;
+  if (preserveDriveRoot) pane.driveScrollTop = preservedScrollTop;
   const requestToken = ++pane.requestToken;
   renderPane(index);
-  if (image.kind === "hdf") {
-    const [data, capacity] = await Promise.all([
+  if (image.kind === "hd") {
+    const [data, capacity, partitionTable] = await Promise.all([
       api(`/api/images/${image.id}/partitions`),
       fetchCapacity(image.id),
+      fetchPartitionTable(image.id),
     ]);
     if (panes[index] !== pane || pane.requestToken !== requestToken) return;
     pane.entries = data.partitions;
     pane.capacity = capacity;
-    pane.description = "Select a partition to browse the volume it mounts";
+    pane.partitionTable = partitionTable;
+    pane.description = paneTableDescription(pane);
     pane.loading = false;
-    if (preserveHdfRoot) {
+    if (preserveDriveRoot) {
       const available = new Set(pane.entries.map(entry => String(entry.partition)));
       setSelection(pane, preservedSelection.filter(key => available.has(key)), preservedAnchor);
     }
     renderPane(index);
-    if (preserveHdfRoot) {
+    if (preserveDriveRoot) {
       const list = document.querySelector(`.pane[data-pane="${index}"] .list-wrap`);
       if (list) list.scrollTop = preservedScrollTop;
     }
@@ -2223,12 +2228,20 @@ async function showRomStructure(index, bankNumber, restoreState = null, { replac
   const headerRows = header ? [
     ["Title", header.title],
     ["Version text", header.version || "Not supplied"],
-    ["Version byte", `&${hex(header.versionByte, 2)}`],
+    // The Atari records its release as a 16-bit word at offset 2, not as a
+    // byte, and there is no type byte anywhere in the header. Asking for
+    // fields the decoder does not produce printed "&NAN" and "&undefined".
+    ["Version word", `&${header.versionHex}`],
     ["Copyright", header.copyright],
-    ["ROM type", `&${header.typeHex} · ${header.roles}`],
+    ["ROM type", header.roles || "Not identified"],
     ["Processor", header.processor],
-    ["Language entry", header.languageEntry == null ? "Not present" : `&${hex(header.languageEntry)}`],
-    ["Service entry", header.serviceEntry == null ? "Not present" : `&${hex(header.serviceEntry)}`],
+    // A TOS header carries no language or service entry; those two rows named
+    // fields the decoder never produced, so both always read "Not present".
+    // These are the pointers the header really does declare.
+    ["Operating system base", header.base == null ? "Not declared" : `&${hex(header.base)}`],
+    ["Reset entry", header.resetEntry == null ? "Not declared" : `&${hex(header.resetEntry)}`],
+    ["Built", header.date || "Not declared"],
+    ["Country and video", [header.country, header.videoStandard].filter(Boolean).join(" · ") || "Not declared"],
     ["Extra features", header.features?.length ? header.features.join(", ") : "None declared"],
   ] : [];
   const structureRows = structures.map(item => `
@@ -2243,8 +2256,8 @@ async function showRomStructure(index, bankNumber, restoreState = null, { replac
     const detail = item.confidence === "declared"
       ? `${item.module ? `Declared by ${item.module}. ` : ""}${item.configureKeyword ? "Configuration and status keyword" : item.filingSystemCommand ? "Filing-system command" : "Module command"}${item.minimumParameters == null ? "" : ` · ${item.minimumParameters} to ${item.maximumParameters} parameter${item.maximumParameters === 1 ? "" : "s"}`}`
       : item.handlerAddress != null
-        ? `Resident module vector table · handler $${hex(item.handlerAddress)}`
-        : `Resident module name table${item.token == null ? "" : ` · entry $${hex(item.token, 2)}`}`;
+        ? `Cartridge application chain · handler $${hex(item.handlerAddress)}`
+        : `Cartridge application name table${item.token == null ? "" : ` · entry $${hex(item.token, 2)}`}`;
     const helpButton = item.helpText
       ? `<button class="rom-command-help" type="button" data-help-index="${helpIndex}" aria-label="Help for ${esc(item.display)}" aria-describedby="rom-command-help-tooltip" aria-expanded="false">?</button>`
       : "";
@@ -2254,13 +2267,13 @@ async function showRomStructure(index, bankNumber, restoreState = null, { replac
     <div class="modal-heading rom-decoder-heading" tabindex="-1" autofocus><span class="modal-kicker">DECODED ROM CONTENTS</span><h2>Bank ${entry.bank} · ${esc(entry.name)}</h2><p>This is a byte-addressed ROM bank, not a filing-system directory. Only proven structures are named; printable runs are evidence, not invented files.</p></div>
     <div class="rom-summary-grid">
     <section class="rom-decode-section"><h3>Bank fingerprint and programming information</h3><dl class="rom-header-grid"><dt>Image byte range</dt><dd><code>&${hex(bankOffset, 6)} to &${hex(bankOffset + entry.length - 1, 6)}</code></dd><dt>SHA-256</dt><dd><code>${esc(diagnostics.sha256 || "Unavailable")}</code></dd><dt>CRC-32</dt><dd><code>&${esc(diagnostics.crc32 || "Unavailable")}</code></dd><dt>Information entropy</dt><dd>${Number(diagnostics.entropy || 0).toFixed(3)} bits per byte (0 to 8)</dd><dt>Distinct byte values</dt><dd>${Number(diagnostics.uniqueByteValues || 0)} of 256</dd><dt>Erased bytes</dt><dd>${Number(diagnostics.erasedBytes || 0).toLocaleString()} (${erasedPercent}%) using <code>&${hex(pane.image.rom?.eraseByte ?? 255, 2)}</code></dd><dt>Used range</dt><dd>${diagnostics.usedStart == null ? "Entire bank is erased" : `<code>+&${hex(diagnostics.usedStart)} to +&${hex(diagnostics.usedEnd)}</code>`}</dd><dt>Zero / &amp;FF bytes</dt><dd>${Number(diagnostics.zeroBytes || 0).toLocaleString()} / ${Number(diagnostics.ffBytes || 0).toLocaleString()}</dd><dt>Printable bytes</dt><dd>${Number(diagnostics.printableBytes || 0).toLocaleString()}</dd><dt>Identical banks</dt><dd>${entry.matchingBanks?.length ? entry.matchingBanks.map(bank => `Bank ${bank}`).join(", ") : "None"}</dd></dl></section>
-    ${header ? `<section class="rom-decode-section"><h3>Atari-family header</h3><dl class="rom-header-grid">${headerRows.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("")}</dl></section>` : '<div class="help-note"><strong>No standard Atari-family header:</strong> the bank remains available as raw code and data.</div>'}
-    ${extension ? `<section class="rom-decode-section rom-extension-section"><h3>TOS extension-ROM trailer</h3><dl class="rom-header-grid"><dt>Declared image size</dt><dd>${humanSize(extension.declaredSize)}</dd><dt>Stored checksum</dt><dd><code>&${hex(extension.checksum, 8)}</code></dd><dt>Calculated checksum</dt><dd><code>&${hex(extension.calculatedChecksum, 8)}</code></dd><dt>Result</dt><dd>${extension.checksumValid ? "Valid" : "INVALID"}</dd></dl></section>` : ""}
+    ${header ? `<section class="rom-decode-section"><h3>Atari ROM header</h3><dl class="rom-header-grid">${headerRows.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("")}</dl></section>` : '<div class="help-note"><strong>No recognised Atari ROM header:</strong> the bank remains available as raw code and data.</div>'}
+    ${extension ? `<section class="rom-decode-section rom-extension-section"><h3>Cartridge header</h3><dl class="rom-header-grid"><dt>Declared image size</dt><dd>${humanSize(extension.declaredSize)}</dd><dt>Stored checksum</dt><dd><code>&${hex(extension.checksum, 8)}</code></dd><dt>Calculated checksum</dt><dd><code>&${hex(extension.calculatedChecksum, 8)}</code></dd><dt>Result</dt><dd>${extension.checksumValid ? "Valid" : "INVALID"}</dd></dl></section>` : ""}
     </div>
     ${entry.warnings?.length ? `<div class="help-warning"><strong>Header consistency warning:</strong><ul>${entry.warnings.map(warning => `<li>${esc(warning)}</li>`).join("")}</ul></div>` : ""}
-    <section class="rom-decode-section"><h3>Resident modules</h3>${starCommands.length ? `<p>A module declared by a <code>$4AFC</code> resident tag is listed with the name and identification string the tag points at. Anything else is listed only when a structurally valid name or vector table is found; printable text alone is not included. A <strong>?</strong> opens help declared by the ROM or a signature reconstructed from its own tables.</p><div class="rom-decode-table"><table><thead><tr><th>Command</th><th>Evidence</th><th>Table location</th><th></th></tr></thead><tbody>${commandRows}</tbody></table></div>` : `<div class="help-note"><strong>No modules could be listed safely.</strong> This does not prove the ROM has none: an expansion ROM can build its tag at run time, or use a table this scanner does not recognise.</div>`}</section>
+    <section class="rom-decode-section"><h3>Cartridge applications and modules</h3>${starCommands.length ? `<p>A cartridge application declared by the <code>$ABCDEF42</code> header magic is listed with the name and the entry point its chain points at. Anything else is listed only when a structurally valid name or vector table is found; printable text alone is not included. A <strong>?</strong> opens help declared by the ROM or a signature reconstructed from its own tables.</p><div class="rom-decode-table"><table><thead><tr><th>Command</th><th>Evidence</th><th>Table location</th><th></th></tr></thead><tbody>${commandRows}</tbody></table></div>` : `<div class="help-note"><strong>No modules could be listed safely.</strong> This does not prove the ROM has none: an expansion ROM can build its chain at run time, or use a table this scanner does not recognise.</div>`}</section>
     <section class="rom-decode-section"><h3>Known regions and entry points</h3><div class="rom-decode-table"><table><thead><tr><th>Meaning</th><th>Location</th><th>Extent</th><th></th></tr></thead><tbody>${structureRows || '<tr><td colspan="4">This bank is erased and contains no decoded structures.</td></tr>'}</tbody></table></div></section>
-    ${modules.length ? `<section class="rom-decode-section"><h3>Structurally plausible TOS modules</h3><p>These candidates passed the standard module-header offset and title checks. They are reported as candidates until their enclosing extension-ROM chunk is fully identified.</p><div class="rom-decode-table"><table><thead><tr><th>Module</th><th>Offset</th><th>Declared facilities</th><th></th></tr></thead><tbody>${moduleRows}</tbody></table></div></section>` : ""}
+    ${modules.length ? `<section class="rom-decode-section"><h3>Structurally plausible TOS modules</h3><p>These candidates passed the standard module-header offset and title checks. They are reported as candidates until their enclosing cartridge or expansion chunk is fully identified.</p><div class="rom-decode-table"><table><thead><tr><th>Module</th><th>Offset</th><th>Declared facilities</th><th></th></tr></thead><tbody>${moduleRows}</tbody></table></div></section>` : ""}
     <details class="rom-string-list" ${strings.length <= 20 ? "open" : ""}><summary>${entry.stringsTruncated ? "First " : ""}${strings.length} printable string${strings.length === 1 ? "" : "s"} ${entry.stringsTruncated ? "shown" : "found"}</summary><p>Strings often reveal commands, messages and build information, but their boundaries do not make them files.${entry.stringsTruncated ? " The display is capped at 512 candidates per bank to keep the browser responsive; use hex search for the remainder." : ""}</p><div class="rom-decode-table"><table><thead><tr><th>Offset</th><th>Mapped address</th><th>Text</th><th></th></tr></thead><tbody>${stringRows || '<tr><td colspan="4">No printable strings of four or more characters were found.</td></tr>'}</tbody></table></div></details>
     <div id="rom-command-help-tooltip" class="rom-command-tooltip" role="tooltip" hidden></div>
     <div class="modal-actions"><button class="button ghost rom-open-offset" type="button" data-offset="${bankOffset}">Open whole bank in hex editor</button><button class="button primary" value="cancel">Close</button></div>`, undefined, { replace });
@@ -2383,12 +2396,13 @@ function renameSelected(index) {
   if (!entry) return;
   const isRom = pane.image.kind === "rom";
   const oldPath = entryImagePath(pane, entry);
-  // An GEMDOS directory entry holds up to 30 characters, whatever the DOS
-  // type is; a ROM header has its own limit.
-  const nameLimit = isRom ? Number(entry.header?.titleCapacity || 24) : 30;
+  // A GEMDOS directory entry holds an 8.3 name and nothing longer; a ROM
+  // header has its own limit.
+  const rule = targetNameRule(pane, entry.leafName || entry.name);
+  const nameLimit = isRom ? Number(entry.header?.titleCapacity || 24) : rule.limit;
   showModal(`
     <h2>${isRom ? `Edit ROM bank ${entry.bank} title` : `Rename ${esc(entry.name)}`}</h2>
-    <p>${isRom ? "This changes the name in the recognised ROM header. The code and bank position stay unchanged." : "The item stays in its current directory. Drag it onto another directory to move it."}</p>
+    <p>${isRom ? "This changes the name in the recognised ROM header. The code and bank position stay unchanged." : `The item stays in its current folder. Drag it onto another folder to move it. TOS stores an ${esc(rule.label)} name in upper case.`}</p>
     <div class="field"><label>New name · max ${nameLimit} characters</label>
       <input name="destination" maxlength="${nameLimit}" value="${esc(entry.leafName || entry.name)}" required></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="ok">Rename</button></div>`,
@@ -2397,11 +2411,7 @@ function renameSelected(index) {
     if (isRom) { body.bank = entry.bank; body.title = form.get("destination"); }
     else {
       body.source = oldPath;
-      body.destination = entry.cataloguePrefix
-        ? `${entry.cataloguePrefix}.${form.get("destination")}`
-        : pane.image.kind === "kickfs"
-          ? form.get("destination")
-          : fullPath(pane.path, form.get("destination"));
+      body.destination = fullPath(pane.path, form.get("destination"));
     }
     const data = await api(`/api/images/${pane.image.id}/rename`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -2409,11 +2419,8 @@ function renameSelected(index) {
     if (isRom) {
       pane.image = data.image;
       await loadDirectory(index);
-    } else if (pane.image.kind === "ffs") {
-      await refreshSharedFfsPanes(pane.image.id, data.image, data.moved);
     } else {
-      pane.image = data.image;
-      await loadDirectory(index);
+      await refreshSharedVolumePanes(pane.image.id, data.image, data.moved);
     }
     toast(
       "Name updated",
@@ -2430,7 +2437,7 @@ function deleteSelected(index) {
   const selectionLabel = single ? esc(single.name) : `${entries.length} selected items`;
   const contentsWarning = entries.some(
     item => item.type === "dir" || item.type === "directory"
-  ) ? " Selected drawers and everything inside them will be removed." : "";
+  ) ? " Selected folders and everything inside them will be removed." : "";
   showModal(`
     <h2>${isRom ? "Erase" : "Delete"} ${selectionLabel}?</h2>
     <p>${isRom ? "Each selected bank will be filled with the configured erased-byte value. Bank positions and total ROM size stay unchanged." : `This removes ${single ? "the selected item" : "all selected items"} from the working image.${contentsWarning}`} Your original image remains untouched.</p>
@@ -2452,16 +2459,13 @@ function deleteSelected(index) {
     if (isRom) {
       pane.image = data.image;
       await loadDirectory(index);
-    } else if (pane.image.kind === "ffs") {
-      await refreshSharedFfsPanes(
+    } else {
+      await refreshSharedVolumePanes(
         pane.image.id,
         data.image,
         [],
         data.deletedItems || [{ path: data.deletedPath, isDirectory: data.deletedDirectory }],
       );
-    } else {
-      pane.image = data.image;
-      await loadDirectory(index);
     }
     toast(`${single ? single.name : `${entries.length} items`} deleted`);
   });
@@ -2469,18 +2473,20 @@ function deleteSelected(index) {
 
 function createFolder(index) {
   const pane = panes[index];
+  const rule = targetNameRule(pane, "NEWFOLDER");
+  const driveLetter = pane.partitionName || pane.image.driveLetter || "";
   showModal(`
-    <h2>New drawer</h2><p>Create a drawer in <code>${esc(pane.path || ":")}</code>. An GEMDOS name can hold up to 30 characters.</p>
-    <div class="field"><label>Drawer name</label><input name="name" maxlength="30" required></div>
+    <h2>New folder</h2><p>Create a folder in <code>${esc(drivePath(driveLetter, pane.path))}</code>. A folder carries an ${esc(rule.label)} name, stored in upper case.</p>
+    <div class="field"><label>Folder name · max ${rule.limit} characters</label><input name="name" maxlength="${rule.limit}" required></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="create">Create folder</button></div>`,
   async form => {
-    const data = await paneOperation(index, "Creating FFS folder…", () => api(`/api/images/${pane.image.id}/mkdir`, {
+    const data = await paneOperation(index, "Creating folder…", () => api(`/api/images/${pane.image.id}/mkdir`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ partition: pane.partition, side: pane.side, path: fullPath(pane.path, form.get("name")) })
     }));
     pane.image = data.image;
     await loadDirectory(index);
-    toast("Drawer created");
+    toast("Folder created");
   });
 }
 
@@ -2491,8 +2497,8 @@ function createEmptyFile(index) {
     <h2>New file</h2>
     <p>Create an empty file in <code>${esc(pane.path)}</code>. ${esc(rule.label)} names can contain up to ${rule.limit} characters.</p>
     <div class="field"><label>Filename</label><input name="name" maxlength="${rule.limit}" value="${esc(rule.suggested || "NEWFILE")}" required></div>
-    <div class="field-grid two"><div class="field"><label>Protection</label><input name="protection" value="----rwed" maxlength="8"></div><div class="field"><label>Comment</label><input name="comment" maxlength="79" placeholder="Optional"></div></div>
-    <div class="help-note">The file starts at zero bytes. Its protection bits and comment can be changed later in the file editor.</div>
+    <div class="field-grid two"><div class="field"><label>Attributes</label><input name="attributes" value="-----a" maxlength="6"><small>The six letters <code>rhsvda</code>, a dash for each clear bit.</small></div><div class="field"><label>Datestamp</label><input name="datestamp" type="datetime-local" step="2"><small>Leave it empty to stamp the file with the current time.</small></div></div>
+    <div class="help-note">The file starts at zero bytes. Its attributes and datestamp can be changed later from the file list.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="create">Create file</button></div>`,
   async form => {
     const data = await paneOperation(index, "Creating empty file…", () => api(`/api/images/${pane.image.id}/empty-file`, {
@@ -2502,8 +2508,8 @@ function createEmptyFile(index) {
         side: pane.side,
         destination: pane.path,
         name: form.get("name"),
-        protection: form.get("protection"),
-        comment: form.get("comment"),
+        attributes: form.get("attributes") || "",
+        datestamp: form.get("datestamp") || "",
       }),
     }));
     pane.image = data.image;
@@ -2514,36 +2520,52 @@ function createEmptyFile(index) {
   });
 }
 
+//: What a datetime-local field wants: ISO text without a zone, whether the
+//: listing gave the stamp as text or as the date and time words a GEMDOS
+//: directory entry actually holds.
+function datestampForInput(value) {
+  const text = value && typeof value === "object" ? formatDatestamp(value) : String(value || "");
+  return text.slice(0, 19).replace(" ", "T");
+}
+
 async function editFileMetadata(index, entry) {
   const pane = panes[index];
   if (!pane?.image || !entry) return;
   const path = entry.path || fullPath(pane.path, entry.leafName || entry.name);
-  // GEMDOS stores eight protection bits as "hsparwed". The low four are
-  // inverted on disk: a set bit denies the operation, which is why the
-  // workbench edits them by meaning rather than as a raw number.
-  const flags = entry.protection !== undefined && entry.protection !== null
-    ? protectionFlags(entry.protection)
-    : protectionFlags(0);
+  // GEMDOS keeps one attribute byte per directory entry: read-only, hidden,
+  // system, volume label, directory and archive, in that bit order. None of
+  // them is inverted, so each checkbox means exactly what it says.
+  const flags = attributeFlags(entry.attributes ?? entry.attr ?? 0);
   const has = letter => Boolean(flags[letter]);
   const flag = (letter, label, hint) => `<label class="check"><input type="checkbox" name="bit-${letter}" ${has(letter) ? "checked" : ""}> ${label}<small>${hint}</small></label>`;
+  // The stamp arrives as ISO text, or as the two GEMDOS words themselves,
+  // and the browser wants it without a zone.
+  const stamp = datestampForInput(entry.datestamp);
   return showModal(`
-    <h2>Protection and comment</h2>
-    <p>Editing <code>${esc(path)}</code>. These are the fields an GEMDOS directory entry holds; the file's own bytes are not touched.</p>
+    <h2>Attributes and datestamp</h2>
+    <p>Editing <code>${esc(path)}</code>. These are the fields a GEMDOS directory entry holds; the file's own bytes are not touched.</p>
     <div class="field-grid two">
-      ${flag("r", "Readable", "r")}
-      ${flag("w", "Writable", "w")}
-      ${flag("e", "Executable", "e")}
-      ${flag("d", "Deletable", "d")}
-      ${flag("s", "Script", "s")}
-      ${flag("p", "Pure", "p")}
-      ${flag("a", "Archived", "a")}
-      ${flag("h", "Hold", "h")}
+      ${flag("r", "Read-only", "r · $01")}
+      ${flag("h", "Hidden", "h · $02")}
+      ${flag("s", "System", "s · $04")}
+      ${flag("v", "Volume label", "v · $08")}
+      ${flag("d", "Directory", "d · $10")}
+      ${flag("a", "Archive", "a · $20")}
     </div>
-    <div class="field"><label>Comment · up to 79 characters</label>
-      <input name="comment" maxlength="79" value="${esc(entry.comment || "")}"></div>
-    ${entry.datestamp ? `<div class="help-note">Last changed ${esc(entry.datestamp)}. The datestamp is kept as it is.</div>` : ""}
+    <div class="field"><label>Datestamp</label>
+      <input name="datestamp" type="datetime-local" step="2" value="${esc(stamp)}">
+      <small>TOS records the time to the nearest two seconds and cannot store a year before 1980.</small></div>
+    <div class="help-note">The volume label and directory bits describe what the entry <em>is</em>. Changing either on an ordinary file makes it unreadable, so change them only when repairing a damaged directory.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="change">Save metadata</button></div>`,
   async form => {
+    const chosen = {
+      r: form.has("bit-r"), h: form.has("bit-h"), s: form.has("bit-s"),
+      v: form.has("bit-v"), d: form.has("bit-d"), a: form.has("bit-a"),
+    };
+    const requested = String(form.get("datestamp") || "").trim();
+    if (requested && !parseDatestamp(requested)) {
+      throw new Error("TOS cannot store that datestamp. Use a date from 1980 onwards.");
+    }
     const data = await paneOperation(index, `Updating metadata for ${entry.name}…`, () => api(`/api/images/${pane.image.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2551,18 +2573,15 @@ async function editFileMetadata(index, entry) {
         path,
         partition: pane.partition,
         side: pane.side,
-        protection: protectionHex({
-          h: form.has("bit-h"), s: form.has("bit-s"), p: form.has("bit-p"), a: form.has("bit-a"),
-          r: form.has("bit-r"), w: form.has("bit-w"), e: form.has("bit-e"), d: form.has("bit-d"),
-        }),
-        comment: form.get("comment") || "",
+        attributes: attributeHex(chosen),
+        datestamp: requested,
       }),
     }));
     pane.image = data.image;
     await loadDirectory(index);
     setSelection(pane, [entrySelectionKey(entry)], entrySelectionKey(entry));
     renderPane(index);
-    toast(`${entry.name} metadata updated`);
+    toast(`${entry.name} now reads ${formatAttributes(chosen)}`);
   });
 }
 
@@ -2611,7 +2630,7 @@ async function chooseHostFile(index) {
 async function chooseHostFolder(index) {
   // A drive showing its partition table has nowhere to put an ordinary file,
   // so only whole disk images are worth offering there.
-  const atPartitionTable = panes[index].image?.kind === "hdf" && panes[index].partition === null;
+  const atPartitionTable = panes[index].image?.kind === "hd" && panes[index].partition === null;
   const files = await pickHostFiles({
     directory: true,
     accept: atPartitionTable ? formats.accept : "",
@@ -2663,12 +2682,12 @@ async function prepareHostFolderMetadata(records) {
   for (const item of records.filter(row => /\.inf$/i.test(row.relativePath))) {
     const key = item.relativePath.replace(/\.inf$/i, "").toLowerCase();
     const fields = (await item.file.text()).trim().match(/"[^"]*"|\S+/g) || [];
-    // path protection length ["comment"] -- the record format the workbench
+    // name attributes length [datestamp] -- the record this application
     // writes beside an exported file, and the only metadata GEMDOS keeps.
     sidecars.set(key, {
-      targetName: String(fields[0] || "").replace(/^"|"$/g, "").split("/").at(-1),
-      protection: normaliseProtection(fields[1]),
-      comment: String(fields.slice(3).join(" ") || "").replace(/^"|"$/g, ""),
+      targetName: String(fields[0] || "").replace(/^"|"$/g, "").split(/[\\/]/).at(-1),
+      attributes: normaliseAttributes(fields[1]),
+      datestamp: String(fields[3] || "").replace(/^"|"$/g, ""),
     });
   }
   return records.filter(item => !/\.inf$/i.test(item.relativePath)).map(item => ({
@@ -2691,9 +2710,9 @@ async function reviewHostImport(index, records, operation, itemType = "file") {
         parent: String(item.relativePath || "").replace(/\\/g, "/").split("/").slice(0, -1).join("/"),
         source: item.relativePath || item.file?.name || "Local file",
         type: itemType,
-        allowDuplicateName: panes[index].image.kind === "hdf" && panes[index].partition === null,
-        protection: item.metadata?.protection || "",
-        comment: item.metadata?.comment || "",
+        allowDuplicateName: panes[index].image.kind === "hd" && panes[index].partition === null,
+        attributes: item.metadata?.attributes || "",
+        datestamp: item.metadata?.datestamp || "",
         filetype: item.metadata?.filetype || "",
       })),
     );
@@ -2732,11 +2751,11 @@ async function addSelectedHostFolder(index, records) {
   const initial = folderTargetPlans(pane, relevant, initialMode);
   const closed = showModal(`
     <h2>Import ${roots.size} folder${roots.size === 1 ? "" : "s"}</h2>
-    <p>${relevant.length} file${relevant.length === 1 ? "" : "s"} will be imported into <code>${esc(pane.path)}</code>. Review how host folders should map to the target filing system.</p>
-    ${canPreserve ? `<div class="choice-grid folder-import-modes">
-      <label><input type="radio" name="folderMode" value="preserve" checked><span><b>Preserve folder structure</b><small>Create the selected folder tree under the current FFS directory.</small></span></label>
-      <label><input type="radio" name="folderMode" value="flatten"><span><b>Import all files here</b><small>Ignore host folders and place every file in the current directory.</small></span></label>
-    </div>` : `<input type="hidden" name="folderMode" value="flatten"><div class="help-note">OFS has a flat catalogue. Files from all selected folders will be imported into <strong>${esc(pane.path)}</strong>.</div>`}
+    <p>${relevant.length} file${relevant.length === 1 ? "" : "s"} will be imported into <code>${esc(drivePath(pane.partitionName || pane.image.driveLetter || "", pane.path))}</code>. Review how host folders should map to the target filing system.</p>
+    ${canPreserve ? `<div class="install-modes">
+      <label class="check-field install-mode"><input type="radio" name="folderMode" value="preserve" checked><span><b>Preserve folder structure</b><small>Create the selected folder tree under the current GEMDOS folder.</small></span></label>
+      <label class="check-field install-mode"><input type="radio" name="folderMode" value="flatten"><span><b>Import all files here</b><small>Ignore host folders and place every file in the current folder.</small></span></label>
+    </div>` : `<input type="hidden" name="folderMode" value="flatten"><div class="help-note">This view has no folders of its own. Files from all selected folders will be imported into <strong>${esc(pane.path || "the root")}</strong>.</div>`}
     <div class="folder-import-preview" data-folder-preview>${initial.plans.slice(0, 12).map(item => `<code>${esc(item.relativePath)} → ${esc(item.targetPath)}</code>`).join("")}</div>
     ${ignoredCount ? `<div class="help-note">${ignoredCount} metadata sidecar or operating-system housekeeping file${ignoredCount === 1 ? "" : "s"} will not be stored as a separate file.</div>` : ""}
     <label class="check-field"><input type="checkbox" name="replace" value="yes"> Replace ordinary files that already have the same target path</label>
@@ -2780,12 +2799,12 @@ async function addSelectedHostFiles(index, files) {
   if (pane.image?.kind === "rom") return addRomHostFiles(index, files);
   const preparedFiles = await prepareHostFileMetadata(files);
   if (!preparedFiles.length) return toast("The selection contained metadata sidecars but no data files.", true);
-  // An importable disk or DMS archive has its own FFS installation planner.
-  // It must inspect the container before it can describe the real operation:
-  // extract its contents, choose a destination and optional child directory,
-  // or retain the source image as an ordinary file.  Running the generic file
-  // preflight first treats the container name as an FFS leaf name and hides
-  // that decision behind an irrelevant filename warning.
+  // An importable floppy container has its own installation planner. It must
+  // inspect the container before it can describe the real operation: extract
+  // its contents, choose a destination and optional child folder, or retain
+  // the source image as an ordinary file. Running the generic file preflight
+  // first treats the container name as a GEMDOS leaf name and hides that
+  // decision behind an irrelevant filename warning.
   const ordinaryFiles = paneHoldsVolume(pane)
     ? preparedFiles.filter(item => !formats.isImportableImage(item.file.name))
     : preparedFiles;
@@ -2889,16 +2908,16 @@ function configureRomLayout(index) {
     <h2>ROM layout</h2>
     <p>These settings change how the existing bytes are divided and described. They do not reorder or rewrite the image.</p>
     <div class="field"><label>Target family</label><select name="platform">
-      <option value="kickstart" ${rom.platform === "kickstart" ? "selected" : ""}>Kickstart ROM · A500 to A4000</option>
-      <option value="cartridge" ${rom.platform === "cartridge" ? "selected" : ""}>Cartridge · CD32 / CDTV extended ROM</option>
-      <option value="custom" ${rom.platform === "custom" ? "selected" : ""}>Custom Atari hardware</option>
+      <option value="tos" ${rom.platform === "tos" ? "selected" : ""}>TOS ROM · 192 KiB, 256 KiB or 512 KiB</option>
+      <option value="cartridge" ${rom.platform === "cartridge" ? "selected" : ""}>Cartridge · 128 KiB at &amp;FA0000</option>
+      <option value="custom" ${rom.platform === "custom" ? "selected" : ""}>Custom expansion or diagnostic ROM</option>
     </select></div>
-    <div class="field"><label>Bank size in bytes</label><input name="bankSize" type="number" min="256" max="67108864" step="256" value="${Number(rom.bankSize || 16384)}" required><small>524,288 is a 512 KiB Kickstart. 262,144 and 1,048,576 and larger banks are supported.</small></div>
+    <div class="field"><label>Bank size in bytes</label><input name="bankSize" type="number" min="256" max="67108864" step="256" value="${Number(rom.bankSize || 16384)}" required><small>262,144 is a 256 KiB TOS 1.04 or 2.06 ROM and 524,288 a 512 KiB TOS 3.06. A 128 KiB cartridge is 131,072.</small></div>
     <div class="field"><label>Erased byte</label><select name="eraseByte"><option value="255" ${Number(rom.eraseByte) !== 0 ? "selected" : ""}>&FF</option><option value="0" ${Number(rom.eraseByte) === 0 ? "selected" : ""}>&00</option></select></div>
     <div class="field"><label>Byte layout</label><select name="layout">
       <option value="linear" ${rom.layout === "linear" ? "selected" : ""}>Linear / banked bytes</option>
       <option value="byte-interleaved-2" ${rom.layout === "byte-interleaved-2" ? "selected" : ""}>Two byte-wide chips, interleaved</option>
-      <option value="byte-interleaved-4" ${rom.layout === "byte-interleaved-4" ? "selected" : ""}>Four byte-wide chips, interleaved (Atari 4000)</option>
+      <option value="byte-interleaved-4" ${rom.layout === "byte-interleaved-4" ? "selected" : ""}>Four byte-wide chips, interleaved</option>
     </select><small>The image remains byte-for-byte unchanged. The setting documents how it is wired and controls future component exports.</small></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="apply">Apply layout</button></div>`,
   async form => {
@@ -2910,33 +2929,6 @@ function configureRomLayout(index) {
     pane.image = data.image;
     await loadDirectory(index);
     toast("ROM layout updated; image bytes were not changed");
-  });
-}
-
-function configureKickfs(index) {
-  const pane = panes[index];
-  const details = pane.image.kickfs || {};
-  showModal(`
-    <h2>Kickstart ROM properties</h2>
-    <p>Edit the filesystem title and the Kickstart ROM identity. File CRCs and the ROM footer checksum are rebuilt automatically.</p>
-    <div class="field"><label>Filesystem title · max 8 characters</label><input name="title" maxlength="8" value="${esc(details.title || "Kickstart ROM")}" required></div>
-    <div class="field"><label>ROM version byte · 0 to 255</label><input name="version" type="number" min="0" max="255" value="${Number(details.version ?? 1)}" required></div>
-    <div class="field"><label>Copyright string</label><input name="copyright" maxlength="120" value="${esc(details.copyright || `(C) ${new Date().getFullYear()} Atari File Forge`)}" required><small>An Atari ROM copyright string conventionally begins with <code>(C)</code>. Require this to begin with <code>(C)</code>.</small></div>
-    <div class="help-note">Kickstart ROM is a flat, CRC-protected data filesystem. Its title is stored in the catalogue and is separate from the downloaded image filename.</div>
-    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="save">Save properties</button></div>`,
-  async form => {
-    const data = await paneOperation(index, "Updating Kickstart ROM properties…", () => api(`/api/images/${pane.image.id}/kickfs`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: form.get("title"),
-        version: Number(form.get("version")),
-        copyright: form.get("copyright"),
-      }),
-    }));
-    pane.image = data.image;
-    await loadDirectory(index);
-    toast("Kickstart ROM properties updated and checksums rebuilt");
   });
 }
 
@@ -2970,8 +2962,8 @@ async function showRomWorkbench(index, initial = {}) {
       <details class="rom-identity-editor"><summary>Identify this exact ROM</summary><div class="rom-identity-grid"><label>Title<input name="identityTitle" value="${esc(identity.record?.title || project.identity?.title || "")}"></label><label>Version<input name="identityVersion" value="${esc(identity.record?.version || project.identity?.version || "")}"></label><label>Publisher<input name="identityPublisher" value="${esc(identity.record?.publisher || project.identity?.publisher || "")}"></label><label>Platform<input name="identityPlatform" value="${esc(identity.record?.platform || project.identity?.platform || "")}"></label></div><div class="field"><label>Identification notes</label><textarea name="identityNotes" rows="3">${esc(identity.record?.notes || project.identity?.notes || "")}</textarea></div><button type="button" class="button primary save-rom-identity">Save fingerprinted identity</button><small>This browser owner's catalogue keys the record to the complete SHA-256, not the filename.</small></details>
     </section>
     <section role="tabpanel" id="rom-panel-code" aria-labelledby="rom-tab-code" data-rom-panel="code" class="rom-workbench-panel" hidden>
-      <div class="rom-tool-controls"><label>Bank<select name="disasmBank">${bankOptions}</select></label><label>Architecture<select name="disasmArchitecture"><option value="auto">Auto detect</option><option value="68000">MC68000 · A500 / A600 / A2000</option><option value="68010">MC68010</option><option value="68020">MC68020 · A1200 / CD32</option><option value="68030">MC68030 · A3000</option><option value="68040">MC68040 · A4000</option><option value="68060">MC68060</option></select></label><label>Mapped origin<input name="disasmOrigin" value="0xF80000"></label><label>Offset<input name="disasmOffset" value="0x0"></label><label>Bytes<input name="disasmLength" type="number" min="1" max="262144" value="4096"></label><button type="button" class="button primary run-disassembly">Disassemble</button></div>
-      <div class="help-note">Every 68000-family processor is decoded big-endian, which is the only byte order an Atari uses. Library vector calls through A6 are named, custom-chip registers and exception vectors are identified, known entry points seed reachable-code analysis, branch and call targets gain cross-references, and bytes that are not valid instructions stay as data.</div>
+      <div class="rom-tool-controls"><label>Bank<select name="disasmBank">${bankOptions}</select></label><label>Architecture<select name="disasmArchitecture"><option value="auto">Auto detect</option><option value="68000">MC68000 · ST, Mega ST, STE, Mega STE</option><option value="68010">MC68010</option><option value="68020">MC68020</option><option value="68030">MC68030 · TT030, Falcon030</option><option value="68040">MC68040</option><option value="68060">MC68060</option></select></label><label>Mapped origin<input name="disasmOrigin" value="0xE00000"></label><label>Offset<input name="disasmOffset" value="0x0"></label><label>Bytes<input name="disasmLength" type="number" min="1" max="262144" value="4096"></label><button type="button" class="button primary run-disassembly">Disassemble</button></div>
+      <div class="help-note">Every 68000-family processor is decoded big-endian, which is the only byte order an Atari uses. GEMDOS, BIOS, XBIOS, AES and VDI traps are named, hardware registers and exception vectors are identified, known entry points seed reachable-code analysis, branch and call targets gain cross-references, and bytes that are not valid instructions stay as data.</div>
       <div class="rom-disassembly-output empty-list">Choose a bank and start address.</div>
     </section>
     <section role="tabpanel" id="rom-panel-compare" aria-labelledby="rom-tab-compare" data-rom-panel="compare" class="rom-workbench-panel" hidden>
@@ -2981,11 +2973,11 @@ async function showRomWorkbench(index, initial = {}) {
     </section>
     <section role="tabpanel" id="rom-panel-build" aria-labelledby="rom-tab-build" data-rom-panel="build" class="rom-workbench-panel" hidden>
       <div class="help-warning"><strong>This replaces the working ROM bytes.</strong> An automatic undo checkpoint is created. Generated handlers are inert until ROM code is supplied.</div>
-      <div class="field"><label>Template</label><select name="builderTemplate"><option value="service">Atari expansion ROM scaffold with a resident tag</option><option value="data-archive">Kickstart-style file archive</option></select></div>
+      <div class="field"><label>Template</label><select name="builderTemplate"><option value="service">Cartridge scaffold with an application header</option><option value="data-archive">Cartridge file archive</option></select></div>
       <div class="field"><label>ROM title</label><input name="builderTitle" maxlength="24" value="${esc(pathNameWithoutExtension(pane.image.name) || "NEW ROM")}"></div>
       <div class="field"><label>Size</label><select name="builderSize"><option value="8192">8 KiB</option><option value="16384" selected>16 KiB</option><option value="32768">32 KiB</option></select></div>
-      <div class="field"><label>Resident module names, one per line</label><textarea name="builderCommands" rows="5" placeholder="diskmenu.library&#10;gamemenu.device"></textarea></div>
-      <div class="field rom-archive-files" hidden><label>Files for the data archive</label><input name="builderFiles" type="file" multiple><small>The archive needs its companion resident module; Kickstart does not mount an unrecognised ROM on its own.</small></div>
+      <div class="field"><label>Application names, one per line</label><textarea name="builderCommands" rows="5" placeholder="DISK MENU&#10;GAME MENU"></textarea></div>
+      <div class="field rom-archive-files" hidden><label>Files for the data archive</label><input name="builderFiles" type="file" multiple><small>The archive needs its companion cartridge application; TOS does not read an unrecognised cartridge on its own.</small></div>
       <button type="button" class="button danger build-rom">Build and replace working ROM…</button>
     </section>
     <section role="tabpanel" id="rom-panel-export" aria-labelledby="rom-tab-export" data-rom-panel="export" class="rom-workbench-panel" hidden>
@@ -3022,10 +3014,11 @@ async function showRomWorkbench(index, initial = {}) {
     output.scrollLeft=0;
   };
   root.querySelector('[name="disasmArchitecture"]').onchange = event => {
-    // A Kickstart is mapped high; an expansion or diagnostic ROM is not, so
-    // the origin follows the size the user chose rather than the processor.
-    if (event.target.value !== "auto") root.querySelector('[name="disasmOrigin"]').value = "0xF80000";
-    else if (root.querySelector('[name="disasmOrigin"]').value === "0x0") root.querySelector('[name="disasmOrigin"]').value = "0x8000";
+    // TOS is decoded at $E00000 on every machine that has it in ROM; a
+    // cartridge lives at $FA0000, so the origin follows the kind of ROM
+    // rather than the processor.
+    if (event.target.value !== "auto") root.querySelector('[name="disasmOrigin"]').value = "0xE00000";
+    else if (root.querySelector('[name="disasmOrigin"]').value === "0x0") root.querySelector('[name="disasmOrigin"]').value = "0xFA0000";
   };
   root.querySelector(".compare-rom")?.addEventListener("click", async () => {
     const report = await api(`/api/images/${imageId}/rom/compare`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({targetImage: root.querySelector('[name="compareImage"]').value, includePatch: true}) });
@@ -3061,7 +3054,7 @@ async function showRomWorkbench(index, initial = {}) {
     const address = Number(rawAddress);
     if (Number.isFinite(address)) {
       root.querySelector('[name="disasmBank"]').value = String(initial.bank ?? 0);
-      root.querySelector('[name="disasmOffset"]').value = `0x${Math.max(0, address >= 0x8000 ? address - 0x8000 : address).toString(16).toUpperCase()}`;
+      root.querySelector('[name="disasmOffset"]').value = `0x${Math.max(0, address >= 0xE00000 ? address - 0xE00000 : address >= 0xFA0000 ? address - 0xFA0000 : address).toString(16).toUpperCase()}`;
       root.querySelector(".run-disassembly").click();
     }
   }
@@ -3072,11 +3065,11 @@ async function prepareHostFileMetadata(files) {
   for (const file of files.filter(item => /\.inf$/i.test(item.name))) {
     const key = file.name.replace(/\.inf$/i, "").toLowerCase();
     const fields = (await file.text()).trim().match(/"[^"]*"|\S+/g) || [];
-    const catalogueName = String(fields[0] || "").replace(/^"|"$/g, "").split("/").at(-1);
+    const storedName = String(fields[0] || "").replace(/^"|"$/g, "").split(/[\\/]/).at(-1);
     sidecars.set(key, {
-      targetName: catalogueName || file.name.replace(/\.inf$/i, ""),
-      protection: normaliseProtection(fields[1]),
-      comment: String(fields.slice(3).join(" ") || "").replace(/^"|"$/g, ""),
+      targetName: storedName || file.name.replace(/\.inf$/i, ""),
+      attributes: normaliseAttributes(fields[1]),
+      datestamp: String(fields[3] || "").replace(/^"|"$/g, ""),
     });
   }
   return files.filter(file => !/\.inf$/i.test(file.name)).map(file => ({
@@ -3087,7 +3080,7 @@ async function prepareHostFileMetadata(files) {
 
 async function importHostFile(index, file, forceRaw = false, batch = null) {
   const pane = panes[index];
-  if (!pane.image || (pane.image.kind === "hdf" && pane.partition === null)) return toast("Open a disk first.", true);
+  if (!pane.image || (pane.image.kind === "hd" && pane.partition === null)) return toast("Open a volume first.", true);
   if (!forceRaw && paneHoldsVolume(pane) && formats.isImportableImage(file.name)) {
     return promptImageExtraction(index, file, batch);
   }
@@ -3096,8 +3089,8 @@ async function importHostFile(index, file, forceRaw = false, batch = null) {
   if (batch?.acceptAll) {
     return addHostFileWithPlan(index, file, {
       targetName: nameRule.suggested,
-      protection: detected.protection,
-      comment: detected.comment,
+      attributes: detected.attributes,
+      datestamp: detected.datestamp,
       filetype: detected.filetype,
     });
   }
@@ -3106,23 +3099,23 @@ async function importHostFile(index, file, forceRaw = false, batch = null) {
     : "";
   const canApplyAll = batch?.total > batch?.current;
   const closed = showModal(`
-    <h2>Insert ${esc(file.name)}</h2>${batchLabel}<p>${nameRule.valid ? "Choose the target filename and optional Atari metadata." : `${esc(file.name)} is not a legal ${nameRule.label} filename, so a safe replacement has been suggested.`}</p>
+    <h2>Insert ${esc(file.name)}</h2>${batchLabel}<p>${nameRule.valid ? "Choose the target filename and optional GEMDOS metadata." : `${esc(file.name)} is not a legal ${nameRule.label} filename, so a safe replacement has been suggested.`}</p>
     <div class="field"><label>Target filename</label>
       <input name="targetName" maxlength="${nameRule.limit}" value="${esc(nameRule.suggested)}" required>
       <small>Up to ${nameRule.limit} characters, in ${esc(nameRule.label)} spelling.</small></div>
-    <div class="field"><label>Protection</label>
-      <input name="protection" value="${esc(detected.protection || "")}" placeholder="----rwed" maxlength="8">
-      <small>The eight letters <code>List</code> prints. Leave it empty for the ordinary <code>----rwed</code>.</small></div>
-    <div class="field"><label>File comment</label>
-      <input name="comment" value="${esc(detected.comment || "")}" maxlength="79" placeholder="Optional">
-      <small>Up to 79 characters, kept with the file on the volume.</small></div>
-    <div class="field"><label>Workbench icon type</label>
-      <input name="filetype" placeholder="Tool, Project or 3">
-      <small>Only when the file should carry a <code>.info</code> icon.</small></div>
+    <div class="field"><label>Attributes</label>
+      <input name="attributes" value="${esc(detected.attributes || "")}" placeholder="-----a" maxlength="6">
+      <small>The six letters <code>rhsvda</code>. Leave it empty for an ordinary <code>-----a</code>.</small></div>
+    <div class="field"><label>Datestamp</label>
+      <input name="datestamp" type="datetime-local" step="2" value="${esc(String(detected.datestamp || "").slice(0, 19).replace(" ", "T"))}">
+      <small>Leave it empty to stamp the file with the time it is written.</small></div>
+    <div class="field"><label>Desktop icon type</label>
+      <input name="filetype" placeholder="GEM, TOS or TTP">
+      <small>Only when the desktop should be told how to start the file.</small></div>
     <input type="hidden" name="applyRemaining" value="no">
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button>${canApplyAll ? '<button class="button ghost apply-import-all" value="add">Insert and apply to all remaining</button>' : ""}<button class="button primary" value="add">Insert File</button></div>`,
   async formValues => {
-    const plan = Object.fromEntries(["targetName", "protection", "comment", "filetype"]
+    const plan = Object.fromEntries(["targetName", "attributes", "datestamp", "filetype"]
       .map(key => [key, formValues.get(key)]));
     if (batch && formValues.get("applyRemaining") === "yes") {
       batch.acceptAll = true;
@@ -3143,7 +3136,7 @@ async function addHostFileWithPlan(index, file, plan) {
   form.append("targetName", plan.targetName);
   if (pane.partition !== null) form.append("partition", pane.partition);
   if (pane.side !== null) form.append("side", pane.side);
-  for (const key of ["protection", "comment", "filetype"]) if (plan[key]) form.append(key, plan[key]);
+  for (const key of ["attributes", "datestamp", "filetype"]) if (plan[key]) form.append(key, plan[key]);
   const data = await paneOperation(index, "Adding file to image…", () =>
     api(`/api/images/${pane.image.id}/files`, { method: "POST", body: form }));
   pane.image = data.image;
@@ -3250,7 +3243,7 @@ function extractionPreviewMarkup(preview) {
         ${rows.length ? rows.map(item => `
           <div class="image-import-preview-row">
             <span class="preview-kind">${item.type === "dir" ? "▣" : item.type === "disk" ? "▤" : "□"}</span>
-            <span><b>${esc(item.name)}</b><small>${esc(item.path || "$")}${item.detail ? ` · ${esc(item.detail)}` : ""}</small></span>
+            <span><b>${esc(item.name)}</b><small>${esc(item.path || "\\")}${item.detail ? ` · ${esc(item.detail)}` : ""}</small></span>
             <em>${item.size == null ? "" : humanSize(item.size)}</em>
           </div>`).join("") : '<p class="muted">No files were found in this image.</p>'}
       </div>
@@ -3267,25 +3260,25 @@ function showImageExtractionPlan(index, options) {
   const closed = showModal(`
     <h2>${esc(options.heading)}</h2>
     ${batchLabel}
-    <p>Review the source, then choose where its contents should go. Extraction defaults to the directory currently shown in the pane.</p>
+    <p>Review the source, then choose where its contents should go. Extraction defaults to the folder currently shown in the pane.</p>
     ${extractionPreviewMarkup(options.preview)}
     ${options.allowRaw || options.allowInstall ? `<div class="field"><label>Import as</label><select name="storageMethod">
-      <option value="extract">Copy the disc contents in as they are</option>
+      <option value="extract">Copy the disk contents in as they are</option>
       ${options.allowInstall ? '<option value="install">Install it onto this drive</option>' : ""}
       ${options.allowRaw ? '<option value="raw">Store the original image as an ordinary file</option>' : ""}
     </select></div>` : '<input type="hidden" name="storageMethod" value="extract">'}
     ${options.allowInstall ? installPlanMarkup(options) : ""}
     <div data-extraction-options>
       <div class="selected-destination"><small>DESTINATION</small><code data-selected-destination>${esc(pane.path)}</code></div>
-      <label class="check-field"><input type="checkbox" name="pickDestination" value="yes"> Choose a different existing directory</label>
+      <label class="check-field"><input type="checkbox" name="pickDestination" value="yes"> Choose a different existing folder</label>
       <input type="hidden" name="targetPath" value="${esc(pane.path)}">
-      <div class="ffs-directory-picker" data-directory-picker hidden>
+      <div class="volume-directory-picker" data-directory-picker hidden>
         <div class="directory-picker-head"><button type="button" class="button ghost picker-up">Up</button><code data-picker-path>${esc(pane.path)}</code></div>
         <div class="directory-picker-list" data-picker-list></div>
       </div>
-      <label class="check-field"><input type="checkbox" name="createDirectory" value="yes"> Create a new child directory before extracting</label>
-      <div class="field" data-extracted-directory hidden><label>New drawer name · max 30 characters</label>
-        <input name="directoryName" maxlength="30" value="${esc(options.suggestedName)}" disabled></div>
+      <label class="check-field"><input type="checkbox" name="createDirectory" value="yes"> Create a new child folder before extracting</label>
+      <div class="field" data-extracted-directory hidden><label>New folder name · max 12 characters</label>
+        <input name="directoryName" maxlength="12" value="${esc(options.suggestedName)}" disabled></div>
       <div class="help-note">Existing names are never overwritten. A failed or aborted direct extraction restores the working image.</div>
     </div>
     <input type="hidden" name="applyRemaining" value="no">
@@ -3297,10 +3290,8 @@ function showImageExtractionPlan(index, options) {
       return options.onInstall({
         mode: form.get("installMode") || "stage",
         title: (form.get("installTitle") || options.suggestedName || "").trim(),
-        discLabel: (form.get("discLabel") || "").trim(),
+        diskLabel: (form.get("diskLabel") || "").trim(),
         parent: (form.get("installParent") || "").trim(),
-        whdloadPresent: modalContent.querySelector("[data-install-options]")?.dataset.whdloadInstalled === "yes",
-        reinstallWhdload: form.get("reinstallWhdload") === "yes",
         installNow: form.get("installNow") === "yes",
         applyAll,
       });
@@ -3340,7 +3331,7 @@ function bindImageExtractionPlan(index, allowRaw, options = {}) {
   };
   const parentOf = path => parentPath(path);
   const loadPicker = async path => {
-    pickerList.innerHTML = '<span class="muted">Reading directories…</span>';
+    pickerList.innerHTML = '<span class="muted">Reading folders…</span>';
     try {
       const data = await api(`/api/images/${pane.image.id}/tree?path=${encodeURIComponent(path)}`);
       if (!modal.open) return;
@@ -3350,7 +3341,7 @@ function bindImageExtractionPlan(index, allowRaw, options = {}) {
       const directories = data.entries.filter(item => item.type === "dir");
       pickerList.innerHTML = directories.length
         ? directories.map(item => `<button type="button" data-directory-name="${esc(item.name)}"><b>▣</b><span>${esc(item.name)}</span></button>`).join("")
-        : '<span class="muted">No child directories here.</span>';
+        : '<span class="muted">No child folders here.</span>';
       pickerList.querySelectorAll("[data-directory-name]").forEach(button => {
         button.onclick = () => loadPicker(fullPath(path, button.dataset.directoryName));
       });
@@ -3379,114 +3370,95 @@ function bindImageExtractionPlan(index, allowRaw, options = {}) {
   showDirectory();
 }
 
-//: The three honest ways a disc becomes something a hard drive runs. Staging
-//: leads because it is the only one that cannot half-succeed: it needs no
-//: emulator, no network and no per-title knowledge, and what it produces is
-//: finishable by hand either here or on the real machine.
+//: Whether the `/install/` routes are published by this build. They are, so
+//: every control below reaches a service that answers. The flag and the note
+//: are kept because a build that ships without the install blueprint has to
+//: be able to say so in the dialog rather than failing at the network.
+const INSTALL_SERVICE_AVAILABLE = true;
+const INSTALL_UNAVAILABLE_NOTE = '<div class="help-warning"><strong>Not available in this build.</strong> The install service is not published here, so these controls are disabled rather than failing at the network.</div>';
+
+//: The three honest ways a floppy becomes something a hard drive runs.
+//: Staging leads because it is the only one that cannot half-succeed: it
+//: needs no emulator, no network and no per-title knowledge, and what it
+//: produces is finishable by hand either here or on the real machine.
 const INSTALL_MODES = [
   {
     value: "stage",
     label: "Stage it for installing later",
-    detail: "Extracts the disc into a staging drawer on this drive. Add the rest of a multi-disc set to the same place, then install them together here, or boot the drive and run the title's own installer against the drawer.",
+    detail: "Copies the disk into a staging folder on this drive. Add the rest of a multi-disk set to the same place, then install them together here, or boot the drive and run the title's own installer against the folder.",
   },
   {
-    value: "whdload",
-    label: "Install with WHDLoad",
-    detail: "For games and demos. WHDLoad itself is installed from whdload.de if this drive does not have it. The per-title slave is not downloadable from anywhere, so add one yourself if you have it.",
+    value: "install",
+    label: "Install it into a folder on this drive",
+    detail: "For a title that runs from wherever it is put. The staged files are moved into the folder you name, keeping the tree the disk had.",
   },
   {
     value: "installer",
-    label: "Run the disc's own installer",
-    detail: "Boots this drive in the emulator with the disc in DF0:. Use it for productivity software, which asks questions no tool can answer for you.",
+    label: "Run the disk's own installer",
+    detail: "Boots this drive in Hatari with the disk in A:. Use it for productivity software, which asks questions no tool can answer for you.",
   },
 ];
 
 function installPlanMarkup(options) {
   return `
     <div data-install-options hidden>
+      ${INSTALL_SERVICE_AVAILABLE ? "" : INSTALL_UNAVAILABLE_NOTE}
       <div class="field"><label>Title</label>
-        <input name="installTitle" maxlength="60" value="${esc(options.suggestedName || "")}">
-        <small>Discs staged under the same title are merged into one tree on this drive.</small></div>
-      <div class="field"><label>Disc</label>
-        <input name="discLabel" maxlength="30" placeholder="Disc 1"></div>
+        <input name="installTitle" maxlength="60" value="${esc(options.suggestedName || "")}" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>
+        <small>Disks staged under the same title are merged into one tree on this drive.</small></div>
+      <div class="field"><label>Disk</label>
+        <input name="diskLabel" maxlength="30" placeholder="Disk 1" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}></div>
       <div class="field"><label>Method</label>
         <div class="install-modes">
           ${INSTALL_MODES.map((mode, position) => `
             <label class="check-field install-mode">
-              <input type="radio" name="installMode" value="${mode.value}"${position === 0 ? " checked" : ""}>
+              <input type="radio" name="installMode" value="${mode.value}"${position === 0 ? " checked" : ""} ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>
               <span><b>${esc(mode.label)}</b><small>${esc(mode.detail)}</small></span>
             </label>`).join("")}
         </div></div>
-      <div data-install-whdload hidden>
-        <div class="help-note" data-whdload-state>Checking whether this drive already has WHDLoad…</div>
-        <label class="check-field" data-reinstall-whdload hidden>
-          <input type="checkbox" name="reinstallWhdload" value="yes"> Download and reinstall WHDLoad anyway
-        </label>
+      <div data-install-folder hidden>
         <div class="field"><label>Install into</label>
-          <input name="installParent" maxlength="60" value="Games"></div>
+          <input name="installParent" maxlength="60" value="GAMES" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>
+          <small>A folder at the root of this volume, named the way GEMDOS stores it.</small></div>
       </div>
       <label class="check-field" data-install-now hidden>
-        <input type="checkbox" name="installNow" value="yes" checked> Write it into the drive now, rather than only staging it
+        <input type="checkbox" name="installNow" value="yes" checked ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}> Write it into the drive now, rather than only staging it
       </label>
     </div>`;
 }
 
 function bindInstallPlan(index, options) {
-  const pane = panes[index];
-  const installOptions = modalContent.querySelector("[data-install-options]");
-  const whdloadPanel = modalContent.querySelector("[data-install-whdload]");
-  const whdloadState = modalContent.querySelector("[data-whdload-state]");
+  const folderPanel = modalContent.querySelector("[data-install-folder]");
   const installNow = modalContent.querySelector("[data-install-now]");
   const modes = [...modalContent.querySelectorAll('input[name="installMode"]')];
   const chosen = () => modes.find(input => input.checked)?.value || "stage";
 
   const refresh = () => {
     const mode = chosen();
-    whdloadPanel.hidden = mode !== "whdload";
-    // Staging writes into the drive's staging drawer rather than into the
+    folderPanel.hidden = mode !== "install";
+    // Staging writes into the drive's staging folder rather than into the
     // title's final home, so "write it in now" is the step that moves it
-    // there. The emulator mode does not install anything itself.
+    // there. Running the installer does not install anything itself.
     installNow.hidden = mode === "installer";
   };
   modes.forEach(input => input.addEventListener("change", refresh));
   refresh();
-
-  const reinstall = modalContent.querySelector("[data-reinstall-whdload]");
-  const partition = pane.partition == null ? "" : `?partition=${pane.partition}`;
-  api(`/api/images/${pane.image.id}/install/whdload${partition}`)
-    .then(data => {
-      if (!modal.open) return;
-      const state = data.whdload || {};
-      // A drive that already has WHDLoad is left alone by default. Fetching a
-      // megabyte and a half to overwrite the same build is a cost with no
-      // result, so reinstalling is offered rather than assumed.
-      installOptions.dataset.whdloadInstalled = state.installed ? "yes" : "no";
-      reinstall.hidden = !state.installed;
-      whdloadState.textContent = state.installed
-        ? `This drive has WHDLoad ${state.version || "(version not recorded)"}, which will be left alone.`
-        : "This drive has no WHDLoad. It will be downloaded from whdload.de and installed.";
-    })
-    .catch(error => {
-      if (!modal.open) return;
-      whdloadState.textContent = `WHDLoad could not be checked on this drive: ${error.message}`;
-    });
 }
 
-//: Where staged discs live on the drive, unless the operator names another.
+//: Where staged disks live on the drive, unless the operator names another.
 //: Staging writes onto the target image so the install can be finished in an
-//: emulator or on the real machine, which means this is an Atari path, not a
+//: emulator or on the real machine, which means this is a GEMDOS path, not a
 //: directory on the computer running the application. It has to match
-//: DEFAULT_STAGING_PARENT in app/install_service.py, which explains why it is
-//: under Storage rather than at the volume root.
-const DEFAULT_STAGING_PARENT = "Storage/Install";
+//: DEFAULT_STAGING_PARENT in app/install_service.py, and every component is
+//: an 8.3 name because that is all a GEMDOS directory entry can hold.
+const DEFAULT_STAGING_PARENT = "INSTALL\\STAGE";
 
 async function showStagedInstallations(index) {
   const pane = panes[index];
-  const installable = paneAcceptsInstall(pane);
-  if (!installable) {
+  if (!paneAcceptsInstall(pane)) {
     return alertNotice(
-      "Staged installations",
-      "Staged discs live in a drawer on the drive they are destined for, so this needs a volume open.",
+      "Staged disks",
+      "Staged disks live in a folder on the drive they are destined for, so this needs a volume open.",
       { confirmLabel: "Close" },
     );
   }
@@ -3498,10 +3470,10 @@ async function showStagedInstallations(index) {
     <div class="staged-title" data-name="${esc(title.name)}">
       <div>
         <b>${esc(title.title)}</b>
-        <small>${title.discCount ? `${title.discCount} disc${title.discCount === 1 ? "" : "s"} · ` : ""}${title.fileCount} file${title.fileCount === 1 ? "" : "s"} · ${humanSize(title.bytes)}</small>
+        <small>${title.diskCount ? `${title.diskCount} disk${title.diskCount === 1 ? "" : "s"} · ` : ""}${title.fileCount} file${title.fileCount === 1 ? "" : "s"} · ${humanSize(title.bytes)}</small>
         <small><code>${esc(title.path)}</code></small>
-        ${title.discs.length ? `<small>${esc(title.discs.map(disc => `${disc.label}: ${disc.volume}`).join(" · "))}</small>` : ""}
-        ${title.conflicts.length ? `<small class="staged-conflict">${title.conflicts.length} file${title.conflicts.length === 1 ? "" : "s"} differed between discs; the first was kept and the rest are under ${esc(DEFAULT_STAGING_PARENT)}/Forge-Staging</small>` : ""}
+        ${title.disks.length ? `<small>${esc(title.disks.map(disk => `${disk.label}: ${disk.volume}`).join(" · "))}</small>` : ""}
+        ${title.conflicts.length ? `<small class="staged-conflict">${title.conflicts.length} file${title.conflicts.length === 1 ? "" : "s"} differed between disks; the first was kept and the rest are under ${esc(DEFAULT_STAGING_PARENT)}\\CLASH</small>` : ""}
       </div>
       <div class="staged-actions">
         <button type="button" class="button primary staged-install">Install here</button>
@@ -3510,12 +3482,12 @@ async function showStagedInstallations(index) {
     </div>`).join("");
 
   showModal(`
-    <h2>Staged installations</h2>
-    <p>Discs waiting on this drive. Stage every disc of a set under one title, then install it here, or boot the drive in an emulator or a real Atari and run the title's own installer against the staging drawer.</p>
-    <div class="selected-destination"><small>STAGING DRAWER</small><code>${esc(volumeLabel(pane))}${esc(data.root || DEFAULT_STAGING_PARENT)}</code></div>
-    <div class="field"><label>Install into</label><input name="stagedParent" maxlength="60" value="Games" placeholder="Leave empty for the volume root">
-      <small>The drawer on this volume that finished titles are moved into.</small></div>
-    <div class="staged-title-list">${rows || `<p class="muted">Nothing is staged on this drive. Choose <strong>Install it onto this drive</strong> when you add a disc, and pick <strong>Stage it for installing later</strong>.</p>`}</div>
+    <h2>Staged disks</h2>
+    <p>Disks waiting on this drive. Stage every disk of a set under one title, then install it here, or boot the drive in Hatari or a real Atari and run the title's own installer against the staging folder.</p>
+    <div class="selected-destination"><small>STAGING FOLDER</small><code>${esc(drivePath(pane.partitionName || pane.image.driveLetter || "", data.root || DEFAULT_STAGING_PARENT))}</code></div>
+    <div class="field"><label>Install into</label><input name="stagedParent" maxlength="60" value="GAMES" placeholder="Leave empty for the volume root">
+      <small>The folder on this volume that finished titles are moved into.</small></div>
+    <div class="staged-title-list">${rows || `<p class="muted">Nothing is staged on this drive. Choose <strong>Install it onto this drive</strong> when you add a disk, and pick <strong>Stage it for installing later</strong>.</p>`}</div>
     <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div>`,
   () => true);
 
@@ -3542,15 +3514,15 @@ async function showStagedInstallations(index) {
       }
     });
     row.querySelector(".staged-discard")?.addEventListener("click", async () => {
-      // Discarding deletes the extracted discs off the drive, so it is
+      // Discarding deletes the extracted disks off the drive, so it is
       // confirmed rather than acted on from a single click. The original
       // images are untouched, which is worth saying: it is the difference
       // between an inconvenience and a loss.
       const title = row.querySelector("b").textContent;
       if (!await confirmChoice(
-        "Discard these staged discs?",
-        `The staging drawer for “${title}” is deleted from ${volumeLabel(pane)}${DEFAULT_STAGING_PARENT}.`,
-        { confirmLabel: "Discard", danger: true, note: "The original disc images are untouched, so the set can be staged again." },
+        "Discard these staged disks?",
+        `The staging folder for “${title}” is deleted from ${volumeLabel(pane)}${DEFAULT_STAGING_PARENT}.`,
+        { confirmLabel: "Discard", danger: true, note: "The original disk images are untouched, so the set can be staged again." },
       )) return;
       modal.close();
       try {
@@ -3570,406 +3542,204 @@ async function showStagedInstallations(index) {
 }
 
 //: How a volume is named in a sentence, and what a path on it is written
-//: after: the GEMDOS volume with its colon when the pane knows one, because
-//: that is what an operator sees on the machine, and the image file name with
-//: a separating space when it does not.
+//: after: the GEMDOS drive letter with its colon when the pane knows one,
+//: because that is what an operator sees on the machine, and the image file
+//: name with a separating space when it does not.
 function volumeLabel(pane) {
-  if (pane?.partitionName) return `${pane.partitionName}:`;
+  if (pane?.partitionName) return `${String(pane.partitionName).replace(/:$/, "")}:`;
   return pane?.image?.name ? `${pane.image.name} ` : "";
 }
 
 
-//: Installing TOS from the operator's own floppies. A blank drive is not
-//: a machine you can use, and this is the one install that can be done in full
-//: here, because TOS is installed by copying disks into known places
-//: rather than by running Atari code.
-//:
-//: The discs are opened as ordinary images first, exactly as they would be if
-//: the operator opened one in a pane, and then identified by the volume name
-//: inside each. That is why a folder can be pointed at rather than a list of
-//: files assembled by hand: naming is inconsistent across ADF collections and
-//: the volume name is the only part that was written by Commodore.
-async function showWorkbenchInstall(index) {
+//: The hard-disk drivers a TOS machine can boot from, and the one case where
+//: it needs none at all. The list the service publishes is the authority, and
+//: it also says which of them the operator has actually supplied a copy of;
+//: this is the fallback wording used before that answer arrives.
+const DRIVE_DRIVERS = [
+  { value: "driver-emutos-builtin", label: "None · boot driverless under EmuTOS", detail: "EmuTOS reads ACSI, SCSI and IDE drives itself. Nothing is written to the root sector, so the drive stays readable by any machine running EmuTOS." },
+  { value: "driver-ahdi", label: "Atari AHDI", detail: "Atari's own driver, written to the root sector with AHDI.PRG in the AUTO folder. It is limited to 16 MB partitions on TOS 1.x." },
+  { value: "driver-hddriver", label: "HDDRIVER", detail: "Uwe Seimet's driver, the usual choice for large partitions and modern interfaces such as ACSI2STM and UltraSatan." },
+  { value: "driver-pp", label: "PP driver", detail: "Peter Putnik's free driver for ACSI, SCSI and IDE drives." },
+  { value: "driver-icd", label: "ICD Pro driver", detail: "Supplied with ICD host adapters, and it also drives most other ACSI hardware." },
+];
+
+//: How a drive describes its own preparation in one line. Everything in it is
+//: read off the drive rather than remembered here, so a drive prepared on
+//: another machine reads as accurately as one prepared in this application.
+function drivePreparationSummary(state) {
+  if (!state) return "";
+  const parts = [
+    state.scheme === "mbr" ? "PC partition table" : `${String(state.scheme || "").toUpperCase()} partition table`,
+    state.byteSwapped ? "stored byte-swapped" : "",
+    state.rootSectorExecutable ? "root sector executable" : "root sector inert",
+    state.driver?.installed ? `${state.driver.file}${state.driver.version ? ` ${state.driver.version}` : ""} in the partition root` : "no driver file",
+    state.desktop?.length ? state.desktop.join(" and ") : "no desktop configuration",
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+//: Preparing a drive so a machine can start from it: writing a hard-disk
+//: driver onto the root sector, or declaring that EmuTOS will read the drive
+//: itself and no driver is needed.
+async function showPrepareDrive(index) {
   const pane = panes[index];
   if (!paneAcceptsInstall(pane)) {
     return alertNotice(
-      "Install Workbench",
-      "Workbench is installed into a volume, so open a partition on a hard drive first.",
+      "Prepare this drive",
+      "A driver is written to the drive it is going to boot, so open a partition on a hard drive first.",
       { confirmLabel: "Close" },
     );
   }
-  const roles = await api("/api/install/workbench/disks").then(data => data.roles).catch(() => []);
   const target = volumeLabel(pane) || pane.image.name;
-
-  //  Warnings are shown after the dialog has closed rather than from inside
-  //  its submit handler. A dialog that is waiting on its own operation keeps
-  //  its form hidden behind the progress panel, so a question asked from in
-  //  there would sit underneath it with the install apparently still running.
-  let warnings = [];
+  const partition = pane.partition == null ? "" : `?partition=${pane.partition}`;
+  let state = null;
+  try {
+    state = (await paneOperation(index, "Reading how this drive is prepared…", () =>
+      api(`/api/images/${pane.image.id}/install/driver${partition}`))).preparation;
+  } catch (error) {
+    return toast(error.message, true);
+  }
+  const published = state.drivers?.length ? state.drivers : DRIVE_DRIVERS.map(driver => ({ id: driver.value, label: driver.label, note: driver.detail }));
+  const supplied = Object.fromEntries((state.available || []).map(row => [row.id, row]));
+  const detailFor = id => {
+    const driver = published.find(item => item.id === id);
+    const copy = supplied[id];
+    const note = driver?.note || DRIVE_DRIVERS.find(item => item.value === id)?.detail || "";
+    if (!copy || copy.available) return note;
+    return `${note} No copy of this driver was found, so it cannot be installed yet.`;
+  };
   const closed = showModal(`
-    <h2>Install Workbench</h2>
-    <p>Prepares ${esc(target)} by copying your own Workbench floppies onto it. Point at the folder holding them, or pick the disc images yourself.</p>
-    <div class="help-note"><strong>Your own disks:</strong> Atari File Forge does not ship TOS and cannot fetch it. Use the ADF, ADZ, DMS or HFE images of the Workbench disks you own.</div>
-    <div class="field"><label>Workbench disc images</label>
-      <div class="workbench-disc-choosers">
-        <button type="button" class="button" data-choose-folder>Choose a folder…</button>
-        <button type="button" class="button" data-choose-files>Choose disc images…</button>
-      </div>
-      <small>Everything in the folder is read; the disks that are not part of a release are ignored.</small></div>
-    <div class="file-selection-summary" data-disc-summary>
-      <span class="file-selection-empty">No disc images chosen yet.</span>
-    </div>
-    <div data-workbench-survey hidden></div>
-    <label class="check-field"><input type="checkbox" name="createDrawers" value="yes" checked> Create the working drawers the install script makes (T, Trashcan, Devs/DOSDrivers, Prefs/Env-Archive)</label>
-    <div class="help-note">Files already on the volume are left alone, so an existing drive is added to rather than replaced, and installing twice does not undo work done in between.</div>
+    <h2>Prepare this drive</h2>
+    <p>Makes ${esc(target)} startable, either by installing a hard-disk driver on it or by declaring that EmuTOS will read the drive without one.</p>
+    <div class="selected-destination"><small>THIS DRIVE NOW</small><code>${esc(drivePreparationSummary(state))}</code></div>
+    <div class="help-note"><strong>Your own driver:</strong> Atari File Forge does not ship AHDI, HDDRIVER, the PP driver or the ICD driver and cannot fetch them. Put the files you own in <code>~/.config/atari-file-forge/drivers</code> or <code>firmware/drivers</code>, unpacked as they were published. EmuTOS needs no driver at all.</div>
+    <div class="field"><label>Hard-disk driver</label>
+      <select name="driveDriver">
+        ${published.map(driver => `<option value="${esc(driver.id)}"${supplied[driver.id] && !supplied[driver.id].available ? " disabled" : ""}>${esc(driver.label)}${supplied[driver.id]?.version ? ` · ${esc(supplied[driver.id].version)}` : ""}${supplied[driver.id] && !supplied[driver.id].available ? " · not supplied" : ""}</option>`).join("")}
+      </select>
+      <small data-driver-detail>${esc(detailFor(published[0]?.id))}</small></div>
+    <label class="check-field"><input type="checkbox" name="createFolders" value="yes" checked> Create the folders a prepared drive expects (AUTO, GEMSYS, GAMES)</label>
+    <label class="check-field"><input type="checkbox" name="writeDesktop" value="yes" checked> Write a desktop configuration if this volume has none</label>
+    <div class="help-note">Files already on the volume are left alone, so an existing drive is added to rather than replaced, and preparing twice does not undo work done in between.</div>
     <div class="modal-actions">
-      <button class="button ghost" value="cancel">Cancel</button>
-      <button class="button primary" value="install" data-install-workbench disabled>Install Workbench</button>
+      <button class="button ghost" value="cancel">Close</button>
+      <button class="button primary" value="prepare" data-prepare-drive>Prepare the drive</button>
     </div>`,
   async form => {
-    const chosen = collectWorkbenchChoice();
-    if (!chosen || !Object.keys(chosen.discs).length) {
-      throw new Error("Choose the Workbench disc images first.");
-    }
-    const result = await trackedPaneOperation(index, "Installing Workbench…", operationId =>
-      api(`/api/images/${pane.image.id}/install/workbench`, {
+    const result = await trackedPaneOperation(index, "Preparing the drive…", operationId =>
+      api(`/api/images/${pane.image.id}/install/driver`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          discs: chosen.discs,
-          version: chosen.version,
+          driver: form.get("driveDriver"),
           partition: pane.partition,
-          createDrawers: form.get("createDrawers") === "yes",
+          createFolders: form.get("createFolders") === "yes",
+          desktop: form.get("writeDesktop") === "yes",
           operationId,
         }),
       }));
     pane.image = result.image;
-    await releaseWorkbenchDiscs();
     await loadDirectory(index);
-    const workbench = result.workbench;
-    toast(`Workbench ${workbench.version || ""} installed: ${workbench.copied} file${workbench.copied === 1 ? "" : "s"} copied.`.replace(/\s+/g, " "));
-    warnings = workbench.warnings || [];
-    return true;
+    (result.warnings || []).forEach(warning => toast(warning, true));
+    toast(result.driver.installed
+      ? `${result.label} installed on ${target}.`
+      : `${target} prepared to start driverless under EmuTOS.`);
   });
-
-  bindWorkbenchInstall(index, roles);
-  closed.then(() => {
-    if (warnings.length) {
-      alertNotice("Workbench installed, with warnings", warnings.join("\n\n"), { confirmLabel: "Close" });
-    }
-  });
+  //: The note under the picker is the whole of what tells an operator what
+  //: they are choosing, so it follows the choice rather than describing only
+  //: the first entry.
+  const picker = modalContent.querySelector('[name="driveDriver"]');
+  const detail = modalContent.querySelector("[data-driver-detail]");
+  picker?.addEventListener("change", () => { detail.textContent = detailFor(picker.value); });
   return closed;
 }
 
-//: The opened disc sessions, kept while the dialog is up so they can be
-//: identified, chosen between and then installed from without uploading the
-//: same floppies twice. They are released when the dialog closes, because a
-//: Workbench set is seven images and leaving them open would hold on to the
-//: better part of ten megabytes for nothing.
-let workbenchDiscSessions = [];
-let workbenchSurvey = null;
-//: Set while the install dialog is up, so the survey can re-enable its own
-//: install button after the operator changes which disc plays which part.
-let workbenchRefresh = () => {};
-
-async function releaseWorkbenchDiscs() {
-  const sessions = workbenchDiscSessions;
-  workbenchDiscSessions = [];
-  workbenchSurvey = null;
-  await Promise.all(sessions.map(session =>
-    api(`/api/images/${session.id}`, { method: "DELETE" }).catch(() => {})));
-}
-
-function collectWorkbenchChoice() {
-  if (!workbenchSurvey) return null;
-  const discs = {};
-  modalContent.querySelectorAll("[data-role-choice]").forEach(select => {
-    if (select.value) discs[select.dataset.roleChoice] = select.value;
-  });
-  return { discs, version: workbenchSurvey.version || "" };
-}
-
-function bindWorkbenchInstall(index, roles) {
-  const summary = modalContent.querySelector("[data-disc-summary]");
-  const installButton = modalContent.querySelector("[data-install-workbench]");
-
-  modal.addEventListener("close", () => { releaseWorkbenchDiscs(); }, { once: true });
-
-  const chooser = async directory => {
-    const files = await pickHostFiles({ directory, accept: directory ? "" : formats.accept });
-    if (files.length) openWorkbenchDiscs(index, files, roles);
-  };
-  modalContent.querySelector("[data-choose-folder]").onclick = () => chooser(true);
-  modalContent.querySelector("[data-choose-files]").onclick = () => chooser(false);
-
-  //  Dropping a folder onto the dialog is the same gesture as dropping one
-  //  onto a pane, so it does the same thing here.
-  summary.addEventListener("dragover", event => {
-    event.preventDefault();
-    summary.classList.add("drop-target");
-  });
-  summary.addEventListener("dragleave", () => summary.classList.remove("drop-target"));
-  summary.addEventListener("drop", async event => {
-    event.preventDefault();
-    summary.classList.remove("drop-target");
-    const records = await collectDroppedHostFiles(event.dataTransfer);
-    openWorkbenchDiscs(index, records.map(item => item.file), roles);
-  });
-
-  //  The install button is only live once a Workbench disk has been chosen,
-  //  because that is the one disk without which the result cannot boot.
-  workbenchRefresh = () => {
-    const chosen = collectWorkbenchChoice();
-    installButton.disabled = !chosen || !chosen.discs.workbench;
-  };
-  workbenchRefresh();
-}
-
-//: Ask the server which of the opened discs is which. The identification is
-//: done there because it means reading each volume's name out of the image,
-//: and the release can be pinned so that changing it re-matches the whole set
-//: rather than only the disc the operator was looking at.
-function surveyWorkbenchDiscs(index, version = "") {
-  const pane = panes[index];
-  return api(`/api/images/${pane.image.id}/install/workbench/survey`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      discs: workbenchDiscSessions.map(session => session.id),
-      partition: pane.partition,
-      version,
-    }),
-  }).then(data => data.survey);
-}
-
-//: Disc images are opened one at a time so a slow or damaged one names itself
-//: rather than failing the whole selection anonymously.
-async function openWorkbenchDiscs(index, files, roles) {
-  const pane = panes[index];
-  const candidates = files.filter(file => file.size && !ignoredFolderFile(file.name)
-    && formats.isImportableImage(file.name));
-  const summary = modalContent.querySelector("[data-disc-summary]");
-  if (!candidates.length) {
-    summary.className = "file-selection-summary chooser-failed";
-    summary.innerHTML = "<span>No disc images were found in that selection. Workbench disks are ADF, ADZ, DMS or HFE files.</span>";
-    return;
-  }
-  await releaseWorkbenchDiscs();
-  const failures = [];
-  for (const [offset, file] of candidates.entries()) {
-    summary.className = "file-selection-summary has-files";
-    summary.innerHTML = `<span>Reading ${esc(file.name)} · ${offset + 1} of ${candidates.length}…</span>`;
-    const upload = new FormData();
-    upload.append("image", file);
-    upload.append("targetHardware", "auto");
-    try {
-      const opened = await uploadApi("/api/images", upload);
-      workbenchDiscSessions.push(opened.image);
-    } catch (error) {
-      failures.push(`${file.name}: ${error.message}`);
-    }
-  }
-  if (!workbenchDiscSessions.length) {
-    summary.className = "file-selection-summary chooser-failed";
-    summary.innerHTML = `<span>None of the selected files could be opened as a disc.</span>`;
-    return;
-  }
-  try {
-    workbenchSurvey = await surveyWorkbenchDiscs(index);
-  } catch (error) {
-    summary.className = "file-selection-summary chooser-failed";
-    summary.innerHTML = `<span>${esc(error.message)}</span>`;
-    return;
-  }
-  renderWorkbenchSurvey(index, workbenchSurvey, roles, failures);
-}
-
-function renderWorkbenchSurvey(index, survey, roles, failures = []) {
-  const summary = modalContent.querySelector("[data-disc-summary]");
-  const host = modalContent.querySelector("[data-workbench-survey]");
-  const recognised = survey.discs.filter(disc => disc.role);
-  summary.className = "file-selection-summary has-files";
-  summary.innerHTML = `
-    <span><strong>${recognised.length}</strong> install disk${recognised.length === 1 ? "" : "s"} recognised out of ${survey.discs.length} image${survey.discs.length === 1 ? "" : "s"} read.</span>
-    ${survey.unrecognised.length ? `<span>Not part of a release, so ignored: ${esc(survey.unrecognised.slice(0, 6).join(", "))}${survey.unrecognised.length > 6 ? "…" : ""}</span>` : ""}
-    ${failures.length ? `<span>Could not be opened: ${esc(failures.slice(0, 3).join("; "))}</span>` : ""}`;
-
-  const options = role => {
-    const matches = survey.discs.filter(disc => disc.role === role.key);
-    const selected = survey.chosen[role.key] || "";
-    return `<option value="">${role.required ? "Required: choose a disc" : "Not installed"}</option>`
-      + matches.map(disc => `<option value="${esc(disc.imageId)}"${disc.imageId === selected ? " selected" : ""}>${esc(disc.volume || disc.source)}${disc.version ? ` · ${esc(disc.version)}` : ""} · ${disc.fileCount} file${disc.fileCount === 1 ? "" : "s"}</option>`).join("");
-  };
-
-  host.hidden = false;
-  host.innerHTML = `
-    ${survey.versions.length > 1 ? `<div class="field"><label>TOS release</label>
-      <select name="workbenchVersion" data-workbench-version>
-        ${survey.versions.map(value => `<option value="${esc(value)}"${value === survey.version ? " selected" : ""}>TOS ${esc(value)}</option>`).join("")}
-      </select>
-      <small>Every disk is matched to this release. Mixing releases produces a system whose parts disagree with each other.</small></div>` : ""}
-    ${survey.missing.length ? `<div class="help-warning"><strong>Missing:</strong> the ${esc(survey.missing.map(role => role.label).join(", "))} disk${survey.missing.length === 1 ? " is" : "s are"} required and ${survey.missing.length === 1 ? "was" : "were"} not found in the selection.</div>` : ""}
-    <div class="workbench-disc-roles">
-      ${roles.map(role => `
-        <div class="workbench-disc-role">
-          <div><b>${esc(role.label)}${role.required ? " · required" : ""}</b><small>Lands in ${role.destination === ":" ? "the volume root" : `<code>${esc(role.destination)}</code>`} · ${esc(role.note)}</small></div>
-          <select data-role-choice="${esc(role.key)}">${options(role)}</select>
-        </div>`).join("")}
-    </div>`;
-
-  host.querySelectorAll("[data-role-choice]").forEach(select => {
-    select.onchange = () => workbenchRefresh();
-  });
-  host.querySelector("[data-workbench-version]")?.addEventListener("change", async event => {
-    try {
-      workbenchSurvey = await surveyWorkbenchDiscs(index, event.target.value);
-      renderWorkbenchSurvey(index, workbenchSurvey, roles, failures);
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
-  workbenchRefresh();
-}
-
-//: Whether this pane is showing an GEMDOS volume that a disc's contents can
-//: be extracted into, rather than a container that merely holds one.
-//:
-//: A hard drive answers for the partition currently open, not for the drive as
-//: a whole. Asking about the image's own kind said "hdf" whichever volume was
-//: open, so inserting a disc image into a partitioned drive -- the case the
-//: install modes exist for -- never offered to extract or install it, and
-//: quietly stored the ADF as an ordinary file instead.
-function paneHoldsVolume(pane) {
-  if (!pane?.image || pane.archivePath || pane.image.readOnly) return false;
-  if (pane.image.kind === "hdf") return pane.partition !== null;
-  return pane.image.kind === "ffs";
-}
-
-
-//: Installing TOS 3.5 or 3.9, which were published on CD and are not
-//: installed the way 3.1 is.
-//:
-//: There is no tree to copy. The disc carries a Commodore Installer script
-//: that runs on the Atari, reads the versions the live system has loaded,
-//: asks a great many questions and patches an existing installation in place.
-//: So this checks everything that can be checked from here, then boots the
-//: machine with the disc in the CD drive and hands over the keyboard.
-async function showAtariosCdInstall(index) {
+//: Running a title's own installer. There is no tree to copy: the installer
+//: is Atari code that asks where things should go, reads what the live system
+//: has loaded and writes the result itself. So this puts the machine in the
+//: state the installer needs and hands over the keyboard.
+async function showTitleInstaller(index) {
   const pane = panes[index];
   if (!paneAcceptsInstall(pane)) {
     return alertNotice(
-      "Install TOS 3.5 or 3.9",
-      "These releases update a system on a hard drive, so open a partition on one first.",
+      "Run a title's own installer",
+      "An installer writes onto the drive it is installing to, so open a partition on one first.",
       { confirmLabel: "Close" },
     );
   }
-  const releases = await api("/api/install/tos-cd/releases").catch(() => ({ releases: [] }));
-  let disc = null;
-
-  const closed = showModal(`
-    <h2>Install TOS 3.5 or 3.9</h2>
-    <p>Prepares ${esc(volumeLabel(pane) || pane.image.name)} to be updated, then boots it with the release CD in the drive.</p>
-    <div class="help-note"><strong>The installer is Commodore's.</strong> These releases are installed by a script on the disc that reads the running system and asks where things should go. It cannot be run unattended, so this checks what it can and then hands you the machine with everything in place.</div>
-    <div class="field"><label>Release CD</label>
-      <button type="button" class="button" data-choose-cd>Choose a CD image…</button>
-      <small>The ISO of the TOS ${esc((releases.releases || []).map(r => r.key).join(" or ") || "3.5 or 3.9")} disc you own. Nothing is downloaded.</small></div>
-    <div class="file-selection-summary" data-cd-summary>
-      <span class="file-selection-empty">No CD chosen yet.</span>
-    </div>
-    <div data-cd-preflight hidden></div>
+  //: The installer reads its disks out of the floppy drives, so the disks
+  //: have to be images that are already open. An Atari has two drives, which
+  //: is why exactly two are offered and the rest are swapped by hand.
+  const floppies = panes
+    .map((item, position) => ({ item, position }))
+    .filter(({ item, position }) => item.image && position !== index && item.image.kind !== "hd");
+  if (!floppies.length) {
+    return alertNotice(
+      "Run a title's own installer",
+      "Open the title's first disk in another pane first: the installer reads it out of drive A:, so it has to be an image this session already has.",
+      { confirmLabel: "Close" },
+    );
+  }
+  const options = floppies.map(({ item, position }) =>
+    `<option value="${esc(item.image.id)}">${esc(paneLabel(position))}</option>`).join("");
+  return showModal(`
+    <h2>Run a title's own installer</h2>
+    <p>Boots ${esc(volumeLabel(pane) || pane.image.name)} in Hatari with the title's first disk in drive A:, so its own installer can ask its questions and write its own files.</p>
+    <div class="help-note"><strong>The installer belongs to the title.</strong> Productivity software installs itself by running a program that reads the machine it finds and asks where things should go. It cannot be run unattended, so this puts everything in place and then hands you the machine.</div>
+    <div class="field"><label>Drive A:</label>
+      <select name="diskA">${options}</select>
+      <small>An ST, MSA, DIM, STX or HFE image of the disk you own, already open in another pane. Nothing is downloaded.</small></div>
+    <div class="field"><label>Drive B:</label>
+      <select name="diskB"><option value="">Leave empty</option>${options}</select>
+      <small>An Atari has two floppy drives. Swap the rest of the set as the installer asks for them.</small></div>
     <div class="modal-actions">
-      <button class="button ghost" value="cancel">Cancel</button>
-      <button class="button primary" value="boot" data-boot-cd disabled>Boot with the CD</button>
+      <button class="button ghost" value="cancel">Close</button>
+      <button class="button primary" value="boot" data-boot-installer>Boot with the disk</button>
     </div>`,
-  async () => {
-    if (!disc) throw new Error("Choose the release CD first.");
-    const result = await trackedPaneOperation(index, "Starting the emulator…", () =>
-      api(`/api/images/${pane.image.id}/install/tos-cd`, {
+  async form => {
+    const disks = [form.get("diskA"), form.get("diskB")].filter(Boolean);
+    const result = await paneOperation(index, "Starting Hatari…", () =>
+      api(`/api/images/${pane.image.id}/install/emulator`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ disc: disc.id, partition: pane.partition }),
+        body: JSON.stringify({ disks, partition: pane.partition }),
       }));
     toast(result.result.summary);
-    return true;
   });
-
-  const summary = modalContent.querySelector("[data-cd-summary]");
-  const preflight = modalContent.querySelector("[data-cd-preflight]");
-  const boot = modalContent.querySelector("[data-boot-cd]");
-
-  //: The disc is opened as an ordinary image session, so it is read by the
-  //: same CD reader a pane uses, and released when the dialog closes.
-  const release = async () => {
-    if (!disc) return;
-    const previous = disc;
-    disc = null;
-    await api(`/api/images/${previous.id}`, { method: "DELETE" }).catch(() => {});
-  };
-  modal.addEventListener("close", () => { release(); }, { once: true });
-
-  modalContent.querySelector("[data-choose-cd]").onclick = async () => {
-    const files = await pickHostFiles({ accept: ".iso,.cdr" });
-    if (!files.length) return;
-    await release();
-    summary.className = "file-selection-summary has-files";
-    summary.innerHTML = `<span>Reading ${esc(files[0].name)}…</span>`;
-    boot.disabled = true;
-    preflight.hidden = true;
-    try {
-      const upload = new FormData();
-      upload.append("image", files[0]);
-      upload.append("targetHardware", "auto");
-      disc = (await uploadApi("/api/images", upload)).image;
-      const checked = (await api(`/api/images/${pane.image.id}/install/tos-cd/preflight`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ disc: disc.id, partition: pane.partition }),
-      })).preflight;
-      renderAtariosCdPreflight(summary, preflight, boot, checked, files[0].name);
-    } catch (error) {
-      summary.className = "file-selection-summary chooser-failed";
-      summary.innerHTML = `<span>${esc(error.message)}</span>`;
-    }
-  };
-
-  return closed;
 }
 
-//: What the preflight found, said plainly. Every blocking reason is shown
-//: rather than only the first, because an operator fixing one at a time and
-//: rerunning is exactly the slow loop the check exists to avoid.
-function renderAtariosCdPreflight(summary, host, boot, checked, filename) {
-  const found = checked.disc || {};
-  summary.className = `file-selection-summary ${found.recognised ? "has-files" : "chooser-failed"}`;
-  summary.innerHTML = found.recognised
-    ? `<span><strong>${esc(found.label)}</strong> recognised from the volume name <code>${esc(found.volume)}</code>.</span>`
-    : `<span>${esc(found.reason || `${filename} was not recognised.`)}</span>`;
-
-  host.hidden = false;
-  host.innerHTML = `
-    ${checked.blocking.length ? `<div class="help-warning"><strong>Not ready yet:</strong><ul>${
-      checked.blocking.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
-    ${checked.warnings.length ? `<div class="help-note"><strong>Worth knowing:</strong><ul>${
-      checked.warnings.map(item => `<li>${esc(item)}</li>`).join("")}</ul></div>` : ""}
-    ${found.recognised && found.requires ? `<div class="help-note"><strong>${esc(found.label)} needs:</strong> ${esc(found.requires)}</div>` : ""}
-    ${checked.ready ? `<div class="help-note">Everything this can check is in order. Booting will start the machine with the CD in the drive; open the disc on the Workbench and run its installation icon.</div>` : ""}`;
-  boot.disabled = !checked.ready;
+//: Whether this pane is showing a GEMDOS volume that a disk's contents can be
+//: extracted into, rather than a container that merely holds one.
+//:
+//: A hard drive answers for the partition currently open, not for the drive as
+//: a whole. Asking about the image's own kind said "hd" whichever volume was
+//: open, so inserting a disk image into a partitioned drive -- the case the
+//: install modes exist for -- never offered to extract or install it, and
+//: quietly stored the image as an ordinary file instead.
+function paneHoldsVolume(pane) {
+  if (!pane?.image || pane.archivePath || pane.image.readOnly) return false;
+  if (pane.image.kind === "hd") return pane.partition !== null;
+  return pane.image.kind === "gemdos";
 }
 
 //: A pane can receive an install only when it is a volume on a hard drive.
 //: A floppy has nowhere to install to, and a partition table is not a volume.
 function paneAcceptsInstall(pane) {
   if (!pane?.image || pane.image.readOnly) return false;
-  if (pane.image.kind === "hdf") return pane.partition !== null;
-  return Boolean(pane.image.hardDisk) && ["ffs", "ofs"].includes(pane.image.kind);
+  if (pane.image.kind === "hd") return pane.partition !== null;
+  return Boolean(pane.image.hardDisk) && pane.image.kind === "gemdos";
 }
 
 async function performInstall(index, sourceImageId, sourceName, plan) {
+  if (!INSTALL_SERVICE_AVAILABLE) {
+    toast("Installing a title onto a drive is not yet available in this build.", true);
+    return null;
+  }
   const pane = panes[index];
   const title = plan.title || formats.stem(sourceName);
 
   // Every mode stages first. It is the one step that always works, and it
-  // means an install that fails later has still preserved the disc's contents
+  // means an install that fails later has still preserved the disk's contents
   // somewhere the operator can finish by hand.
   const staged = await trackedPaneOperation(index, `Staging ${sourceName}…`, operationId =>
     api(`/api/images/${pane.image.id}/install/stage`, {
@@ -3981,7 +3751,7 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
         partition: pane.partition,
         stagingParent: DEFAULT_STAGING_PARENT,
         title,
-        discLabel: plan.discLabel || null,
+        diskLabel: plan.diskLabel || null,
         operationId,
       }),
     })).then(data => {
@@ -3990,33 +3760,19 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
     });
 
   if (plan.mode === "installer") {
-    const result = await paneOperation(index, "Starting the emulator…", () =>
+    const result = await paneOperation(index, "Starting Hatari…", () =>
       api(`/api/images/${pane.image.id}/install/emulator`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ discs: [sourceImageId], partition: pane.partition }),
+        body: JSON.stringify({ disks: [sourceImageId], partition: pane.partition }),
       }));
     toast(result.result.summary);
     return staged;
   }
 
-  if (plan.mode === "whdload" && (!plan.whdloadPresent || plan.reinstallWhdload)) {
-    const installed = await trackedPaneOperation(index, "Installing WHDLoad…", operationId =>
-      api(`/api/images/${pane.image.id}/install/whdload`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partition: pane.partition, operationId }),
-      }));
-    pane.image = installed.image;
-    const whdload = installed.whdload;
-    toast(whdload.upgraded && whdload.previousVersion
-      ? `${whdload.label} replaced WHDLoad ${whdload.previousVersion} in C:`
-      : `${whdload.label} is installed in C:`);
-  }
-
   if (!plan.installNow) {
     await loadDirectory(index);
-    toast(`${title} staged into ${staged.path} as ${staged.discCount} disc(s). Install it when the set is complete.`);
+    toast(`${title} staged into ${staged.path} as ${staged.diskCount} disk(s). Install it when the set is complete.`);
     return staged;
   }
 
@@ -4026,7 +3782,7 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: staged.name,
-        parent: plan.mode === "whdload" ? (plan.parent || "Games") : "",
+        parent: plan.mode === "install" ? (plan.parent || "GAMES") : "",
         stagingParent: DEFAULT_STAGING_PARENT,
         partition: pane.partition,
         operationId,
@@ -4034,10 +3790,7 @@ async function performInstall(index, sourceImageId, sourceName, plan) {
     }));
   pane.image = result.image;
   await loadDirectory(index);
-  const missingSlave = plan.mode === "whdload"
-    ? " Add the title's .slave file to that drawer to finish it."
-    : "";
-  toast(`${title} installed into ${result.path}.${missingSlave}`);
+  toast(`${title} installed into ${result.path}.`);
   return staged;
 }
 
@@ -4091,7 +3844,7 @@ function hasObviousLaunchCandidate(metadata) {
 function setWorkspaceClipboard(index, mode) {
   const pane = panes[index];
   const items = clipboardItemsForPane(index);
-  if (!items.length) return toast("Select one or more files or drawers first.", true);
+  if (!items.length) return toast("Select one or more files or folders first.", true);
   clearWorkspaceClipboard("", false);
   workspaceClipboard = {
     mode,
@@ -4129,16 +3882,10 @@ async function deleteCutFileSources(clipboard) {
 
 async function pasteFileItems(index, clipboard) {
   const pane = panes[index];
-  if (isOfsPane(pane) && clipboard.items.some(item => item.recursive)) {
-    toast("OFS cannot contain directories. Open the source directory and copy its files instead.", true);
-    return false;
-  }
   const sameImage = clipboard.items.every(item => item.image === pane.image.id);
   const success = await transferFiles(index, clipboard.items);
   if (!success) return false;
-  const movedInternally = sameImage && (
-    pane.image.kind === "ffs" || pane.image.kind === "rom" || (isOfsPane(pane) && clipboard.items.every(item => !item.recursive))
-  );
+  const movedInternally = sameImage && (isGemdosPane(pane) || pane.image.kind === "rom");
   if (clipboard.mode === "cut" && !movedInternally) {
     await deleteCutFileSources(clipboard);
     toast(`${clipboard.items.length} source item${clipboard.items.length === 1 ? "" : "s"} removed after paste.`);
@@ -4164,7 +3911,7 @@ async function pasteWorkspaceClipboard(index) {
 
 async function transferFiles(targetIndex, sources, targetPath = null) {
   const target = panes[targetIndex];
-  if (!target.image || (target.image.kind === "hdf" && target.partition === null)) return toast("Open a destination disk first.", true);
+  if (!target.image || (target.image.kind === "hd" && target.partition === null)) return toast("Open a destination volume first.", true);
   if (!Array.isArray(sources) || !sources.length) return;
   const destination = targetPath || target.path;
   const movingWithinRom = target.image.kind === "rom"
@@ -4187,19 +3934,15 @@ async function transferFiles(targetIndex, sources, targetPath = null) {
     toast(`${banks.length} ROM bank${banks.length === 1 ? "" : "s"} moved`);
     return true;
   }
-  const movingWithinFfs = target.image.kind === "ffs"
+  // One /move serves every GEMDOS volume, whether it is a floppy or a
+  // partition on a drive, because they are the same filing system.
+  const movingWithinVolume = isGemdosPane(target)
     && sources.every(source => source.image === target.image.id);
-  if (movingWithinFfs) {
-    return performFfsMoves(targetIndex, sources, destination);
-  }
-  const movingWithinOfs = isOfsPane(target)
-    && destination !== ""
-    && sources.every(source => source.image === target.image.id && !source.recursive);
-  if (movingWithinOfs) {
-    return performOfsMoves(targetIndex, sources, destination);
+  if (movingWithinVolume) {
+    return performVolumeMoves(targetIndex, sources, destination);
   }
   if (sources.some(source => source.pane === targetIndex) && target.image.kind !== "rom") {
-    return toast("Files can only be moved within the same FFS image.", true);
+    return toast("Files can only be moved within the same GEMDOS volume.", true);
   }
   const transfers = sources.map((source, index) => ({
     source,
@@ -4246,9 +3989,8 @@ function transferCompatibilityChanges(transfers) {
     nameIsLeaf: true,
     source: transfer.path || transfer.name,
     type: transfer.recursive ? "directory" : (transfer.type || "file"),
-    protection: transfer.protectionText || transfer.protection || "",
-    comment: transfer.comment || "",
-    access: transfer.attr || transfer.access || "",
+    attributes: transfer.attributes || transfer.attr || "",
+    datestamp: transfer.datestamp || "",
     filetype: transfer.filetype || "",
   }));
 }
@@ -4316,7 +4058,7 @@ async function reviewAndPerformTransfers(targetIndex, transfers, destination) {
   return performTransfers(targetIndex, transfers, destination);
 }
 
-async function performOfsMoves(targetIndex, sources, destination) {
+async function performVolumeMoves(targetIndex, sources, destination) {
   const target = panes[targetIndex];
   const items = sources
     .map(source => ({
@@ -4324,39 +4066,7 @@ async function performOfsMoves(targetIndex, sources, destination) {
       destination: fullPath(destination, source.name),
     }))
     .filter(item => item.source.toLowerCase() !== item.destination.toLowerCase());
-  if (!items.length) { toast("Those files are already in this drawer."); return false; }
-  try {
-    const data = await paneOperation(
-      targetIndex,
-      items.length === 1 ? `Moving ${sources[0].name}…` : `Moving ${items.length} OFS files…`,
-      () => api(`/api/images/${target.image.id}/move-ofs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partition: target.partition, side: target.side, items }),
-      }),
-    );
-    for (let index = 0; index < panes.length; index += 1) {
-      if (panes[index].image?.id !== target.image.id) continue;
-      panes[index].image = data.image;
-      await loadDirectory(index);
-    }
-    toast(`${items.length} file${items.length === 1 ? "" : "s"} moved to catalogue ${destination}`);
-    return true;
-  } catch (error) {
-    toast(error.message, true);
-    return false;
-  }
-}
-
-async function performFfsMoves(targetIndex, sources, destination) {
-  const target = panes[targetIndex];
-  const items = sources
-    .map(source => ({
-      source: source.path,
-      destination: fullPath(destination, source.name),
-    }))
-    .filter(item => item.source.toLowerCase() !== item.destination.toLowerCase());
-  if (!items.length) { toast("Those items are already in this directory."); return false; }
+  if (!items.length) { toast("Those items are already in this folder."); return false; }
   setLoading(
     targetIndex,
     true,
@@ -4368,9 +4078,9 @@ async function performFfsMoves(targetIndex, sources, destination) {
     const data = await api(`/api/images/${target.image.id}/move`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ partition: target.partition, side: target.side, items }),
     });
-    await refreshSharedFfsPanes(target.image.id, data.image, data.moved);
+    await refreshSharedVolumePanes(target.image.id, data.image, data.moved);
     toast(`${items.length} item${items.length === 1 ? "" : "s"} moved`);
     return true;
   } catch (error) {
@@ -4381,7 +4091,7 @@ async function performFfsMoves(targetIndex, sources, destination) {
   }
 }
 
-async function refreshSharedFfsPanes(imageId, image, moves = [], deleted = null) {
+async function refreshSharedVolumePanes(imageId, image, moves = [], deleted = null) {
   const directoryMoves = [...moves]
     .filter(move => move.isDirectory)
     .sort((left, right) => right.source.length - left.source.length);
@@ -4393,7 +4103,7 @@ async function refreshSharedFfsPanes(imageId, image, moves = [], deleted = null)
         pane.path = move.destination;
         break;
       }
-      if (pane.path.toLowerCase().startsWith(`${move.source}.`.toLowerCase())) {
+      if (pane.path.toLowerCase().startsWith(`${move.source}\\`.toLowerCase())) {
         pane.path = move.destination + pane.path.slice(move.source.length);
         break;
       }
@@ -4403,7 +4113,7 @@ async function refreshSharedFfsPanes(imageId, image, moves = [], deleted = null)
       item.isDirectory
       && (
         pane.path.toLowerCase() === item.path.toLowerCase()
-        || pane.path.toLowerCase().startsWith(`${item.path}.`.toLowerCase())
+        || pane.path.toLowerCase().startsWith(`${item.path}\\`.toLowerCase())
       )
     );
     if (deletedAncestor) {
@@ -4430,10 +4140,8 @@ async function performTransfers(targetIndex, transfers, destination = null) {
         ? Number(String(targetDirectory).slice(5))
         : null;
       const targetPath = target.image.kind === "rom"
-        ? (romStart == null ? "$" : `bank:${romStart + index}`)
-        : target.image.kind === "kickfs"
-          ? transfer.targetName
-          : fullPath(targetDirectory, transfer.targetName);
+        ? (romStart == null ? "" : `bank:${romStart + index}`)
+        : fullPath(targetDirectory, transfer.targetName);
       const data = await api("/api/transfer", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4467,11 +4175,9 @@ async function performTransfers(targetIndex, transfers, destination = null) {
 async function setSelectedAccess(index, writable) {
   const pane = panes[index];
   const entries = selectedEntries(index);
-  if (!entries.length) return toast("Select one or more files or directories.", true);
+  if (!entries.length) return toast("Select one or more files or folders.", true);
   const paths = entries.map(entry => entryImagePath(pane, entry));
-  const accessLabel = pane.image.kind === "kickfs"
-    ? (writable ? "loadable" : "execute-only")
-    : (writable ? "read / write" : "read-only");
+  const accessLabel = writable ? "writable" : "read-only";
   try {
     const data = await paneOperation(index, `Marking ${entries.length} item${entries.length === 1 ? "" : "s"} ${accessLabel}…`, () => api(`/api/images/${pane.image.id}/lock`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4485,7 +4191,7 @@ async function setSelectedAccess(index, writable) {
 
 async function validateImage(index) {
   const pane = panes[index];
-  if (pane.image.kind === "hdf" && pane.partition === null) return toast("Select an HDF disk to check.");
+  if (pane.image.kind === "hd" && pane.partition === null) return toast("Select a partition to check.");
   try {
     const data = await paneOperation(index, "Checking filesystem structure…", () => api(`/api/images/${pane.image.id}/validate`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4509,7 +4215,7 @@ function showDownloadReady(image, url) {
   modal.classList.remove("busy", "failed");
   showModal(`
     <div class="modal-heading"><span class="modal-kicker">SAVE IMAGE</span><h2>Your download is ready</h2></div>
-    <p>The timestamped ZIP contains <strong>${esc(image.name)}</strong>, its matching GEO file when required, and a technical README.</p>
+    <p>The timestamped ZIP contains <strong>${esc(image.name)}</strong> and a technical README.</p>
     <div class="help-note"><strong>Did the automatic download not appear?</strong> Select Download ZIP below. This direct link remains available until you close this message.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><a class="button primary download-ready-link" href="${esc(url)}" download>Download ZIP</a></div>
   `, null, { replace: modal.open });
@@ -4534,17 +4240,17 @@ async function saveImage(index) {
       showModal('<div class="analysis-loading"><span class="modal-progress-icon">↻</span><h2>Preparing download</h2></div>');
       modal.classList.add("busy");
       setModalProgress({
-        title: pane.image.hasDescriptor ? "Preparing HDA + GEO download" : "Preparing image download",
+        title: "Preparing image download",
         message: "Starting hardware and filesystem checks…",
         details: [
-          { label: "Stages", value: "Validate, checksum, catalogue, then build the complete ZIP" },
+          { label: "Stages", value: "Validate, checksum, index, then build the complete ZIP" },
           { label: "Ready means ready", value: "The download starts only after the ZIP has finished building" },
         ],
       }, 0, 100);
     }
     const data = await trackedPaneOperation(
       index,
-      pane.image.hasDescriptor ? "Validating HDA + GEO before download…" : "Validating image before download…",
+      "Validating image before download…",
       operationId => api(`/api/images/${pane.image.id}/download/prepare`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4585,7 +4291,7 @@ function exportImageAs(index) {
     <div class="field"><label>Target format</label><select name="format">
       ${formats.map(entry => `<option value="${esc(entry.format)}">${esc(entry.label)}</option>`).join("")}
     </select></div>
-    <div class="help-note">HFE and SCP exports are verified by decoding the result again and comparing it byte-for-byte with the current sectors before the download starts. Converting a hard drive between its two shapes copies the volume unchanged: adding a Rigid Disk Block puts the geometry inside the file, and removing one writes that geometry to a <code>.geo</code> sidecar which must stay with the hardfile.</div>
+    <div class="help-note">HFE and SCP exports are verified by decoding the result again and comparing it byte-for-byte with the current sectors before the download starts.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="export">Export</button></div>`,
   async form => {
     const format = form.get("format");
@@ -4616,9 +4322,8 @@ async function recoverPreviousSession(index) {
     const recoverable = data.images.filter(image => !openIds.has(image.id));
     const options = recoverable.map((image, position) => {
       const modified = new Date(image.modified).toLocaleString();
-      const pair = image.hasDescriptor ? " · HDA + GEO" : "";
       const selected = position === 0 ? " selected" : "";
-      return `<option value="${esc(image.id)}"${selected}>${esc(image.name)} · ${esc(humanSize(image.size))}${pair} · ${esc(modified)}</option>`;
+      return `<option value="${esc(image.id)}"${selected}>${esc(image.name)} · ${esc(humanSize(image.size))} · ${esc(modified)}</option>`;
     }).join("");
     const emptyMessage = recoverable.length
       ? ""
@@ -4706,22 +4411,10 @@ function downloadFile(index, name, pathOverride = null) {
   window.location.href = `/api/images/${pane.image.id}/file?${query}`;
 }
 
-async function switchDsdSide(index) {
-  const pane = panes[index];
-  pane.side = pane.side === 2 ? 0 : 2;
-  pane.path = "$";
-  await loadDirectory(index);
-}
-
-// The GEMDOS command each stored action letter names.
-const LAUNCH_COMMANDS = Object.freeze({ "": "ST BASIC", R: "Run", E: "Execute", L: "LoadWB" });
-
 const ONLINE_MACHINES = [
   ["all", "All compatible machines"],
-  ["a500", "Atari 500"], ["a500plus", "Atari 500+"], ["a600", "Atari 600"],
-  ["a1200", "Atari 1200"], ["a2000", "Atari 2000"], ["a3000", "Atari 3000"],
-  ["a4000", "Atari 4000"], ["cd32", "Atari CD32"],
-  ["tos", "TOS"]
+  ["st", "Atari ST"], ["megast", "Atari Mega ST"], ["ste", "Atari STE"],
+  ["megaste", "Atari Mega STE"], ["tt030", "Atari TT030"], ["falcon030", "Atari Falcon030"],
 ];
 const ONLINE_MACHINE_STORAGE_KEY = "atari-file-forge-online-machine";
 const ACTIVE_PROFILE_STORAGE_KEY = "atari-file-forge-active-hardware-profile";
@@ -4769,10 +4462,6 @@ function defaultOnlineMachine(pane) {
   if (workbenchProfileMachine) return workbenchProfileMachine;
   const workbenchMachine = storedOnlineMachine();
   if (workbenchMachine) return workbenchMachine;
-  const hardware = String(pane.image?.targetHardware || "").toLowerCase();
-  if (hardware.includes("a500")) return "a500";
-  if (hardware.includes("a1200")) return "a1200";
-  if (hardware.includes("tos")) return "tos";
   return "all";
 }
 
@@ -4782,14 +4471,14 @@ async function showOnlineSources(index) {
     <label class="check"><input type="checkbox" name="enabled-${offset}" ${source.enabled ? "checked" : ""}> Enabled</label>
     <label>Name<input name="name-${offset}" value="${esc(source.name)}" required></label>
     <label>Catalogue URL<input name="url-${offset}" type="url" value="${esc(source.url)}" required></label>
-    <label>Machines<input name="machines-${offset}" value="${esc(source.machines.join(","))}" placeholder="a500,a1200"></label>
+    <label>Machines<input name="machines-${offset}" value="${esc(source.machines.join(","))}" placeholder="st,ste,falcon030"></label>
     <label class="online-provider-options">Provider settings (JSON)<textarea name="options-${offset}" rows="5">${esc(JSON.stringify(source.options || {}, null, 2))}</textarea></label>
     <input type="hidden" name="id-${offset}" value="${esc(source.id)}"><input type="hidden" name="type-${offset}" value="${esc(source.type)}">
     <input type="hidden" name="direct-${offset}" value="${source.direct ? "1" : "0"}">
   </fieldset>`).join("");
   const closed = showModal(`<div class="modal-heading"><span class="modal-kicker">ONLINE LIBRARY</span><h2>Catalogue sources</h2><p>Enable, disable or relocate a provider. Provider settings contain its query templates, categories and machine IDs, so site changes can be handled without changing application code.</p></div>
     <div class="online-source-list">${rows}</div>
-    <fieldset class="online-new-source"><legend>Add a compatible provider</legend><label>Name<input name="newName" placeholder="My Atari archive"></label><label>URL<input name="newUrl" type="url" placeholder="https://…"></label><label>Loading strategy<select name="newLoader"><option value="page">Single page</option><option value="category-crawl">Category crawl</option><option value="machine-index">Machine indexes</option></select></label><label>Page layout<select name="newParser"><option value="thumbnail-cards">Thumbnail cards</option><option value="section-catalogue">Section catalogue</option><option value="function-calls">Function-call records</option><option value="item-rows">Linked item rows</option><option value="query-media-tiles">Media links in query parameters</option><option value="html-cards">Configurable HTML cards</option><option value="zip-links">ZIP download links</option><option value="package-paragraphs">Package paragraphs</option><option value="links">Plain links</option></select></label><label>Machines<input name="newMachines" placeholder="a500,a1200"></label><label class="online-provider-options">Provider settings (JSON)<textarea name="newOptions" rows="5">{}</textarea></label></fieldset>
+    <fieldset class="online-new-source"><legend>Add a compatible provider</legend><label>Name<input name="newName" placeholder="My Atari archive"></label><label>URL<input name="newUrl" type="url" placeholder="https://…"></label><label>Loading strategy<select name="newLoader"><option value="page">Single page</option><option value="category-crawl">Category crawl</option><option value="machine-index">Machine indexes</option></select></label><label>Page layout<select name="newParser"><option value="thumbnail-cards">Thumbnail cards</option><option value="section-catalogue">Section catalogue</option><option value="function-calls">Function-call records</option><option value="item-rows">Linked item rows</option><option value="query-media-tiles">Media links in query parameters</option><option value="html-cards">Configurable HTML cards</option><option value="zip-links">ZIP download links</option><option value="package-paragraphs">Package paragraphs</option><option value="links">Plain links</option></select></label><label>Machines<input name="newMachines" placeholder="st,ste,falcon030"></label><label class="online-provider-options">Provider settings (JSON)<textarea name="newOptions" rows="5">{}</textarea></label></fieldset>
     <div class="modal-actions"><button class="button" type="button" data-back-library>Back</button><button class="button primary" type="submit">Save sources</button></div>`, async form => {
       const sources = data.sources.map((source, offset) => ({
         id: form.get(`id-${offset}`), name: form.get(`name-${offset}`), url: form.get(`url-${offset}`),
@@ -4811,6 +4500,24 @@ async function showOnlineSources(index) {
     setTimeout(() => showOnlineLibrary(index), 0);
   };
   return closed;
+}
+
+//: The media an Online Library result can arrive as. A badge is shown only
+//: for a container the catalogue actually declares, so an unrecognised entry
+//: says nothing rather than guessing.
+const ONLINE_MEDIA_BADGES = Object.freeze({
+  st: "ST", msa: "MSA", stx: "STX", dim: "DIM", hfe: "HFE", scp: "SCP", zip: "ZIP",
+});
+
+function onlineMediaBadges(item) {
+  const declared = Array.isArray(item.media) ? item.media : [item.media, item.format, item.filename].filter(Boolean);
+  const found = new Set();
+  declared.forEach(value => {
+    const text = String(value).toLowerCase();
+    const extension = text.match(/\.([a-z0-9]+)$/)?.[1] || text;
+    if (ONLINE_MEDIA_BADGES[extension]) found.add(ONLINE_MEDIA_BADGES[extension]);
+  });
+  return [...found].map(badge => `<small class="pill">${esc(badge)}</small>`).join("");
 }
 
 function nextAvailableOnlineDirectoryName(pane, title, usedNames) {
@@ -4848,7 +4555,7 @@ async function showOnlineLibrary(index) {
     <div class="online-status">Choose a machine and search the configured catalogues.</div>
     <div class="online-results" aria-live="polite"></div>
     <div class="online-install-options">
-      <label class="check"><input type="checkbox" name="createDirectory" checked> Create a drawer for each downloaded item</label><span class="field-note">Each item is installed into its own drawer beneath the current directory unless this is unticked.</span>
+      <label class="check"><input type="checkbox" name="createDirectory" checked> Create a folder for each downloaded item</label><span class="field-note">Each item is installed into its own folder beneath the current one unless this is unticked.</span>
     </div>
     <div class="online-compatibility-review" aria-live="polite"></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary online-install" type="submit" disabled>Install selected</button></div>`, async form => {
@@ -4877,7 +4584,7 @@ async function showOnlineLibrary(index) {
             nameIsLeaf: true,
             existingDestination: !createDirectories,
             source: item.sourceName || item.pageUrl || "Online Library",
-            type: createDirectories ? "directory" : "contents into directory",
+            type: createDirectories ? "directory" : "contents into folder",
             allowDuplicateName: !createDirectories,
           })),
         );
@@ -4949,7 +4656,7 @@ async function showOnlineLibrary(index) {
       const ariaSort = active ? (resultSort.direction === "asc" ? "ascending" : "descending") : "none";
       return `<th aria-sort="${ariaSort}"><button class="online-sort" type="button" data-sort="${key}">${label}<span aria-hidden="true">${arrow}</span></button></th>`;
     };
-    resultHost.innerHTML = items.length ? `<table class="online-result-table" aria-label="Downloadable Atari software"><thead><tr><th></th>${heading("Title", "title")}${heading("Publisher", "publisher")}${heading("Year", "year")}${heading("Source", "sourceName")}<th></th></tr></thead><tbody>${items.map(item => `<tr class="${item.installed ? "already-installed" : ""}"><td><input type="checkbox" name="catalogItem" value="${esc(item.id)}" aria-label="Select ${esc(item.title)}" ${selected.has(item.id) ? "checked" : ""}></td><td><strong>${esc(item.title)}</strong>${item.version ? `<small>Version ${esc(item.version)}</small>` : ""}${item.description ? `<small>${esc(item.description)}</small>` : ""}</td><td>${esc(item.publisher || "Unknown")}</td><td>${esc(item.year || "-")}</td><td><span class="pill">${esc(item.sourceName)}</span>${item.installed ? '<small class="installed-label">Already present</small>' : ""}</td><td><a class="button tiny" href="${esc(item.pageUrl)}" target="_blank" rel="noopener">Details</a></td></tr>`).join("")}</tbody></table>` : '<div class="empty-list">No matching downloadable items were found. Try All results, another machine, or a broader search.</div>';
+    resultHost.innerHTML = items.length ? `<table class="online-result-table" aria-label="Downloadable Atari software"><thead><tr><th></th>${heading("Title", "title")}${heading("Publisher", "publisher")}${heading("Year", "year")}${heading("Source", "sourceName")}<th></th></tr></thead><tbody>${items.map(item => `<tr class="${item.installed ? "already-installed" : ""}"><td><input type="checkbox" name="catalogItem" value="${esc(item.id)}" aria-label="Select ${esc(item.title)}" ${selected.has(item.id) ? "checked" : ""}></td><td><strong>${esc(item.title)}</strong>${item.version ? `<small>Version ${esc(item.version)}</small>` : ""}${item.description ? `<small>${esc(item.description)}</small>` : ""}</td><td>${esc(item.publisher || "Unknown")}</td><td>${esc(item.year || "-")}</td><td><span class="pill">${esc(item.sourceName)}</span>${onlineMediaBadges(item)}${item.installed ? '<small class="installed-label">Already present</small>' : ""}</td><td><a class="button tiny" href="${esc(item.pageUrl)}" target="_blank" rel="noopener">Details</a></td></tr>`).join("")}</tbody></table>` : '<div class="empty-list">No matching downloadable items were found. Try All results, another machine, or a broader search.</div>';
     if (Object.keys(resultContinuation).length) {
       resultHost.insertAdjacentHTML("beforeend", '<div class="online-load-more"><button class="button" type="button" data-online-more>Find more downloadable results</button><small>Only entries with verified downloadable Atari media are added.</small></div>');
       resultHost.querySelector("[data-online-more]").onclick = event => runSearch(null, true, event.currentTarget);
@@ -5025,11 +4732,11 @@ function wireBatchMatchSelectors(entries) {
 
 function compactImage(index) {
   const pane = panes[index];
-  const supportsOrder = pane.image.kind === "ofs" || pane.image.kind === "hdf";
+  const supportsOrder = pane.image.kind === "gemdos" || pane.image.kind === "hd";
   showModal(`
     <h2>Compact this filesystem?</h2>
     <p>Files will be reorganised into contiguous low sectors and free space consolidated. The operation is performed only on the working copy.</p>
-    ${supportsOrder ? '<div class="field"><label>Place these paths first (optional, comma separated)</label><input name="order" placeholder="$.Startup-Sequence,$.LOADER"></div>' : ""}
+    ${supportsOrder ? '<div class="field"><label>Place these paths first (optional, comma separated)</label><input name="order" placeholder="AUTO\\HDDRIVER.PRG,DESKTOP.INF"></div>' : ""}
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="compact">Compact</button></div>`,
   async form => {
     const data = await paneOperation(index, "Compacting filesystem…", () => api(`/api/images/${pane.image.id}/compact`, {
@@ -5042,20 +4749,27 @@ function compactImage(index) {
   });
 }
 
-function convertDMS(index) {
+//: A floppy container holds the sectors of one disk in its own packing, so
+//: converting it writes those same sectors into another container. A track
+//: this build cannot unpack stops the conversion rather than producing a disk
+//: with a hole in it.
+function convertContainer(index) {
   const pane = panes[index];
   const defaultTarget = preferredDestinationPane(index);
+  const readOnly = pane.image.kind === "stx";
   showModal(`
-    <h2>Convert DMS archive to disk</h2>
-    <p>A DMS holds a whole floppy, so every track is written back at the cylinder it came from and the result is the disk the archive was made from. A track the archive omits, which DiskMasher does for an empty one, is left as zeroes. A track this build cannot decompress stops the conversion rather than producing a disk with a hole in it.</p>
+    <h2>Convert ${esc(CONTAINER_LABELS[pane.image.kind] || "this container")}</h2>
+    <p>The container holds a whole floppy, so every sector is written back at the track and side it came from and the result is the disk the container was made from.${readOnly ? " A Pasti capture records what the controller saw, including protection a sector image cannot hold, so what comes out is the readable part of the disk and not the disk itself." : ""}</p>
     <div class="field"><label>Destination format</label><select name="format">
-      <option value="adf">ADF · the rebuilt disk image</option>
-      <option value="adz">ADZ · the same image, gzip compressed</option>
+      <option value="st">ST · plain sectors, the format every tool reads</option>
+      <option value="msa">MSA · the same sectors, packed track by track</option>
+      <option value="dim">DIM · FastCopy Pro, sectors behind a small header</option>
     </select></div>
-    <div class="field"><label>Open converted disk in</label><select name="targetPane">
+    <div class="field"><label>Open the converted disk in</label><select name="targetPane">
       ${otherPaneIndexes(index).map(offset => `<option value="${offset}" ${offset === defaultTarget ? "selected" : ""}>${esc(paneLabel(offset))}</option>`).join("")}
     </select><small>An empty pane is preferred. Replacing an edited pane requires confirmation.</small></div>
-    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="convert">Convert archive</button></div>`,
+    ${readOnly ? '<div class="help-warning"><strong>A Pasti capture is read-only.</strong> Protection that depends on fuzzy bytes, sector timing or duplicate sector identifiers cannot be written into a sector image, so a converted copy will not satisfy a protection check the original passes.</div>' : ""}
+    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="convert">Convert container</button></div>`,
   async form => {
     const targetIndex = Number(form.get("targetPane"));
     if (!otherPaneIndexes(index).includes(targetIndex)) throw new Error("Choose another pane for the converted disk.");
@@ -5064,37 +4778,38 @@ function convertDMS(index) {
       `${paneLabel(targetIndex)} has changes that have not been downloaded.`,
       { confirmLabel: "Replace it", danger: true, note: "Its recoverable session is kept, so it can be reopened from Recover previous session." },
     )) return false;
-    const data = await paneOperation(index, "Rebuilding the disk from its DMS tracks…", () => api(`/api/images/${pane.image.id}/convert`, {
+    const data = await paneOperation(index, "Rebuilding the disk from its stored tracks…", () => api(`/api/images/${pane.image.id}/convert`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ format: form.get("format") })
     }));
     await acceptImage(targetIndex, data.image);
     const tracks = data.files || [];
-    toast(`${tracks.length} DMS track${tracks.length === 1 ? "" : "s"} rebuilt as ${form.get("format").toUpperCase()}`);
+    toast(`${tracks.length} track${tracks.length === 1 ? "" : "s"} rebuilt as ${form.get("format").toUpperCase()}`);
   });
 }
 
-function dmsChunkRows(chunks, comparison = false) {
-  return (chunks || []).map(chunk => `<tr class="${chunk.changed ? "changed" : ""}">
-    <td>${Number(chunk.index) + 1}</td><td><code>${esc(chunk.id)}</code></td>
-    <td>${esc(chunk.kind || (chunk.changed ? "Standard dms data" : "Preserved chunk"))}</td>
-    <td>${Number(chunk.length).toLocaleString()} B</td>
-    <td>${comparison ? (chunk.changed ? "Data and CRC changed" : "Byte-identical") : (chunk.preserved ? "Preserved" : "Review")}</td>
+function containerTrackRows(tracks, comparison = false) {
+  return (tracks || []).map(track => `<tr class="${track.changed ? "changed" : ""}">
+    <td>${Number(track.index) + 1}</td><td><code>${esc(track.id)}</code></td>
+    <td>${esc(track.kind || (track.changed ? "Repacked track" : "Preserved track"))}</td>
+    <td>${Number(track.length).toLocaleString()} B</td>
+    <td>${comparison ? (track.changed ? "Data and checksum changed" : "Byte-identical") : (track.preserved ? "Preserved" : "Review")}</td>
   </tr>`).join("");
 }
 
-function dmsStructuralReview(proof) {
+function containerStructuralReview(proof) {
   return new Promise(resolve => {
     const shade = document.createElement("div");
     shade.className = "editor-choice-shade";
     shade.setAttribute("role", "dialog");
     shade.setAttribute("aria-modal", "true");
-    const changed = (proof.chunks || []).filter(chunk => chunk.changed).length;
-    shade.innerHTML = `<section class="editor-choice-card dms-structural-review"><header><div><small>DMS STRUCTURAL COMPARISON</small><h2>Review proven dms rebuild</h2></div></header>
-      <div class="help-note"><strong>${(proof.changedBlocks || []).length} block${(proof.changedBlocks || []).length === 1 ? "" : "s"} will change.</strong> ${esc(proof.proof)} Raw DMS length: ${proof.sameLength ? "unchanged" : "changed"}.</div>
-      <div class="dms-project-table"><table><thead><tr><th>#</th><th>Chunk</th><th>Meaning</th><th>Size</th><th>Result</th></tr></thead><tbody>${dmsChunkRows(proof.chunks, true)}</tbody></table></div>
-      <p><strong>${changed}</strong> standard-data chunk${changed === 1 ? "" : "s"} changed. Every unlisted dms property and every unchanged or unknown chunk remains byte-identical.</p>
-      <div class="modal-actions"><button type="button" class="button ghost" data-choice="cancel">Cancel</button><button type="button" class="button primary" data-choice="save">Save proven rebuild</button></div></section>`;
+    const changed = (proof.tracks || proof.chunks || []).filter(track => track.changed).length;
+    const tracks = proof.tracks || proof.chunks || [];
+    shade.innerHTML = `<section class="editor-choice-card container-structural-review"><header><div><small>CONTAINER STRUCTURAL COMPARISON</small><h2>Review the proven rebuild</h2></div></header>
+      <div class="help-note"><strong>${(proof.changedBlocks || []).length} block${(proof.changedBlocks || []).length === 1 ? "" : "s"} will change.</strong> ${esc(proof.proof)} Raw container length: ${proof.sameLength ? "unchanged" : "changed"}.</div>
+      <div class="container-project-table"><table><thead><tr><th>#</th><th>Track</th><th>Meaning</th><th>Size</th><th>Result</th></tr></thead><tbody>${containerTrackRows(tracks, true)}</tbody></table></div>
+      <p><strong>${changed}</strong> track${changed === 1 ? "" : "s"} changed. Every unlisted container property and every unchanged or unrecognised track remains byte-identical.</p>
+      <div class="modal-actions"><button type="button" class="button ghost" data-choice="cancel">Cancel</button><button type="button" class="button primary" data-choice="save">Save the proven rebuild</button></div></section>`;
     const finish = value => { shade.remove(); resolve(value); };
     shade.querySelectorAll("[data-choice]").forEach(button => button.onclick = () => finish(button.dataset.choice));
     shade.onkeydown = event => { if (event.key === "Escape") finish("cancel"); else trapFocus(shade, event); };
@@ -5103,17 +4818,56 @@ function dmsStructuralReview(proof) {
   });
 }
 
-async function showDmsProject(index) {
+//: What a container project shows depends on what the container keeps. MSA
+//: records each track's packed length, DIM its geometry header and its
+//: used-sector map, and a Pasti capture the protection a sector image cannot
+//: hold: fuzzy bytes, sector timing, duplicate or missing identifiers and
+//: sectors that are not 512 bytes long.
+function containerProjectSections(kind, project) {
+  if (kind === "stx") {
+    const rows = (project.protection?.tracks || []).map(track => `<tr>
+      <td>${Number(track.track)}</td><td>${Number(track.side)}</td>
+      <td>${Number(track.sectorCount ?? 0)}</td>
+      <td>${track.fuzzyBytes ? `${Number(track.fuzzyBytes).toLocaleString()} fuzzy` : "-"}</td>
+      <td>${track.timing ? "Recorded" : "-"}</td>
+      <td>${esc((track.anomalies || []).join(", ") || "None")}</td>
+    </tr>`).join("");
+    const summary = project.protection || {};
+    return `<div class="help-warning"><strong>A Pasti capture is read-only.</strong> It records what the floppy controller saw, so a sector image written from it loses whatever the protection depends on. Convert it to read the files; keep the capture to keep the disk.</div>
+      <div class="operation-summary"><span><b>${Number(summary.fuzzyTracks ?? 0)}</b><small>Tracks with fuzzy bytes</small></span><span><b>${Number(summary.timedTracks ?? 0)}</b><small>Tracks with recorded timing</small></span><span><b>${Number(summary.duplicateIdentifiers ?? 0)}</b><small>Duplicate sector identifiers</small></span><span><b>${Number(summary.missingIdentifiers ?? 0)}</b><small>Missing sector identifiers</small></span><span><b>${Number(summary.nonStandardSizes ?? 0)}</b><small>Sectors that are not 512 bytes</small></span></div>
+      <h3>Protection report</h3><div class="container-project-table"><table><thead><tr><th>Track</th><th>Side</th><th>Sectors</th><th>Fuzzy</th><th>Timing</th><th>Anomalies</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No protection features were recorded in this capture.</td></tr>'}</tbody></table></div>`;
+  }
+  if (kind === "dim") {
+    const rows = (project.tracks || []).map(track => `<tr>
+      <td>${Number(track.track)}</td><td>${Number(track.side)}</td>
+      <td>${Number(track.sectors ?? 0)}</td>
+      <td>${Number(track.length ?? 0).toLocaleString()} B</td>
+      <td>${track.used === false ? "Not in the used-sector map" : "Stored"}</td>
+    </tr>`).join("");
+    return `<div class="help-note"><strong>FastCopy Pro keeps a geometry header and a used-sector map.</strong> A track the map marks unused is not stored, so a rebuilt disk fills it with zeroes rather than inventing bytes.</div>
+      <h3>Tracks</h3><div class="container-project-table"><table><thead><tr><th>Track</th><th>Side</th><th>Sectors</th><th>Length</th><th>Stored</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No track table was recorded.</td></tr>'}</tbody></table></div>`;
+  }
+  const rows = (project.tracks || []).map(track => `<tr>
+    <td>${Number(track.track)}</td><td>${Number(track.side)}</td>
+    <td>${Number(track.packedLength ?? 0).toLocaleString()} B</td>
+    <td>${Number(track.unpackedLength ?? 0).toLocaleString()} B</td>
+    <td>${track.packed ? "Run-length packed with $E5" : "Stored whole"}</td>
+  </tr>`).join("");
+  return `<div class="help-note"><strong>Magic Shadow Archiver packs each track on its own.</strong> A track whose packed form would be no smaller is stored whole, which is why the two lengths often match.</div>
+    <h3>Per-track packing</h3><div class="container-project-table"><table><thead><tr><th>Track</th><th>Side</th><th>Packed</th><th>Unpacked</th><th>Packing</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No track table was recorded.</td></tr>'}</tbody></table></div>`;
+}
+
+async function showContainerProject(index) {
   const pane = panes[index];
-  analysisLoading("Reading DMS archive project", "Indexing every track and its checksums…");
+  const kind = pane.image.kind;
+  const label = CONTAINER_LABELS[kind] || "Floppy container";
+  analysisLoading(`Reading the ${label.toLowerCase()}`, "Indexing every track and its checksums…");
   try {
-    const project = await api(`/api/images/${pane.image.id}/dms-project`);
-    const files = project.files.map(file => `<tr><td>${esc(file.name)}</td><td><code>${esc(file.unpackedChecksum ?? "-")}</code></td><td><code>${esc(file.packedChecksum ?? "-")}</code></td><td>${Number(file.length).toLocaleString()} B</td><td>${file.blocks}</td><td>${file.editable ? "Same-length edits proved" : esc(file.reasons.join("; ") || "Read-only")}</td></tr>`).join("");
-    replaceAnalysisLoading(`<div class="analysis-dialog wide-analysis dms-project-dialog"><header><div><small>LOSSLESS DMS PROJECT · DMS ${esc(project.version)}</small><h2>${esc(pane.image.name)}</h2></div><span>${project.compressed ? "GZIP-COMPRESSED" : "RAW DMS"}</span></header>
-      <div class="operation-summary"><span><b>${project.files.length}</b><small>Reconstructed files</small></span><span><b>${project.chunks.length}</b><small>Physical chunks</small></span><span><b>${humanSize(project.rawLength)}</b><small>Raw DMS structure</small></span></div>
-      ${project.warnings.length ? `<div class="help-warning"><strong>Read before editing</strong>${project.warnings.map(warning => `<p>${esc(warning)}</p>`).join("")}</div>` : '<div class="help-note"><strong>Complete reconstruction:</strong> eligible file members may be edited without changing their byte length. The app proves the physical chunk structure before every save.</div>'}
-      <h3>DiskMasher tracks</h3><div class="dms-project-table"><table><thead><tr><th>Name</th><th>Unpacked CRC</th><th>Packed CRC</th><th>Size</th><th>Blocks</th><th>Edit policy</th></tr></thead><tbody>${files}</tbody></table></div>
-      <details><summary>Physical chunk sequence</summary><div class="dms-project-table"><table><thead><tr><th>#</th><th>Chunk</th><th>Meaning</th><th>Size</th><th>Policy</th></tr></thead><tbody>${dmsChunkRows(project.chunks)}</tbody></table></div></details>
+    const project = await api(`/api/images/${pane.image.id}/container-project`);
+    replaceAnalysisLoading(`<div class="analysis-dialog wide-analysis container-project-dialog"><header><div><small>LOSSLESS CONTAINER PROJECT · ${esc(String(kind).toUpperCase())} ${esc(project.version || "")}</small><h2>${esc(pane.image.name)}</h2></div><span>${esc(project.compressed ? "PACKED" : "STORED WHOLE")}</span></header>
+      <div class="operation-summary"><span><b>${(project.tracks || []).length}</b><small>Tracks</small></span><span><b>${Number(project.sides ?? 0)}</b><small>Sides</small></span><span><b>${humanSize(project.rawLength || pane.image.size)}</b><small>Container bytes</small></span></div>
+      ${(project.warnings || []).length ? `<div class="help-warning"><strong>Read before converting</strong>${project.warnings.map(warning => `<p>${esc(warning)}</p>`).join("")}</div>` : '<div class="help-note"><strong>Complete reconstruction:</strong> every stored track was decoded and its checksum verified, so the sectors can be written into another container without loss.</div>'}
+      ${containerProjectSections(kind, project)}
       <div class="help-note"><strong>Project identity:</strong> <code>${esc(project.sha256)}</code></div><div class="modal-actions"><button class="button primary" value="cancel">Close</button></div></div>`);
   } catch (error) { toast(error.message, true); modal.close(); }
 }
@@ -5129,9 +4883,13 @@ async function newImageFromFileMenu(index, initialFormat) {
 function showCreateImageModal(preferredIndex = null, options = {}) {
   const firstEmpty = panes.findIndex(pane => !pane.image);
   const defaultTarget = preferredIndex ?? (firstEmpty < 0 ? 0 : firstEmpty);
-  const currentProfile = panes[defaultTarget]?.image?.hardwareProfile || {};
-  const currentMachine = `${currentProfile.machine || ""} ${panes[defaultTarget]?.image?.targetHardware || ""}`.toLowerCase();
-  const kickfsHardwareDefault = currentMachine.match(/a500|a2000/) ? "a500-ofs" : currentMachine.match(/a600|a1200|a3000|a4000/) ? "a1200-ffs" : "auto";
+  const floppyOptions = FLOPPY_GEOMETRIES.map(geometry =>
+    `<option value="${geometry.value}">${geometry.label} ${geometry.singleSided ? "single sided" : "double sided"}${geometry.value === "hd-1440k" ? " · high density" : ""}</option>`).join("");
+  const gotekOptions = FLOPPY_GEOMETRIES
+    .filter(geometry => geometry.hfe)
+    .map(geometry => ({ value: geometry.hfe, label: geometry.label }))
+    .filter((entry, position, all) => all.findIndex(item => item.value === entry.value) === position)
+    .map(entry => `<option value="${entry.value}">HFE · ${entry.label} floppy</option>`).join("");
   showModal(`
     <h2>Create a blank image</h2>
     <p>The new image opens as an editable working copy and can be downloaded when ready.</p>
@@ -5139,63 +4897,42 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
       ${panes.map((_pane, index) => `<option value="${index}" ${index === defaultTarget ? "selected" : ""}>${esc(paneLabel(index))}</option>`).join("")}
     </select><small>An empty pane is preferred. Replacing an edited pane requires confirmation.</small></div>
     <div class="field"><label>Format</label><select name="format">
-      <optgroup label="Floppy · 880 KiB DS/DD">
-        <option value="adf">OFS ADF · DOS\\0 · Kickstart 1.x</option>
-        <option value="adf-intl">OFS International ADF · DOS\\2</option>
-        <option value="adf-dc">OFS Directory Cache ADF · DOS\\4</option>
-        <option value="ffs">FFS ADF · DOS\\1</option>
-        <option value="ffs-intl" selected>FFS International ADF · DOS\\3 · Kickstart 3.x</option>
-        <option value="ffs-dc">FFS Directory Cache ADF · DOS\\5</option>
-      </optgroup>
-      <optgroup label="Floppy · 1760 KiB high density · A3000/A4000">
-        <option value="adf-hd">OFS International HD ADF</option>
-        <option value="ffs-hd">FFS International HD ADF</option>
-        <option value="ffs-hd-dc">FFS Directory Cache HD ADF</option>
+      <optgroup label="Floppy">
+        ${floppyOptions}
       </optgroup>
       <optgroup label="Gotek and HxC">
-        <option value="hfe-adf">HFE · OFS DS/DD floppy</option>
-        <option value="hfe-ffs">HFE · FFS DS/DD floppy</option>
-        <option value="hfe-ffs-intl">HFE · FFS International floppy</option>
-        <option value="hfe-adf-hd">HFE · OFS high-density floppy</option>
-        <option value="hfe-ffs-hd">HFE · FFS high-density floppy</option>
+        ${gotekOptions}
       </optgroup>
       <optgroup label="Hard drive">
-        <option value="hardfile">UAE hardfile · HDA + GEO sidecar</option>
-        <option value="ffs-hard">Partitioned drive · HDF with RDB</option>
-        <option value="ffs-physical">Raw physical drive image · RAW</option>
+        <option value="hd">Hard drive · AHDI or MBR partitions</option>
+        <option value="volume">Bare volume · one FAT16 partition, no table</option>
       </optgroup>
       <optgroup label="ROM">
         <option value="rom">Blank ROM image · banked or custom</option>
-        <option value="kickfs">Expansion ROM with a resident tag · 256 KiB to 1 MiB</option>
+        <option value="cartridge">Cartridge · 128 KiB with a header</option>
       </optgroup>
     </select></div>
-    <div class="field"><label>Volume name</label><input name="title" maxlength="30" value="Empty" required><small data-title-help></small></div>
-    <div class="field"><label>Image size</label><input name="capacity" value="880 KiB" readonly></div>
-    <div class="field"><label>Target hardware</label><select name="targetHardware">
-      <option value="auto">Auto / inspect only</option>
-      <option value="hardfile">UAE hardfile · HDA + GEO sidecar</option>
-      <option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option>
-      <option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option>
-      <option value="tos">Atari 3000 / 4000 · TOS hard drive</option>
-    </select><small data-hardware-help></small></div>
+    <div class="field"><label>Volume label</label><input name="title" maxlength="11" value="EMPTY" required><small data-title-help></small></div>
+    <div class="field"><label>Image size</label><input name="capacity" value="720K" readonly></div>
+    <label class="check-field" data-bootable-field><input type="checkbox" name="bootable" value="yes"> Write a boot sector this machine can start from</label>
+    <div class="hard-drive-create-options" hidden>
+      <div class="field"><label>Partitions</label><input name="hdPartitions" type="number" min="1" max="12" value="2"><small>Each becomes a drive letter, starting at C:.</small></div>
+      <div class="field"><label>Partition scheme</label><select name="hdScheme">
+        <option value="ahdi">AHDI · the table TOS and every hard-disk driver reads</option>
+        <option value="mbr">MBR · read by HDDRIVER and by a PC card reader</option>
+      </select></div>
+    </div>
     <div class="rom-create-options" hidden>
-      <div class="field"><label>ROM family</label><select name="romPlatform"><option value="kickstart">Kickstart · A500 to A4000</option><option value="cartridge">Cartridge · CD32 / CDTV extended ROM</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>
-      <div class="field"><label>Total image size in bytes</label><input name="romTotalSize" type="number" min="256" max="67108864" step="256" value="524288" required></div>
-      <div class="field"><label>Bank size in bytes</label><input name="romBankSize" type="number" min="256" max="67108864" step="256" value="262144" required><small>Use 262,144 for a Kickstart 1.x ROM and 524,288 for Kickstart 2.0 and later. A pair of 27C400 EPROMs is one 512 KiB bank split across two chips.</small></div>
-      <div class="field"><label>Initial contents</label><select name="romTemplate"><option value="blank">Erased bytes only</option><option value="kickstart">ROM header, resident tag and checksum skeleton</option></select></div>
+      <div class="field"><label>ROM family</label><select name="romPlatform"><option value="tos">TOS ROM · 192 KiB, 256 KiB or 512 KiB</option><option value="cartridge">Cartridge · 128 KiB at &amp;FA0000</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>
+      <div class="field"><label>Total image size in bytes</label><input name="romTotalSize" type="number" min="256" max="67108864" step="256" value="262144" required></div>
+      <div class="field"><label>Bank size in bytes</label><input name="romBankSize" type="number" min="256" max="67108864" step="256" value="262144" required><small>262,144 is a 256 KiB TOS 1.04 or 2.06 ROM and 524,288 a 512 KiB TOS 3.06. A 128 KiB cartridge is 131,072.</small></div>
+      <div class="field"><label>Initial contents</label><select name="romTemplate"><option value="blank">Erased bytes only</option><option value="tos">ROM header and checksum skeleton</option></select></div>
       <div class="field"><label>Erased byte</label><select name="romEraseByte"><option value="255">&FF</option><option value="0">&00</option></select></div>
       <div class="field"><label>Byte layout</label><select name="romLayout"><option value="linear">Linear / banked</option><option value="byte-interleaved-2">Two byte-wide chips</option><option value="byte-interleaved-4">Four byte-wide chips</option></select></div>
     </div>
-    <div class="kickfs-create-options" hidden>
-      <div class="field"><label>Target platform</label><select name="kickfsPlatform">
-        <option value="auto" ${kickfsHardwareDefault === "auto" ? "selected" : ""}>Choose automatically / portable expansion ROM</option>
-        <option value="a500-ofs" ${kickfsHardwareDefault === "a500-ofs" ? "selected" : ""}>Atari 500 / 2000 · Kickstart 1.3</option>
-        <option value="a1200-ffs" ${kickfsHardwareDefault === "a1200-ffs" ? "selected" : ""}>Atari 600 / 1200 · Kickstart 3.x</option>
-      </select><small>${kickfsHardwareDefault === "auto" ? "No workbench machine could be inferred, so choose the intended platform." : "Preselected from the workbench profile. You can change it here."}</small></div>
-      <div class="field"><label>ROM capacity</label><select name="kickfsGeometry"><option value="256k" selected>256 KiB · Kickstart 1.x sized</option><option value="512k">512 KiB · Kickstart 2.0 and later</option><option value="1m">1 MiB · extended ROM</option></select></div>
-      <div class="field"><label>ROM version word</label><input name="kickfsVersion" type="number" min="0" max="65535" value="40" required></div>
-      <div class="field"><label>Resident identification string</label><input name="kickfsCopyright" maxlength="120" value="forge.library 1.0 (${new Date().getFullYear()})" required></div>
-      <div class="help-note">Creates a valid ROM image around one <code>&amp;4AFC</code> resident tag: the size header, a jump to the entry point, the module name and identification string, the declared size and the ROM checksum. The ROM scan on a real machine will find the module. It does not create a bootable Kickstart.</div>
+    <div class="cartridge-create-options" hidden>
+      <div class="field"><label>Cartridge application name</label><input name="cartridgeApplication" maxlength="24" value="NEW CARTRIDGE" required></div>
+      <div class="help-note">Creates a valid 128 KiB cartridge around one <code>&amp;ABCDEF42</code> application header: the magic longword, the entry point, the flags and the name TOS shows. The ROM scan on a real machine will find the application. It does not create a bootable operating system.</div>
     </div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="create">Create image</button></div>`,
   async form => {
@@ -5206,24 +4943,29 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
       `${paneLabel(targetIndex)} has changes that have not been downloaded.`,
       { confirmLabel: "Replace it", danger: true, note: "Its recoverable session is kept, so it can be reopened from Recover previous session." },
     )) return false;
+    const chosenFormat = form.get("format");
     const data = await api("/api/images/create", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        format: form.get("format"),
-        title: form.get("title") || "BLANK",
+        format: chosenFormat,
+        title: form.get("title") || "EMPTY",
         capacity: form.get("capacity"),
-        targetHardware: form.get("format") === "kickfs" ? form.get("kickfsPlatform") : (modalContent.querySelector('select[name="targetHardware"]').value || "auto"),
-        rom: form.get("format") === "rom" ? {
+        bootable: form.get("bootable") === "yes",
+        targetHardware: createTargetMedia(chosenFormat),
+        hardDisk: chosenFormat === "hd" ? {
+          partitions: Number(form.get("hdPartitions")),
+          scheme: form.get("hdScheme"),
+        } : undefined,
+        rom: chosenFormat === "rom" ? {
           platform: form.get("romPlatform"),
           totalSize: Number(form.get("romTotalSize")),
           bankSize: Number(form.get("romBankSize")),
           template: form.get("romTemplate"),
           eraseByte: Number(form.get("romEraseByte")),
           layout: form.get("romLayout"),
-        } : form.get("format") === "kickfs" ? {
-          geometry: form.get("kickfsGeometry"),
-          version: Number(form.get("kickfsVersion")),
-          copyright: form.get("kickfsCopyright"),
+        } : chosenFormat === "cartridge" ? {
+          platform: "cartridge",
+          application: form.get("cartridgeApplication"),
         } : undefined,
       })
     });
@@ -5237,39 +4979,26 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
   const title = modalContent.querySelector('input[name="title"]');
   const titleLabel = title.closest(".field").querySelector("label");
   const titleHelp = modalContent.querySelector("[data-title-help]");
-  const targetHardware = modalContent.querySelector('select[name="targetHardware"]');
-  const hardwareHelp = modalContent.querySelector("[data-hardware-help]");
-  // Every Atari floppy is the same disk: 880 KiB DS/DD, or 1760 KiB on the
-  // high-density drives of the A3000 and A4000, whichever DOS type formatted
-  // it. Only the boot block differs, so the size never changes with the
-  // filing system.
-  const doubleDensity = { size: "880 KiB", hardware: "auto", chooseHardware: true };
-  const highDensity = { size: "1.76 MiB", hardware: "auto", chooseHardware: true };
+  const bootableField = modalContent.querySelector("[data-bootable-field]");
+  const bootable = modalContent.querySelector('input[name="bootable"]');
+  // Every floppy format is FAT12 on a fixed geometry, so the size follows the
+  // format and nothing else. A hard drive and a bare volume are sized by the
+  // operator; a ROM is sized in its own section.
+  const floppyProfiles = Object.fromEntries(FLOPPY_GEOMETRIES.flatMap(geometry => {
+    const entry = { size: geometry.label, media: "floppy", bootable: true, hasTitle: true };
+    return geometry.hfe ? [[geometry.value, entry], [geometry.hfe, entry]] : [[geometry.value, entry]];
+  }));
   const profiles = {
-    adf: doubleDensity,
-    "adf-intl": doubleDensity,
-    "adf-dc": doubleDensity,
-    ffs: doubleDensity,
-    "ffs-intl": doubleDensity,
-    "ffs-dc": doubleDensity,
-    "adf-hd": highDensity,
-    "ffs-hd": highDensity,
-    "ffs-hd-dc": highDensity,
-    "hfe-adf": doubleDensity,
-    "hfe-ffs": doubleDensity,
-    "hfe-ffs-intl": doubleDensity,
-    "hfe-adf-hd": highDensity,
-    "hfe-ffs-hd": highDensity,
-    hardfile: { size: null, defaultCapacity: "20MB", hardware: "hardfile" },
-    "ffs-hard": { size: null, defaultCapacity: "20MB", hardware: "tos" },
-    "ffs-physical": { size: null, defaultCapacity: "20MB", hardware: "tos" },
-    hdf: { size: "440 MiB (511 × 880 KiB)", hardware: null, hasTitle: false },
-    rom: { size: "Set below", hardware: null, chooseHardware: false },
-    kickfs: { size: "Set below", hardware: null, chooseHardware: false }
+    ...floppyProfiles,
+    hd: { size: null, defaultCapacity: "256MB", media: "hd", bootable: true, hasTitle: true },
+    volume: { size: null, defaultCapacity: "32MB", media: "volume", bootable: false, hasTitle: true },
+    rom: { size: "Set below", media: "tos", bootable: false, hasTitle: true },
+    cartridge: { size: "128K", media: "tos", bootable: false, hasTitle: true },
   };
   // A format the client does not know about is still openable: fall back to a
-  // plain double-density floppy rather than throwing while building the dialog.
-  const profileFor = value => profiles[value] || doubleDensity;
+  // plain 720K double-sided floppy rather than throwing while building the
+  // dialog.
+  const profileFor = value => profiles[value] || floppyProfiles["ds-720k"];
   const capacities = new Map();
   let diskTitle = title.value;
   let previousFormat = format.value;
@@ -5282,70 +5011,92 @@ function showCreateImageModal(preferredIndex = null, options = {}) {
     capacity.readOnly = Boolean(profile.size);
     capacity.value = profile.size || capacities.get(format.value) || profile.defaultCapacity;
     capacity.placeholder = profile.size ? "" : profile.defaultCapacity;
-    capacityLabel.textContent = profile.size ? "Image size" : "Hard disk capacity (HDA/HDF/RAW)";
+    capacityLabel.textContent = profile.size ? "Image size" : "Drive capacity";
 
     const hasTitle = profile.hasTitle !== false;
     title.disabled = !hasTitle;
     title.required = hasTitle;
-    title.value = hasTitle ? diskTitle : "Not applicable to an HDF bank";
-    titleLabel.textContent = ["rom", "kickfs"].includes(format.value)
+    title.value = hasTitle ? diskTitle : "";
+    titleLabel.textContent = ["rom", "cartridge"].includes(format.value)
       ? "ROM filename and title"
-      : ["hardfile", "ffs-hard", "ffs-physical"].includes(format.value)
-          ? "Volume title"
-          : "Disk title";
-    titleHelp.textContent = "Stored in the new filesystem.";
+      : "Volume label";
+    titleHelp.textContent = "Stored in the boot sector as the volume label. A GEMDOS label holds eleven characters.";
+    title.maxLength = ["rom", "cartridge"].includes(format.value) ? 24 : 11;
 
-    targetHardware.value = profile.hardware || "auto";
-    targetHardware.disabled = !profile.chooseHardware;
-    hardwareHelp.textContent = profile.chooseHardware
-      ? "Choose the machine that will use this normal FFS floppy, or leave Auto for a neutral image."
-      : profile.hardware === "hardfile"
-        ? "Fixed because this format is a Hardfile HDA/GEO pair."
-        : profile.hardware === "tos"
-          ? "Fixed because this is an Atari 4000 / TOS hard-drive format."
-          : "Not applicable to this format.";
+    bootableField.hidden = !profile.bootable;
+    if (!profile.bootable) bootable.checked = false;
+    modalContent.querySelector(".hard-drive-create-options").hidden = format.value !== "hd";
     modalContent.querySelector(".rom-create-options").hidden = format.value !== "rom";
-    modalContent.querySelector(".kickfs-create-options").hidden = format.value !== "kickfs";
-    if (format.value === "rom") {
+    modalContent.querySelector(".cartridge-create-options").hidden = format.value !== "cartridge";
+    if (["rom", "cartridge"].includes(format.value)) {
       capacityLabel.textContent = "ROM capacity";
-      title.maxLength = 24;
       titleHelp.textContent = "Used as the filename and, for the header template, its initial ROM title.";
-    } else if (format.value === "kickfs") {
-      capacityLabel.textContent = "ROM capacity";
-      capacity.value = modalContent.querySelector('[name="kickfsGeometry"]').value === "8k" ? "8 KiB" : "16 KiB";
-      title.maxLength = 8;
-      titleHelp.textContent = "Stored as both the Kickstart ROM catalogue title and the .rom filename.";
-    } else {
-      title.maxLength = 12;
     }
     previousFormat = format.value;
   };
   format.addEventListener("change", updateFormatControls);
-  modalContent.querySelector('[name="kickfsGeometry"]').addEventListener("change", updateFormatControls);
   updateFormatControls();
+}
+
+//: What a newly created image is meant to be, so the service validates it the
+//: same way it would validate one that had been opened from a file.
+function createTargetMedia(format) {
+  if (format === "hd") return "hd";
+  if (format === "volume") return "volume";
+  if (["rom", "cartridge"].includes(format)) return "tos";
+  return "floppy";
 }
 
 const PROFILE_STORAGE_KEY = "atari-file-forge-hardware-profiles";
 const RECIPE_STORAGE_KEY = "atari-file-forge-import-recipes";
 
+//: Twelve machines a person is likely to be working towards, built from the
+//: add-on identifiers in app/hardware_profiles.py. Each one is a real
+//: combination: the TOS release the machine shipped with or was upgraded to,
+//: the memory it plausibly holds, the drive and storage fitted to it and the
+//: driver that makes that storage bootable.
 const BUILTIN_PROFILES = [
-  { name: "Atari 500 · Kickstart 1.3, one drive", machine: "a500", addons: ["kick13", "df0-internal"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + 512 KiB trapdoor", machine: "a500", addons: ["kick13", "df0-internal", "chip-512"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 600 + IDE CompactFlash", machine: "a600", addons: ["kick204", "df0-internal", "ide-internal", "cf-adapter", "chip-1024"], catalogMachine: "a600", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 1200 + Fast RAM + WHDLoad", machine: "a1200", addons: ["kick31", "df0-internal", "ide-internal", "chip-2048", "fast-ram", "whdload"], catalogMachine: "a1200", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 4000/040 · TOS 3.1 hard drive", machine: "a4000", addons: ["kick31", "df0-hd", "ide-internal", "chip-2048", "fast-ram", "acc-68040", "whdload"], catalogMachine: "a4000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 2000 + A2091 SCSI", machine: "a2000", addons: ["kick204", "df0-internal", "a2091", "fast-ram", "chip-1024"], catalogMachine: "a2000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 3000 · internal SCSI", machine: "a3000", addons: ["kick31", "scsi-internal", "chip-2048", "fast-ram", "acc-68030"], catalogMachine: "a3000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari CD32", machine: "cd32", addons: ["kick31", "chip-2048"], catalogMachine: "cd32", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + Gotek", machine: "a500", addons: ["kick13", "gotek", "chip-512"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + 68020 accelerator", machine: "a500", addons: ["kick31", "df0-internal", "chip-512", "acc-68020", "fast-ram", "a590", "whdload"], catalogMachine: "a500", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug" },
-  { name: "Atari 500 + PiStorm", machine: "a500", addons: ["kick31", "df0-internal", "chip-512", "pistorm"], catalogMachine: "a500", filingSystem: "ffs-hd", targetHardware: "tos", handlerBuild: "rdb", page: "8192", emulator: "fs-uae-pistorm", debugger: "fs-uae-debug" },
-  { name: "Atari 1200 + PiStorm32", machine: "a1200", addons: ["kick31", "df0-internal", "chip-2048", "pistorm32", "pistorm-rtg"], catalogMachine: "a1200", filingSystem: "ffs-hd", targetHardware: "tos", handlerBuild: "rdb", page: "8192", emulator: "fs-uae-pistorm", debugger: "fs-uae-debug" },
+  { name: "520ST · TOS 1.04, single-sided drive", machine: "st", addons: ["tos-104", "ram-512k", "drive-a-ss", "monitor-colour", "tv-modulator", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "1040ST · TOS 1.04, two drives", machine: "st", addons: ["tos-104", "ram-1m", "drive-a-ds", "drive-b-external", "monitor-mono", "printer", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST 2 · blitter and an ACSI Megafile", machine: "megast", addons: ["tos-104", "ram-2m", "drive-a-ds", "acsi-megafile", "driver-ahdi", "blitter", "monitor-mono", "midi", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "ahdi", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "520STE · TOS 1.62, colour monitor", machine: "ste", addons: ["tos-162", "ram-512k", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "1040STE · TOS 1.62, 4 MiB", machine: "ste", addons: ["tos-162", "ram-4m", "drive-a-ds", "drive-b-external", "monitor-colour", "midi", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega STE · TOS 2.06 with a hard-disk driver", machine: "megaste", addons: ["tos-206", "ram-4m", "hd-floppy", "scsi-internal", "driver-hddriver", "monitor-mono", "midi", "desktop-inf"], catalogMachine: "megaste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "TT030 · TT RAM and internal SCSI", machine: "tt030", addons: ["tos-306", "ram-2m", "tt-ram", "hd-floppy", "scsi-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "tt030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Falcon030 · internal IDE and VGA", machine: "falcon030", addons: ["tos-4xx", "ram-14m", "hd-floppy", "ide-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "midi", "desktop-inf"], catalogMachine: "falcon030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "ST with a Gotek", machine: "st", addons: ["tos-104", "ram-1m", "gotek", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "ST with EmuTOS and ACSI2STM", machine: "st", addons: ["tos-emutos", "ram-4m", "drive-a-ds", "acsi2stm", "driver-emutos-builtin", "monitor-colour", "gemdos-hd-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "STE with a 68030 accelerator", machine: "ste", addons: ["tos-206", "ram-4m", "drive-a-ds", "ide-adapter", "cf-adapter", "driver-hddriver", "acc-68030-pak", "fpu-68881", "monitor-vga", "desktop-inf"], catalogMachine: "ste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST · UltraSatan and the ICD driver", machine: "megast", addons: ["tos-102", "ram-2m", "drive-a-ds", "ultrasatan", "driver-icd", "blitter", "monitor-mono", "cartridge-port", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
 ];
 
-const WORKBENCH_FILE_SYSTEMS = [["ofs", "OFS · DOS\\0"], ["ofs-intl", "OFS International · DOS\\2"], ["ffs", "FFS · DOS\\1"], ["ffs-intl", "FFS International · DOS\\3"], ["ffs-dc", "FFS Directory Cache · DOS\\5"], ["ffs-hd", "FFS on a hard drive · RDB partitions"], ["dms", "DiskMasher archive"]];
-const WORKBENCH_EMULATORS = [["auto", "Automatic for machine"], ["fs-uae", "FS-UAE · every model, floppy and hard drive"], ["fs-uae-pistorm", "FS-UAE · PiStorm whole-drive integration"]];
-const WORKBENCH_DEBUGGERS = [["auto", "Automatic for emulator"], ["fs-uae-debug", "FS-UAE console debugger"]];
+//: A GEMDOS volume is FAT12 on a floppy and FAT16 on a hard drive, and a
+//: partitioned drive carries a table as well. There is nothing else to
+//: choose between.
+const WORKBENCH_FILE_SYSTEMS = [
+  ["fat12", "FAT12 · floppy"],
+  ["fat16", "FAT16 · hard-drive partition"],
+  ["fat16-ahdi", "FAT16 on a drive with an AHDI table"],
+  ["fat16-mbr", "FAT16 on a drive with an MBR table"],
+];
+//: The memory a TOS machine can hold, from a 520ST through to a fully
+//: populated Falcon.
+const WORKBENCH_MEMORY = [
+  ["512K", "512 KiB"], ["1M", "1 MiB"], ["2M", "2 MiB"],
+  ["2.5M", "2.5 MiB"], ["4M", "4 MiB"], ["14M", "14 MiB"],
+];
+//: Which driver a prepared drive is expected to boot through, so a profile
+//: can say what the finished drive should carry.
+const DRIVE_DRIVER_BUILDS = [
+  ["none", "Not used · floppy only"],
+  ["emutos", "None · EmuTOS reads the drive itself"],
+  ["ahdi", "Atari AHDI"],
+  ["hddriver", "HDDRIVER"],
+  ["pp", "PP driver"],
+  ["icd", "ICD Pro driver"],
+];
+const WORKBENCH_EMULATORS = [["auto", "Automatic for machine"], ["hatari", "Hatari. Every ST, STE, TT and Falcon, floppy, hard drive and folder"]];
+const WORKBENCH_DEBUGGERS = [["auto", "Automatic for emulator"], ["hatari-debug", "Hatari debugger"]];
 let cachedHardwareCatalogue = null;
 
 async function hardwareProfileCatalogue() {
@@ -5391,17 +5142,17 @@ function saveCollection(key, value) {
 function storedHardwareProfiles() {
   const saved = storedCollection(PROFILE_STORAGE_KEY, []);
   const schemaKey = `${PROFILE_STORAGE_KEY}-schema`;
-  if (persistentStorage.getItem(schemaKey) === "5" && saved.length) return saved;
+  if (persistentStorage.getItem(schemaKey) === "6" && saved.length) return saved;
   // Profile names shipped by earlier releases, replaced by the machine list
   // the hardware catalogue now supplies.
-  const superseded = new Set(["Atari 500 with FastFileSystem", "Atari 500/1200 Hardfile", "Atari 4000 / TOS"]);
+  const superseded = new Set(saved.filter(profile => !ONLINE_MACHINES.some(([value]) => value === profile.machine)).map(profile => profile.name));
   const builtInNames = new Set(BUILTIN_PROFILES.map(profile => profile.name));
   const migrated = [
     ...BUILTIN_PROFILES.map(profile => ({ ...profile, addons: [...(profile.addons || [])] })),
     ...saved.filter(profile => !builtInNames.has(profile.name) && !superseded.has(profile.name)),
   ];
   saveCollection(PROFILE_STORAGE_KEY, migrated);
-  persistentStorage.setItem(schemaKey, "5");
+  persistentStorage.setItem(schemaKey, "6");
   return migrated;
 }
 
@@ -5494,7 +5245,7 @@ function renderHealthDashboard(index, report) {
 
 function showHealthDashboard(index) {
   const pane = panes[index];
-  const large = pane.image.size >= 20 * 1024 * 1024 || ["hdf", "ffs"].includes(pane.image.kind);
+  const large = pane.image.size >= 20 * 1024 * 1024 || ["hd", "gemdos"].includes(pane.image.kind);
   showModal(`<div class="analysis-dialog health-introduction">
     <small>READ-ONLY IMAGE AUDIT</small>
     <h2>Check ${esc(pane.image.name)}</h2>
@@ -5508,103 +5259,85 @@ function showHealthDashboard(index) {
   });
 }
 
-async function runFfsInstallationAudit(index, root = "$") {
-  const pane = panes[index];
-  setModalProgress({
-    title: "Checking installed FFS software",
-    message: `Traversing ${root} and following installed launchers…`,
-    details: [
-      { label: "Safety", value: "Read-only until you explicitly choose Repair selected" },
-      { label: "Checks", value: "Loader paths, abbreviated commands, filing-system switches and direct-sector access" },
-    ],
-  });
-  return trackedPaneOperation(
-    index,
-    "Checking installed FFS software",
-    operationId => api(
-      `/api/images/${pane.image.id}/ffs-installations/audit?${new URLSearchParams({ root, operationId })}`
-    ),
-    { abortMode: "read-only" },
-  );
+//: Checking the software already installed on a drive: whether every program
+//: on it is a program the machine would actually run, and whether the desktop
+//: still names files that are there. Only the second has a repair, because it
+//: is the only one whose right answer can be proved from the drive alone.
+const DRIVE_SOFTWARE_AUDIT_AVAILABLE = true;
+
+//: One folder's finding, with its repair offered only when there is one.
+function driveSoftwareFindingMarkup(finding) {
+  const repairs = finding.repairs || [];
+  const warnings = finding.warnings || [];
+  return `
+    <div class="staged-title" data-finding="${esc(finding.path)}">
+      <div>
+        <b>${esc(drivePath("", finding.path))}</b>
+        <small>${finding.fileCount} file${finding.fileCount === 1 ? "" : "s"}${finding.programs?.length ? ` · ${esc(finding.programs.join(", "))}` : ""}</small>
+        ${repairs.map(repair => `<small class="staged-conflict">${esc(repair)}</small>`).join("")}
+        ${warnings.map(warning => `<small class="staged-conflict">${esc(warning)}</small>`).join("")}
+        ${repairs.length || warnings.length ? "" : '<small class="muted">Nothing to report.</small>'}
+      </div>
+      <div class="staged-actions">
+        ${repairs.length
+          ? `<label class="check-field"><input type="checkbox" name="repair" value="${esc(finding.path)}" checked> Repair</label>`
+          : ""}
+      </div>
+    </div>`;
 }
 
-function renderFfsInstallationAudit(index, report) {
+function showDriveSoftwareAudit(index) {
   const pane = panes[index];
-  const statusLabel = { repairable: "Repair available", warning: "Review required", clean: "No issue found" };
-  const rows = report.directories.map((item, offset) => `
-    <article class="health-check ${item.status === "clean" ? "pass" : "warn"}">
-      <b>${item.status === "clean" ? "✓" : "!"}</b>
-      <span>
-        <strong>${esc(item.path)}</strong>
-        <small>${esc(item.source || "Detected from its launcher")} · ${Number(item.fileCount)} file${Number(item.fileCount) === 1 ? "" : "s"} · ${statusLabel[item.status] || esc(item.status)}</small>
-        ${item.repairs.length ? `<details class="health-findings" open><summary>${item.repairs.length} deterministic repair${item.repairs.length === 1 ? "" : "s"}</summary><ol>${item.repairs.map(value => `<li><small>${esc(value)}</small></li>`).join("")}</ol></details>` : ""}
-        ${item.warnings.length ? `<details class="health-findings"><summary>${item.warnings.length} warning${item.warnings.length === 1 ? "" : "s"} requiring review</summary><ol>${item.warnings.map(value => `<li><em>${esc(value)}</em></li>`).join("")}</ol></details>` : ""}
-      </span>
-      ${item.repairs.length ? `<label class="check"><input type="checkbox" name="ffsRepair" value="${esc(item.path)}" checked><span>Fix</span></label>` : ""}
-    </article>`).join("");
-  const repairable = report.directories.filter(item => item.repairs.length).length;
-  showModal(`<div class="analysis-dialog wide-analysis ffs-installation-audit">
-      <header><div><small>FFS HDD INSTALLATION AUDIT</small><h2>${esc(pane.image.name)}</h2></div><span class="health-score ${repairable ? "attention" : "healthy"}">${repairable ? `${repairable} repairable` : "checked"}</span></header>
-      <div class="operation-summary"><span><b>${Number(report.checked)}</b><small>Installations checked</small></span><span><b>${Number(report.repairable)}</b><small>With safe repairs</small></span><span><b>${Number(report.warnings)}</b><small>With warnings</small></span></div>
-      <div class="help-note"><strong>What this checks</strong> Imported disk directories are compared with FFS current-directory rules. Proven local root paths and safe abbreviated loader commands can be repaired. Disk selection and direct-sector access are reported, but never guessed or rewritten.</div>
-      <div class="health-checks">${rows || '<div class="empty-list">No installed disk directories were detected below this location.</div>'}</div>
-      <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button" data-rerun-ffs-audit type="button">Check again</button>${repairable ? '<button class="button primary" type="submit">Repair selected</button>' : ""}</div>
-    </div>`, async () => {
-      const directories = [...modalContent.querySelectorAll('[name="ffsRepair"]:checked')].map(input => input.value);
-      if (!directories.length) throw new Error("Select at least one installation to repair, or choose Cancel.");
-      setModalProgress({
-        title: "Repairing installed FFS software",
-        message: "Applying only the deterministic changes listed in the audit…",
-        details: [
-          { label: "Image safety", value: "An undo checkpoint protects the pre-repair image state" },
-          { label: "Uncertain behaviour", value: "Direct-sector and filing-system-switch warnings remain unchanged" },
-        ],
-      });
-      const result = await trackedPaneOperation(index, "Repairing installed FFS software", operationId => api(
-        `/api/images/${pane.image.id}/ffs-installations/repair`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ directories, operationId }),
-        },
-      ), { abortMode: "atomic" });
-      pane.image = result.image;
-      await refreshCurrentView(index);
-      renderFfsInstallationAudit(index, await runFfsInstallationAudit(index, report.root));
-      return false;
-    }, { replace: modal.open });
-  modalContent.querySelector("[data-rerun-ffs-audit]")?.addEventListener("click", async event => {
-    event.currentTarget.disabled = true;
-    modal.classList.add("busy");
-    try {
-      renderFfsInstallationAudit(index, await runFfsInstallationAudit(index, report.root));
-    } catch (error) {
-      toast(error.message, true);
-    } finally {
-      modal.classList.remove("busy");
-    }
-  });
-}
-
-function showFfsInstallationAudit(index) {
-  const pane = panes[index];
-  if (pane.image.kind !== "ffs" || !pane.image.hardDisk) {
-    toast("Installed disk auditing is available only for FFS HDD images.", true);
+  //: The first pass reads and the repair writes, so a read-only volume on a
+  //: hard drive is still worth checking; the repair is what would be refused.
+  const auditable = paneAcceptsInstall(pane)
+    || (pane?.image?.kind === "gemdos" && Boolean(pane.image.hardDisk));
+  if (!auditable) {
+    toast("Installed software auditing is available only for a volume on a hard drive.", true);
     return;
   }
-  const current = pane.path || "$";
+  const driveLetter = pane.partitionName || pane.image.driveLetter || "";
+  const current = pane.path;
   showModal(`<div class="analysis-dialog health-introduction">
-    <small>FFS HDD SOFTWARE CHECK</small>
-    <h2>Check installed disk software</h2>
-    <div class="help-warning"><strong>This can take several minutes on a large HDA image.</strong> Atari File Forge recursively checks installed disk directories and the launchers they call. Progress remains visible and the scan can be aborted safely.</div>
-    <div class="field"><label>Scan</label><select name="root"><option value="$">Whole HDD ($)</option>${current !== "$" ? `<option value="${esc(current)}">Current directory (${esc(current)})</option>` : ""}</select></div>
-    <div class="help-note">The first pass is read-only. If repairable issues are found, each directory is listed with the exact proposed changes. Choose Repair selected to apply them, or Cancel to leave the image untouched.</div>
-    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" type="submit">Run check</button></div>
-  </div>`, async formData => {
-    const root = String(formData.get("root") || "$");
-    renderFfsInstallationAudit(index, await runFfsInstallationAudit(index, root));
+    <small>INSTALLED DRIVE SOFTWARE</small>
+    <h2>Check installed drive software</h2>
+    <div class="help-warning"><strong>This can take several minutes on a large drive image.</strong> Atari File Forge walks every folder that holds a program, reads each program's header and compares what the desktop installs with what is actually on the volume. Progress remains visible and the scan can be aborted safely.</div>
+    <div class="field"><label>Scan</label><select name="root"><option value="">Whole volume (${esc(drivePath(driveLetter, ""))})</option>${current ? `<option value="${esc(current)}">Current folder (${esc(drivePath(driveLetter, current))})</option>` : ""}</select></div>
+    <div class="help-note">The first pass is read-only. A desktop record naming a file that is not on the volume is the one provable fault, so it is the only one offered as a repair; a program whose header does not parse is reported and never rewritten.</div>
+    <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button primary" type="submit">Run check</button></div>
+  </div>`, async form => {
+    const root = String(form.get("root") || "");
+    const partition = pane.partition == null ? "" : `&partition=${pane.partition}`;
+    const report = await trackedPaneOperation(index, "Checking installed drive software…", operationId =>
+      api(`/api/images/${pane.image.id}/drive-software/audit?root=${encodeURIComponent(root)}&operationId=${encodeURIComponent(operationId)}${partition}`));
+    renderDriveSoftwareAudit(index, report);
     return false;
   });
+}
+
+function renderDriveSoftwareAudit(index, report) {
+  const pane = panes[index];
+  const findings = report.directories || [];
+  showModal(`<div class="analysis-dialog">
+    <small>INSTALLED DRIVE SOFTWARE</small>
+    <h2>${report.checked} folder${report.checked === 1 ? "" : "s"} checked</h2>
+    <p>${report.repairable} with a provable repair · ${report.warnings} with something worth reading · scanned from ${esc(drivePath(pane.partitionName || "", report.root || ""))}</p>
+    <div class="staged-title-list">${findings.map(driveSoftwareFindingMarkup).join("") || '<p class="muted">No folder on this volume holds a program.</p>'}</div>
+    <div class="help-note">Repairing removes the desktop records listed above and nothing else. The check is run again before anything is written, so a result that has gone stale is refused rather than acted on.</div>
+    <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button primary" type="submit" ${report.repairable ? "" : "disabled"}>Repair the folders ticked</button></div>
+  </div>`, async form => {
+    const directories = form.getAll("repair").map(String);
+    if (!directories.length) return toast("Tick at least one folder to repair.", true) || false;
+    const result = await trackedPaneOperation(index, "Repairing installed drive software…", operationId =>
+      api(`/api/images/${pane.image.id}/drive-software/repair`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directories, partition: pane.partition, operationId }),
+      }));
+    pane.image = result.image;
+    await loadDirectory(index);
+    toast(`${result.repair.count} folder${result.repair.count === 1 ? "" : "s"} repaired.`);
+  }, { replace: true });
 }
 
 async function showSelectionPreflight(index) {
@@ -5613,9 +5346,8 @@ async function showSelectionPreflight(index) {
     name: entry.name,
     source: entryImagePath(pane, entry),
     type: entry.type,
-    protection: entry.protectionText || entry.protection || "",
-    comment: entry.comment || "",
-    access: entry.attr || entry.access || "",
+    attributes: entry.attributes || entry.attr || "",
+    datestamp: entry.datestamp || "",
     filetype: entry.filetype || "",
   }));
   if (!items.length) return toast("Select one or more items to dry-run.", true);
@@ -6393,11 +6125,13 @@ function editorProperties(root, pane, path, report) {
     shade.setAttribute("role", "dialog");
     shade.setAttribute("aria-modal", "true");
     shade.setAttribute("aria-labelledby", "editor-properties-title");
-    const locked = Boolean(Number(metadata.protection || 0) & 0x04);
-    shade.innerHTML = `<form class="editor-choice-card editor-properties-card"><h2 id="editor-properties-title">File properties</h2><p>Update the file header without changing the file bytes.</p>
-      <div class="field-grid two"><div class="field"><label>Protection</label><input name="protection" value="${esc(formatProtection(metadata.protection || 0))}" maxlength="8"><small>The eight letters <code>List</code> prints.</small></div><div class="field"><label>Comment</label><input name="comment" value="${esc(metadata.comment || "")}" maxlength="79"></div></div>
-      <div class="field"><label>Workbench icon type</label><input name="filetype" value="${esc(metadata.filetype || "")}" placeholder="Tool, Project or 3"></div>
-      <label class="check-field"><input type="checkbox" name="writable" ${locked ? "" : "checked"}> Writable</label>
+    const flags = attributeFlags(metadata.attributes ?? metadata.attr ?? 0);
+    const flag = (letter, label, hint) => `<label class="check"><input type="checkbox" name="bit-${letter}" ${flags[letter] ? "checked" : ""}> ${label}<small>${hint}</small></label>`;
+    const stamp = datestampForInput(metadata.datestamp);
+    shade.innerHTML = `<form class="editor-choice-card editor-properties-card"><h2 id="editor-properties-title">File properties</h2><p>Update the directory entry without changing the file bytes.</p>
+      <div class="field-grid two">${flag("r", "Read-only", "r · $01")}${flag("h", "Hidden", "h · $02")}${flag("s", "System", "s · $04")}${flag("v", "Volume label", "v · $08")}${flag("d", "Directory", "d · $10")}${flag("a", "Archive", "a · $20")}</div>
+      <div class="field"><label>Datestamp</label><input name="datestamp" type="datetime-local" step="2" value="${esc(stamp)}"><small>TOS records the time to the nearest two seconds.</small></div>
+      <div class="field"><label>Desktop icon type</label><input name="filetype" value="${esc(metadata.filetype || "")}" placeholder="GEM, TOS or TTP"></div>
       <dl class="editor-property-summary"><dt>Size</dt><dd>${Number(report.size || 0).toLocaleString()} bytes</dd><dt>SHA-256</dt><dd><code>${esc(report.sha256)}</code></dd></dl>
       <div class="modal-actions"><button type="button" class="button ghost" data-properties-cancel>Cancel</button><button type="submit" class="button primary">Apply properties</button></div></form>`;
     const finish = value => { shade.remove(); resolve(value); };
@@ -6409,10 +6143,17 @@ function editorProperties(root, pane, path, report) {
     shade.querySelector("form").onsubmit = event => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
-      finish({ protection: form.get("protection"), comment: form.get("comment") || "", filetype: form.get("filetype") || "", writable: form.has("writable") });
+      finish({
+        attributes: attributeHex({
+          r: form.has("bit-r"), h: form.has("bit-h"), s: form.has("bit-s"),
+          v: form.has("bit-v"), d: form.has("bit-d"), a: form.has("bit-a"),
+        }),
+        datestamp: form.get("datestamp") || "",
+        filetype: form.get("filetype") || "",
+      });
     };
     modal.append(shade);
-    shade.querySelector("[name=protection]").focus();
+    shade.querySelector("[name=bit-r]").focus();
   });
 }
 
@@ -6480,7 +6221,7 @@ function editorImageSearch(pane) {
       status.textContent = "Searching the mounted image…";
       results.replaceChildren();
       try {
-        const parameters = fileContextQuery(pane, pane.path || "$", { query, root: "", ...(pane.image.kind === "hdf" ? { allPartitions: "true" } : {}) });
+        const parameters = fileContextQuery(pane, pane.path, { query, root: "", ...(pane.image.kind === "hd" ? { allPartitions: "true" } : {}) });
         parameters.delete("path");
         const report = await api(`/api/images/${pane.image.id}/inspect/search?${parameters}`);
         status.textContent = `${report.results.length.toLocaleString()} result${report.results.length === 1 ? "" : "s"} · ${report.filesScanned.toLocaleString()} readable files scanned${report.failedReads ? ` · ${report.failedReads.toLocaleString()} unreadable file${report.failedReads === 1 ? "" : "s"} skipped` : ""}${report.skippedLarge ? ` · ${report.skippedLarge.toLocaleString()} large files searched by name only` : ""}${report.unreadableFiles ? ` · ${report.unreadableFiles.toLocaleString()} unreadable file${report.unreadableFiles === 1 ? "" : "s"} skipped` : ""}${report.truncated ? " · result limit reached" : ""}`;
@@ -6600,7 +6341,7 @@ function paneEmulatorTarget(index) {
   const pane = panes[index];
   // A hard drive is attached whole, exactly as it would be on the machine;
   // anything else is handed over as the image the pane has open.
-  return pane.image.kind === "hdf"
+  return pane.image.kind === "hd"
     ? { partition: null, label: `complete hard drive · ${pane.image.name}`, modePrefix: "whole-drive" }
     : { partition: pane.partition, label: pane.image.name, modePrefix: "parent" };
 }
@@ -6879,10 +6620,8 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
       if (!result) return;
       if (result.partition != null) pane.partition = Number(result.partition);
       if (result.side != null) pane.side = Number(result.side);
-      const split = result.path.lastIndexOf(".");
-      const parent = split > 0 ? result.path.slice(0, split) : "$";
-      const leaf = split >= 0 ? result.path.slice(split + 1) : result.name;
-      pane.path = parent || "$";
+      pane.path = parentPath(result.path);
+      const leaf = result.path.split(/[\\/]/).at(-1) || result.name;
       await loadDirectory(index);
       await openFileEditor(index, leaf, null, result.path);
     }
@@ -6943,7 +6682,7 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
     }
     else if (action === "debugger-workspace") {
       if (target) return toast("Extract this archive member before starting a debugger.", true);
-      // An GEMDOS load file is relocatable and records no address, so the
+      // A GEMDOS program is relocatable and records no address, so the
       // debugger starts at the beginning of the extracted bytes.
       await openDebuggerWorkspace(pane, entry, path, pane.image?.targetHardware === "tos" ? "68040" : "68000", "0x0", isBasic, editor.value);
       project = await loadEditorProject(pane, path);
@@ -6989,7 +6728,12 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
   updateSourceEditorStatus(root);
 }
 
-async function renderDisassemblyEditor(index, entry, path, inspection, architecture = "auto", origin = "", start = "0", length = "8192", focusOffset = null, target = null) {
+// `start` and `length` are empty by default rather than 0 and 8192, so that
+// the first listing of a file lets the decoder choose. For an Atari program
+// that means starting at the code instead of at the 28-byte header. The boxes
+// are then filled in from what came back, so the reader can see the offset and
+// change it.
+async function renderDisassemblyEditor(index, entry, path, inspection, architecture = "auto", origin = "", start = "", length = "", focusOffset = null, target = null) {
   const pane = panes[index];
   if (!target) retainEditorDocument(index, pane, entry, path, "disassembly");
   const query = new URLSearchParams({
@@ -7005,7 +6749,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
       <label>Processor<select name="architecture">${["68000", "68010", "68020", "68030", "68040", "68060"].map(target => `<option value="${target}" ${report.architecture === target ? "selected" : ""}>MC${target}</option>`).join("")}</select></label>
       <label>Origin<input name="origin" value="0x${Number(report.origin).toString(16).toUpperCase()}"></label>
       <label>File offset<input name="start" value="${Number(report.start)}"></label>
-      <label>Bytes<input name="length" value="${Number(length) || 8192}"></label>
+      <label>Bytes<input name="length" value="${Number(length) || Math.max(0, Number(report.end) - Number(report.start)) || 8192}"></label>
       <button class="button small disassembly-refresh" type="button">Disassemble</button>
     </div>
     <div class="disassembly-source" style="${disassemblyColumnStyle(report)}" role="textbox" aria-readonly="true" aria-label="Disassembled source"><div class="disassembly-source-head" aria-hidden="true"><span></span><span>Address</span><span>Bytes</span><span>Instruction</span><span>Annotation</span></div>${disassemblySource(report)}</div>
@@ -7282,8 +7026,13 @@ async function openFileEditor(index, name, target = null, pathOverride = null, f
       pane.archiveMember = "";
       return loadDirectory(index);
     }
+    // No offset and no length unless the caller is jumping to somewhere
+    // specific, so that a program listing opens at its code rather than at
+    // its 28-byte header.
     if (report.view === "disassembly") return renderDisassemblyEditor(
-      index, entry, path, report, "auto", "", String(focusOffset ?? 0), "8192", focusOffset, target,
+      index, entry, path, report, "auto", "",
+      focusOffset === null || focusOffset === undefined ? "" : String(focusOffset),
+      "", focusOffset, target,
     );
     if (report.view === "hex") {
       modal.close();
@@ -7293,13 +7042,13 @@ async function openFileEditor(index, name, target = null, pathOverride = null, f
     const isBasic = report.view === "basic";
     const isScript = report.view === "script";
     const downloadUrl = target?.downloadUrl || fileDownloadUrl(pane, path);
-    const sourceKind = isBasic ? `${esc(report.basic.dialect)} · ${report.basic.lineCount} LINES` : isScript ? `Atari COMMAND SCRIPT · ${report.script.lineCount} LINES` : "TEXT FILE";
+    const sourceKind = isBasic ? `${esc(report.basic.dialect)} · ${report.basic.lineCount} LINES` : isScript ? `GEMDOS CONFIGURATION FILE · ${report.script.lineCount} LINES` : "TEXT FILE";
     const editorRows = Math.max(7, Math.min(24, report.text.split("\n").length + 1));
     if (!replaceAnalysisLoading(`<div class="analysis-dialog file-inspector source-editor"><header><div><small>${sourceKind} · ${humanSize(report.size)}</small><h2>${esc(entry.name)}</h2></div></header>
-      ${editorMenus({ downloadUrl, downloadLabel: target ? "Export original archive member…" : "Download with metadata…", canEdit, canSaveAs: canEdit && !target, canChangeProperties: !target && !pane.image.readOnly && pane.image.kind !== "dms", basic: isBasic, readOnly: !canEdit })}
+      ${editorMenus({ downloadUrl, downloadLabel: target ? "Export original archive member…" : "Download with metadata…", canEdit, canSaveAs: canEdit && !target, canChangeProperties: !target && !pane.image.readOnly && !CONTAINER_KINDS.includes(pane.image.kind), basic: isBasic, readOnly: !canEdit })}
       <textarea class="inspector-content source-content${isBasic ? " basic-source" : ""}" name="inspectedText" rows="${editorRows}" spellcheck="false" wrap="off" ${canEdit ? "" : "readonly"}>${esc(report.text)}</textarea>
       <aside class="source-byte-sync" aria-live="polite" hidden></aside>
-      ${report.dmsProject ? `<div class="help-note"><strong>Safe DMS archive project:</strong> ${esc(report.dmsProject.proof)} The edited member must remain exactly ${Number(report.dmsProject.length).toLocaleString()} bytes.</div>` : target ? `<div class="help-note">${canEdit ? `${pane.archiveKind === "dms" ? "A structural comparison is shown before saving. " : ""}Saving rebuilds the containing archive transactionally and records an image undo checkpoint.` : "This container cannot be rebuilt safely. Exporting keeps the original member bytes."}</div>` : ""}
+      ${report.containerProject ? `<div class="help-note"><strong>Safe container project:</strong> ${esc(report.containerProject.proof)} The edited member must remain exactly ${Number(report.containerProject.length).toLocaleString()} bytes.</div>` : target ? `<div class="help-note">${canEdit ? `${CONTAINER_KINDS.includes(pane.archiveKind) ? "A structural comparison is shown before saving. " : ""}Saving rebuilds the containing archive transactionally and records an image undo checkpoint.` : "This container cannot be rebuilt safely. Exporting keeps the original member bytes."}</div>` : ""}
       ${isBasic && report.basic.editable && report.basic.editNote ? `<div class="help-note">${esc(report.basic.editNote)} Saving replaces only the tokenised program prefix.</div>` : ""}
       ${isBasic && !report.editable ? `<div class="help-warning">${esc(report.basic.dialect)} cannot yet be safely retokenised by this editor${report.basic.trailingBytes ? ` and it also carries ${Number(report.basic.trailingBytes).toLocaleString()} trailing bytes` : ""}. It is open read-only; the raw bytes remain available in Hex.</div>` : ""}
       <footer class="editor-status"><span class="editor-document-state">${canEdit ? "Saved" : "Read-only"}</span><span class="editor-position">Ln 1, Col 1</span><span class="editor-size"></span></footer>
@@ -7311,15 +7060,15 @@ async function openFileEditor(index, name, target = null, pathOverride = null, f
         sha256: report.sha256,
         archiveSha256: report.archiveSha256,
       } : { path, partition: pane.partition, side: pane.side, text: form.get("inspectedText"), sha256: report.sha256 };
-      if (report.dmsProject || (target && pane.archiveKind === "dms")) {
-        const previewEndpoint = report.dmsProject
-          ? `/api/images/${pane.image.id}/inspect/dms-rebuild-preview`
+      if (report.containerProject || (target && CONTAINER_KINDS.includes(pane.archiveKind))) {
+        const previewEndpoint = report.containerProject
+          ? `/api/images/${pane.image.id}/inspect/container-rebuild-preview`
           : `/api/images/${pane.image.id}/archive/rebuild-preview`;
         const proof = await api(previewEndpoint, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(replacementRequest),
         });
-        const decision = await dmsStructuralReview(proof);
+        const decision = await containerStructuralReview(proof);
         if (decision !== "save") return false;
       }
       const data = await api(target?.inspectEndpoint || `/api/images/${pane.image.id}/inspect`, {
@@ -7367,8 +7116,8 @@ async function openFileEditor(index, name, target = null, pathOverride = null, f
       textarea: editor,
       root: modalContent.querySelector(".source-editor"),
       language: isBasic ? "basic" : isScript ? "script" : "text",
-      dialect: report.basic?.dialect || "ST BASIC 1.0",
-      inlineAssemblyLanguage: isBasic && pane.image?.targetHardware === "tos" ? "68040" : "68000",
+      dialect: report.basic?.dialect || "gfa-basic-3",
+      inlineAssemblyLanguage: isBasic && ["tt030", "falcon030"].includes(editorTargetProfile(pane).machine) ? "68030" : "68000",
       targetProfile: editorTargetProfile(pane),
       initialHistory: report.project?.history || [],
       validateBasic: isBasic ? async (text, baseline = "") => api(`/api/images/${pane.image.id}/inspect/basic/verify`, {
@@ -7640,47 +7389,51 @@ function focusEditorCheatCandidate(root, navigation) {
   throw new Error("Candidate has no editor target");
 }
 
+//: The code-intelligence side panel and the class names it is styled by are
+//: owned by code-editor.js and styles.css, so the selector strings and the
+//: two custom properties below are quoted exactly as those files declare
+//: them; only the code in this file reads plainly.
 function dockEditorIntelligence(root) {
-  const drawer = root?.querySelector(".code-intelligence-drawer");
+  const panel = root?.querySelector(".code-intelligence-panel");
   const editorSurface = root?.querySelector(".code-editor-surface, .disassembly-source");
-  if (!drawer || !editorSurface) return;
-  let workspace = root.querySelector(":scope > .code-editor-drawer-workspace");
+  if (!panel || !editorSurface) return;
+  let workspace = root.querySelector(":scope > .code-editor-panel-workspace");
   if (!workspace) {
     workspace = document.createElement("div");
-    workspace.className = "code-editor-drawer-workspace";
+    workspace.className = "code-editor-panel-workspace";
     const splitter = document.createElement("button");
     splitter.type = "button";
-    splitter.className = "code-editor-drawer-splitter";
+    splitter.className = "code-editor-panel-splitter";
     splitter.setAttribute("role", "separator");
     splitter.setAttribute("aria-label", "Resize code and cheat-candidate panels");
     splitter.setAttribute("aria-valuemin", "20");
     splitter.setAttribute("aria-valuemax", "75");
     splitter.setAttribute("aria-valuenow", "40");
     editorSurface.before(workspace);
-    workspace.append(editorSurface, splitter, drawer);
-    installEditorDrawerSplitter(workspace, splitter);
+    workspace.append(editorSurface, splitter, panel);
+    installEditorPanelSplitter(workspace, splitter);
   }
-  root.classList.add("code-drawer-docked-right");
-  drawer.classList.add("code-intelligence-drawer-docked");
-  const close = drawer.querySelector(".code-drawer-close");
+  root.classList.add("code-panel-docked-right");
+  panel.classList.add("code-intelligence-panel-docked");
+  const close = panel.querySelector(".code-panel-close");
   close?.addEventListener("click", () => {
-    root.classList.remove("code-drawer-docked-right");
-    drawer.classList.remove("code-intelligence-drawer-docked");
+    root.classList.remove("code-panel-docked-right");
+    panel.classList.remove("code-intelligence-panel-docked");
   }, { once: true });
 }
 
-function installEditorDrawerSplitter(workspace, splitter) {
+function installEditorPanelSplitter(workspace, splitter) {
   const narrow = () => matchMedia("(max-width: 900px)").matches;
   const updateOrientation = () => splitter.setAttribute("aria-orientation", narrow() ? "horizontal" : "vertical");
   const resize = event => {
     const bounds = workspace.getBoundingClientRect();
     if (narrow()) {
       const height = Math.max(180, Math.min(bounds.height - 150, bounds.bottom - event.clientY));
-      workspace.style.setProperty("--code-drawer-height", `${height}px`);
+      workspace.style.setProperty("--code-panel-height", `${height}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(height / Math.max(1, bounds.height) * 100)));
     } else {
       const width = Math.max(280, Math.min(bounds.width - 320, bounds.right - event.clientX));
-      workspace.style.setProperty("--code-drawer-width", `${width}px`);
+      workspace.style.setProperty("--code-panel-width", `${width}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(width / Math.max(1, bounds.width) * 100)));
     }
   };
@@ -7705,15 +7458,15 @@ function installEditorDrawerSplitter(workspace, splitter) {
     if (!keys.includes(event.key)) return;
     event.preventDefault();
     const bounds = workspace.getBoundingClientRect();
-    const drawer = workspace.querySelector(".code-intelligence-drawer").getBoundingClientRect();
+    const panel = workspace.querySelector(".code-intelligence-panel").getBoundingClientRect();
     const delta = (event.key === "ArrowLeft" || event.key === "ArrowUp") ? 24 : -24;
     if (narrow()) {
-      const height = Math.max(180, Math.min(bounds.height - 150, drawer.height + delta));
-      workspace.style.setProperty("--code-drawer-height", `${height}px`);
+      const height = Math.max(180, Math.min(bounds.height - 150, panel.height + delta));
+      workspace.style.setProperty("--code-panel-height", `${height}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(height / Math.max(1, bounds.height) * 100)));
     } else {
-      const width = Math.max(280, Math.min(bounds.width - 320, drawer.width + delta));
-      workspace.style.setProperty("--code-drawer-width", `${width}px`);
+      const width = Math.max(280, Math.min(bounds.width - 320, panel.width + delta));
+      workspace.style.setProperty("--code-panel-width", `${width}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(width / Math.max(1, bounds.width) * 100)));
     }
   });
@@ -7722,7 +7475,7 @@ function installEditorDrawerSplitter(workspace, splitter) {
 
 async function showDuplicateReport(index) {
   const pane = panes[index];
-  analysisLoading("Finding duplicates and variants", "Hashing catalogues and comparing normalised titles…");
+  analysisLoading("Finding duplicates and variants", "Hashing directories and comparing normalised titles…");
   try {
     const report = await trackedPaneOperation(
       index,
@@ -7741,7 +7494,7 @@ async function showDuplicateReport(index) {
 
 function showManifestExport(index) {
   const pane = panes[index];
-  showModal(`<h2>Export collection manifest</h2><p>Create a searchable catalogue of partitions, files, protection bits, comments, datestamps and checksums.</p>
+  showModal(`<h2>Export collection manifest</h2><p>Create a searchable catalogue of partitions, files, GEMDOS attributes, datestamps and checksums.</p>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button" type="button" data-manifest="csv">Download CSV</button><button class="button primary" type="button" data-manifest="json">Download JSON</button></div>`);
   modalContent.querySelectorAll("[data-manifest]").forEach(button => button.onclick = async () => {
     const buttons = [...modalContent.querySelectorAll("[data-manifest]")];
@@ -7776,8 +7529,8 @@ function showManifestExport(index) {
 
 function comparisonRecordLabel(change) {
   const row = change.after || change.before || {};
-  if (row.recordType === "partition") return `${row.device || `Partition ${row.partition}`}:`;
-  const context = row.partition != null ? `${row.device || `Partition ${row.partition}`}: · ` : row.bank != null ? `Bank ${row.bank} · ` : row.side != null ? `Side ${row.side} · ` : "";
+  if (row.recordType === "partition") return `${row.device || `Partition ${row.partition}`}`;
+  const context = row.partition != null ? `${row.device || `Partition ${row.partition}`} · ` : row.bank != null ? `Bank ${row.bank} · ` : "";
   return `${context}${row.path || change.key}`;
 }
 
@@ -7849,7 +7602,7 @@ async function showCollectionCatalogue(initialIndex = null) {
       <header><div><small>BROWSER-PRIVATE INDEXEDDB CATALOGUE</small><h2>My Atari collection</h2></div><div class="collection-totals"><b>${report.images}</b> images <b>${report.records.toLocaleString()}</b> records <b>${report.titles}</b> titles</div></header>
       <p>This catalogue belongs only to this browser profile. It stores manifests and user-supplied locations, never image bytes.</p>
       <label class="collection-search">Search saved names, paths, titles, publishers, machines or SHA-256<input type="search" name="collectionQuery" placeholder="Search the complete private catalogue"></label>
-      <section class="collection-index-controls"><label>Open image<select name="collectionPane" ${paneOptions ? "" : "disabled"}>${paneOptions || '<option>No open images</option>'}</select></label><label>Location or shelf<input name="collectionLocation" value="${esc(selectedEntry?.location || "")}" placeholder="SD card, NAS path, archive box…"></label><label>Machines<input name="collectionMachines" value="${esc((selectedEntry?.machines || []).join(", "))}" placeholder="Atari 500, Atari 1200…"></label><button class="button primary" type="button" data-index-pane ${paneOptions ? "" : "disabled"}>Add / update image</button><button class="button" type="button" data-refresh-open ${entries.length && paneOptions ? "" : "disabled"}>Refresh indexed open images</button></section>
+      <section class="collection-index-controls"><label>Open image<select name="collectionPane" ${paneOptions ? "" : "disabled"}>${paneOptions || '<option>No open images</option>'}</select></label><label>Location or shelf<input name="collectionLocation" value="${esc(selectedEntry?.location || "")}" placeholder="SD card, NAS path, archive box…"></label><label>Machines<input name="collectionMachines" value="${esc((selectedEntry?.machines || []).join(", "))}" placeholder="Atari STE, Atari Falcon030…"></label><button class="button primary" type="button" data-index-pane ${paneOptions ? "" : "disabled"}>Add / update image</button><button class="button" type="button" data-refresh-open ${entries.length && paneOptions ? "" : "disabled"}>Refresh indexed open images</button></section>
       <div class="collection-list"><table><thead><tr><th></th><th>Image and location</th><th>Format</th><th>Machines</th><th>Records</th><th>Status</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No images have been indexed yet.</td></tr>'}</tbody></table></div>
       <div class="collection-reports"><details><summary>Exact content duplicates (${report.exactDuplicates.length})</summary><ul>${duplicateSummary || "<li>No cross-image duplicate content found.</li>"}</ul></details><details><summary>Title variants (${report.titleVariants.length})</summary><ul>${variantSummary || "<li>No repeated titles found across images.</li>"}</ul></details><details><summary>Wanted and missing titles (${report.missingTitles.length})</summary><label>One wanted title per line<textarea name="wantedTitles" rows="4">${esc((preferences.wanted || []).join("\n"))}</textarea></label><ul>${report.missingTitles.map(title => `<li>${esc(title)}</li>`).join("") || "<li>Every listed title is present.</li>"}</ul><button class="button small" type="button" data-save-wanted>Save wanted list</button></details></div>
       <div class="collection-transfer"><button class="button" type="button" data-export-collection-report>Export report</button><button class="button" type="button" data-backup-collection>Back up database</button><label class="button">Import backup<input type="file" accept="application/json,.json" data-import-collection hidden></label><button class="button danger" type="button" data-remove-collection disabled>Remove selected</button><button class="button danger" type="button" data-clear-collection ${entries.length ? "" : "disabled"}>Clear catalogue</button></div>
@@ -7966,7 +7719,7 @@ function showImageComparison(index) {
   showModal(`<div class="analysis-dialog wide-analysis image-comparison-dialog">
     <header><div><small>FILESYSTEM-AWARE IMAGE COMPARISON</small><h2>Compare ${esc(pane.image.name)}</h2></div></header>
     <label>Compare against<select name="otherImage">${candidates.map(item => `<option value="${esc(item.pane.image.id)}">Pane ${item.index + 1} · ${esc(item.pane.image.name)} · ${esc(paneFormat(item.pane.image))}</option>`).join("")}</select></label>
-    <p class="help-note">Files, drawers, partitions and ROM banks are matched by logical location. Content checksums and Atari metadata are separated, then bounded raw-byte ranges are reported for each physical image component.</p>
+    <p class="help-note">Files, folders, partitions and ROM banks are matched by logical location. Content checksums and GEMDOS metadata are separated, then bounded raw-byte ranges are reported for each physical image component.</p>
     <div class="image-comparison-results" aria-live="polite"><p>Choose an image and run the comparison.</p></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button" type="button" data-export-comparison disabled>Export JSON</button><button class="button" type="button" data-export-patch disabled>Download patch</button><button class="button primary" type="button" data-run-comparison>Compare images</button></div>
   </div>`);
@@ -7986,19 +7739,19 @@ function showImageComparison(index) {
       const sections = ["added", "removed", "renamed", "modified", "metadata"];
       const patchable = change => {
         const row = change.after || change.before || {};
-        if (!report.sameFormat || report.base.kind === "dms") return false;
-        if (report.base.kind === "hdf") return row.recordType !== "partition";
+        if (!report.sameFormat || CONTAINER_KINDS.includes(report.base.kind)) return false;
+        if (report.base.kind === "hd") return row.recordType !== "partition";
         if (report.base.kind === "rom") return row.recordType === "rom-bank";
         return true;
       };
       const rawComponents = report.raw?.components || [];
-      const rawMarkup = `<details class="raw-comparison" ${report.summary.total < 40 ? "open" : ""}><summary>Raw image evidence · ${Number(report.raw?.changedBytes || 0).toLocaleString()} changed byte${Number(report.raw?.changedBytes) === 1 ? "" : "s"}</summary>${rawComponents.map(component => `<section><b>${component.component === "descriptor" ? "Companion descriptor" : "Primary image"}</b><small>${Number(component.count).toLocaleString()} changed bytes · ${humanSize(component.sourceSize)} → ${humanSize(component.candidateSize)}${component.truncated ? " · comparison bounded at 1 GiB" : ""}</small>${component.ranges.slice(0, 100).map(range => `<code>+&amp;${Number(range[0]).toString(16).toUpperCase()} to +&amp;${Number(range[1]).toString(16).toUpperCase()} · ${(Number(range[1]) - Number(range[0]) + 1).toLocaleString()} bytes</code>`).join("") || "<em>Byte-identical</em>"}${component.rangesTruncated ? "<em>Additional ranges are retained only in the changed-byte total.</em>" : ""}</section>`).join("") || "<p>No comparable local image components were available.</p>"}</details>`;
+      const rawMarkup = `<details class="raw-comparison" ${report.summary.total < 40 ? "open" : ""}><summary>Raw image evidence · ${Number(report.raw?.changedBytes || 0).toLocaleString()} changed byte${Number(report.raw?.changedBytes) === 1 ? "" : "s"}</summary>${rawComponents.map(component => `<section><b>Primary image</b><small>${Number(component.count).toLocaleString()} changed bytes · ${humanSize(component.sourceSize)} → ${humanSize(component.candidateSize)}${component.truncated ? " · comparison bounded at 1 GiB" : ""}</small>${component.ranges.slice(0, 100).map(range => `<code>+&amp;${Number(range[0]).toString(16).toUpperCase()} to +&amp;${Number(range[1]).toString(16).toUpperCase()} · ${(Number(range[1]) - Number(range[0]) + 1).toLocaleString()} bytes</code>`).join("") || "<em>Byte-identical</em>"}${component.rangesTruncated ? "<em>Additional ranges are retained only in the changed-byte total.</em>" : ""}</section>`).join("") || "<p>No comparable local image components were available.</p>"}</details>`;
       resultHost.innerHTML = `<div class="comparison-summary">${sections.map(name => `<strong><span>${report.summary[name].toLocaleString()}</span>${name}</strong>`).join("")}<strong><span>${report.summary.total.toLocaleString()}</span>total</strong></div>
         ${report.sameFormat ? "" : '<p class="help-warning">These images use different filesystem families. The report is useful for inventory comparison but cannot become a directly applicable patch.</p>'}
         <div class="comparison-change-list">${sections.map(name => report.changes[name].length ? `<details ${report.summary.total < 40 ? "open" : ""}><summary>${name[0].toUpperCase() + name.slice(1)} (${report.changes[name].length})</summary>${report.changes[name].slice(0, 1000).map(change => `<div>${patchable(change) ? `<input type="checkbox" data-patch-key="${esc(change.key)}" aria-label="Include ${esc(comparisonRecordLabel(change))} in a selective patch">` : '<span class="patch-choice-placeholder" aria-hidden="true"></span>'}<b>${esc(comparisonRecordLabel(change))}</b><small>${change.changedFields?.length ? esc(change.changedFields.join(", ")) : name}</small></div>`).join("")}${report.changes[name].length > 1000 ? `<p>${(report.changes[name].length - 1000).toLocaleString()} more changes are included in the JSON export.</p>` : ""}</details>` : "").join("") || '<p class="help-note">The logical contents and metadata are identical.</p>'}${rawMarkup}</div>
-        ${report.sameFormat && report.base.kind !== "dms" ? '<p class="help-note patch-selection-note">Download patch includes every change. Tick reviewed items to build a dependency-closed selective patch instead.</p>' : ""}`;
+        ${report.sameFormat && !CONTAINER_KINDS.includes(report.base.kind) ? '<p class="help-note patch-selection-note">Download patch includes every change. Tick reviewed items to build a dependency-closed selective patch instead.</p>' : ""}`;
       modalContent.querySelector("[data-export-comparison]").disabled = false;
-      modalContent.querySelector("[data-export-patch]").disabled = !report.sameFormat || report.base.kind === "dms";
+      modalContent.querySelector("[data-export-patch]").disabled = !report.sameFormat || CONTAINER_KINDS.includes(report.base.kind);
       resultHost.querySelectorAll("[data-patch-key]").forEach(input => input.onchange = () => {
         const count = resultHost.querySelectorAll("[data-patch-key]:checked").length;
         modalContent.querySelector("[data-export-patch]").textContent = count ? `Download selected patch (${count})` : "Download patch";
@@ -8114,8 +7867,7 @@ async function openWorkspaceSearchResult(result) {
   pane.archiveMember = "";
   if (result.partition != null) pane.partition = Number(result.partition);
   if (result.side != null) pane.side = Number(result.side);
-  const split = result.path.lastIndexOf(".");
-  pane.path = split > 0 ? result.path.slice(0, split) : "$";
+  pane.path = parentPath(result.path);
   modal.close();
   await loadDirectory(result.paneIndex);
   if (result.virtual && !result.openable) return;
@@ -8134,7 +7886,7 @@ function showWorkspaceSearch() {
   showModal(`<div class="analysis-dialog wide-analysis workspace-search-dialog">
     <header><div><small>ALL OPEN IMAGES</small><h2>Search workspace</h2></div></header>
     <div class="workspace-search-controls"><input type="search" name="workspaceQuery" placeholder="Name, metadata, SHA-256 or readable text" required autocomplete="off" autofocus><button class="button primary" type="button" data-run-workspace-search>Search ${searchable.length} image${searchable.length === 1 ? "" : "s"}</button></div>
-    <p class="workspace-search-status" aria-live="polite">Searches catalogues and bounded file content in each distinct open filesystem, including every partition of an open hard drive. Enter an 8 to 64 digit SHA-256 prefix to identify exact content.</p>
+    <p class="workspace-search-status" aria-live="polite">Searches directories and bounded file content in each distinct open filesystem, including every partition of an open hard drive. Enter an 8 to 64 digit SHA-256 prefix to identify exact content.</p>
     <div class="editor-image-search-results workspace-search-results"></div>
     <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div>
   </div>`);
@@ -8149,12 +7901,12 @@ function showWorkspaceSearch() {
     status.textContent = `Searching ${searchable.length} open image${searchable.length === 1 ? "" : "s"}…`;
     results.replaceChildren();
     const reports = await Promise.all(searchable.map(async item => {
-      const parameters = new URLSearchParams({ query, root: "$" });
-      if (item.pane.image.kind === "hdf") parameters.set("allPartitions", "true");
+      const parameters = new URLSearchParams({ query, root: "" });
+      if (item.pane.image.kind === "hd") parameters.set("allPartitions", "true");
       try {
         const report = await trackedPaneOperation(
           item.index,
-          "Searching image catalogue and file content",
+          "Searching image directories and file content",
           operationId => {
             parameters.set("operationId", operationId);
             return api(`/api/images/${item.pane.image.id}/inspect/search?${parameters}`);
@@ -8264,7 +8016,7 @@ async function importProjectFile(file) {
     imageId: item?.imageId || null,
     partition: item?.partition ?? null,
     side: item?.side ?? null,
-    path: item?.path || "$",
+    path: typeof item?.path === "string" ? item.path : "",
     windowState: item?.windowState || null,
   }))));
   panes.splice(0, panes.length, ...Array.from({ length: Math.max(1, saved.length) }, () => newPaneState()));
@@ -8283,7 +8035,7 @@ async function renderWorkbench(section = "profiles") {
   const recipes = storedCollection(RECIPE_STORAGE_KEY, []);
   const imageOptions = panes.map((pane, index) => pane.image ? `<option value="${index}">${esc(paneLabel(index))}</option>` : "").join("");
   showModal(`<div class="workbench-dialog"><header><div><small>ATARI FILE FORGE</small><h2>Workbench</h2></div><select name="workbenchSection"><option value="profiles" ${section === "profiles" ? "selected" : ""}>Hardware profiles</option><option value="recipes" ${section === "recipes" ? "selected" : ""}>Import recipes</option><option value="project" ${section === "project" ? "selected" : ""}>Portable project</option></select></header>
-    ${section === "profiles" ? `<div class="workbench-profile-picker field"><label>Hardware profile</label><select name="profileSelect">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)}</option>`).join("")}</select><small>Start with a common system, then build the exact target from compatible additions.</small></div><div class="workbench-grid workbench-profile-grid"><section><div class="field"><label>Profile name</label><input name="profileName" value="${esc(profiles[0]?.name || "My Atari setup")}"></div><div class="field"><label>Base machine</label><select name="profileMachine">${hardware.machines.map(machine => `<option value="${esc(machine.id)}">${esc(machine.label)} · ${esc(machine.baseRam)} · ${esc(machine.processor)}</option>`).join("")}</select></div><div class="field"><label>Online Library filter</label><select name="profileCatalogMachine">${ONLINE_MACHINES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Filing system</label><select name="profileFs">${WORKBENCH_FILE_SYSTEMS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Target validation</label><select name="profileTarget"><option value="auto">Automatic</option><option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option><option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option><option value="hardfile">UAE hardfile · HDA + GEO</option><option value="tos">Atari 3000 / 4000 · TOS hard drive</option></select></div><div class="field"><label>FastFileSystem build</label><select name="profileHandler"><option value="none">Not used</option><option value="rom">FastFileSystem in Kickstart</option><option value="rdb">FastFileSystem loaded from the Rigid Disk Block</option></select></div><div class="field"><label>Expected stack size</label><input name="profilePage" value="${esc(profiles[0]?.page || "8192")}"></div><section class="workbench-addon-builder"><header><div><small>COMPATIBLE HARDWARE</small><h3>Add-ons</h3></div><span data-addon-summary></span></header><div class="hardware-addon-groups" data-hardware-addons></div></section><details class="workbench-emulator-settings" open><summary>Emulator and debugger integration</summary><div class="help-note"><strong>Managed tools:</strong> Atari File Forge translates supported additions into emulator models, writable banks, CPU accelerators, controller settings and expansion cards. Items marked Validation only still affect compatibility analysis but are not falsely claimed as emulated.</div><div class="workbench-emulator-controls"><div class="field"><label>Emulator</label><select name="profileEmulator">${WORKBENCH_EMULATORS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Debugger</label><select name="profileDebugger">${WORKBENCH_DEBUGGERS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Emulated RAM</label><select name="profileEmulatorRam"><option value="auto">From base machine and add-ons</option><option value="32K">32 KiB</option><option value="64K">64 KiB</option><option value="128K">128 KiB</option><option value="1M">1 MiB</option></select></div><div class="field"><label>Startup action</label><select name="profileEmulatorBoot"><option value="auto">Use image default</option><option value="boot">Boot from this image</option><option value="catalogue">Open catalogue only</option></select></div></div></details><div class="field"><label>Apply to open pane</label><select name="profilePane">${imageOptions || '<option value="">No open images</option>'}</select></div><div class="modal-actions"><button type="button" class="button" data-save-profile>Save profile</button><button type="button" class="button primary" data-apply-profile ${imageOptions ? "" : "disabled"}>Apply profile</button></div></section></div>` : section === "recipes" ? `<div class="workbench-grid"><aside>${recipes.map((recipe, index) => `<button type="button" data-recipe-index="${index}"><b>${esc(recipe.name)}</b><small>${esc(recipe.naming)} · ${recipe.addMenu ? "menu" : "off-menu"}</small></button>`).join("") || "<p>No saved recipes yet.</p>"}</aside><section><div class="field"><label>Recipe name</label><input name="recipeName" value="Collection import"></div><div class="field"><label>Directory naming</label><select name="recipeNaming"><option value="source">Use source titles</option><option value="generic">DISC-0000 sequence</option></select></div><div class="field"><label>Group prefix</label><input name="recipeGroup" maxlength="10" value="DISCS"></div><label class="check-field"><input type="checkbox" name="recipeOnline" checked> Use online metadata for ambiguous titles</label><label class="check-field"><input type="checkbox" name="recipeCompat" checked> Apply safe OFS to FFS compatibility rewrites</label><label class="check-field"><input type="checkbox" name="recipeMenu" checked> Offer imported titles to a menu</label><div class="modal-actions"><button type="button" class="button primary" data-save-recipe>Save recipe</button></div></section></div>` : `<div class="project-tools"><p>A project description preserves the pane layout, working session references, current paths, profiles and recipes. Image bytes remain in their private recoverable sessions and normal timestamped save ZIPs. Theme remains a browser preference.</p><div class="modal-actions"><button type="button" class="button" data-export-project>Export project JSON</button><label class="button primary">Import project JSON<input type="file" accept="application/json,.json" data-import-project hidden></label></div><hr><h3>Deterministic workflow</h3><p>Export the earliest retained pre-change checkpoint identity, a guarded patch containing every later filesystem change, and the exact hashes expected from a successful rebuild. Original image bytes are not included.</p><label class="field"><span>Completed image</span><select name="workflowPane">${imageOptions || '<option value="">No open images</option>'}</select></label><div class="help-note">The CLI verifies the base image, optional GEO companion, patch and final saved output. DMS and HFE workflows remain unavailable until their container-level reconstruction is provably lossless.</div><div class="modal-actions"><button type="button" class="button primary" data-export-workflow ${imageOptions ? "" : "disabled"}>Export workflow bundle</button></div></div>`}
+    ${section === "profiles" ? `<div class="workbench-profile-picker field"><label>Hardware profile</label><select name="profileSelect">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)}</option>`).join("")}</select><small>Start with a common system, then build the exact target from compatible additions.</small></div><div class="workbench-grid workbench-profile-grid"><section><div class="field"><label>Profile name</label><input name="profileName" value="${esc(profiles[0]?.name || "My Atari setup")}"></div><div class="field"><label>Base machine</label><select name="profileMachine">${hardware.machines.map(machine => `<option value="${esc(machine.id)}">${esc(machine.label)} · ${esc(machine.baseRam)} · ${esc(machine.processor)}</option>`).join("")}</select></div><div class="field"><label>Online Library filter</label><select name="profileCatalogMachine">${ONLINE_MACHINES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Filing system</label><select name="profileFs">${WORKBENCH_FILE_SYSTEMS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Target validation</label><select name="profileTarget">${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Hard-disk driver</label><select name="profileDriver">${DRIVE_DRIVER_BUILDS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Program flags</label><input name="profilePage" value="${esc(profiles[0]?.page || "0")}"><small>The <code>_p_flags</code> longword a program header on this machine is expected to carry.</small></div><section class="workbench-addon-builder"><header><div><small>COMPATIBLE HARDWARE</small><h3>Add-ons</h3></div><span data-addon-summary></span></header><div class="hardware-addon-groups" data-hardware-addons></div></section><details class="workbench-emulator-settings" open><summary>Emulator and debugger integration</summary><div class="help-note"><strong>Managed tools:</strong> Atari File Forge translates supported additions into Hatari machine types, memory sizes, floppy and hard-drive attachments, processor options and monitor modes. Items marked Validation only still affect compatibility analysis but are not falsely claimed as emulated.</div><div class="workbench-emulator-controls"><div class="field"><label>Emulator</label><select name="profileEmulator">${WORKBENCH_EMULATORS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Debugger</label><select name="profileDebugger">${WORKBENCH_DEBUGGERS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Emulated RAM</label><select name="profileEmulatorRam"><option value="auto">From base machine and add-ons</option>${WORKBENCH_MEMORY.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Startup action</label><select name="profileEmulatorBoot"><option value="auto">Use image default</option><option value="boot">Boot from this image</option><option value="catalogue">Open catalogue only</option></select></div></div></details><div class="field"><label>Apply to open pane</label><select name="profilePane">${imageOptions || '<option value="">No open images</option>'}</select></div><div class="modal-actions"><button type="button" class="button" data-save-profile>Save profile</button><button type="button" class="button primary" data-apply-profile ${imageOptions ? "" : "disabled"}>Apply profile</button></div></section></div>` : section === "recipes" ? `<div class="workbench-grid"><aside>${recipes.map((recipe, index) => `<button type="button" data-recipe-index="${index}"><b>${esc(recipe.name)}</b><small>${esc(recipe.naming)} · ${recipe.addMenu ? "menu" : "off-menu"}</small></button>`).join("") || "<p>No saved recipes yet.</p>"}</aside><section><div class="field"><label>Recipe name</label><input name="recipeName" value="Collection import"></div><div class="field"><label>Folder naming</label><select name="recipeNaming"><option value="source">Use source titles</option><option value="generic">DISK0000 sequence</option></select></div><div class="field"><label>Group prefix</label><input name="recipeGroup" maxlength="8" value="DISKS"></div><label class="check-field"><input type="checkbox" name="recipeOnline" checked> Use online metadata for ambiguous titles</label><label class="check-field"><input type="checkbox" name="recipeCompat" checked> Rewrite host names to GEMDOS 8.3 automatically</label><label class="check-field"><input type="checkbox" name="recipeMenu" checked> Offer imported titles to a menu</label><div class="modal-actions"><button type="button" class="button primary" data-save-recipe>Save recipe</button></div></section></div>` : `<div class="project-tools"><p>A project description preserves the pane layout, working session references, current paths, profiles and recipes. Image bytes remain in their private recoverable sessions and normal timestamped save ZIPs. Theme remains a browser preference.</p><div class="modal-actions"><button type="button" class="button" data-export-project>Export project JSON</button><label class="button primary">Import project JSON<input type="file" accept="application/json,.json" data-import-project hidden></label></div><hr><h3>Deterministic workflow</h3><p>Export the earliest retained pre-change checkpoint identity, a guarded patch containing every later filesystem change, and the exact hashes expected from a successful rebuild. Original image bytes are not included.</p><label class="field"><span>Completed image</span><select name="workflowPane">${imageOptions || '<option value="">No open images</option>'}</select></label><div class="help-note">The CLI verifies the base image, the patch and the final saved output. Flux workflows remain unavailable until their container-level reconstruction is provably lossless.</div><div class="modal-actions"><button type="button" class="button primary" data-export-workflow ${imageOptions ? "" : "disabled"}>Export workflow bundle</button></div></div>`}
     <div class="modal-actions"><button class="button primary" value="cancel">Close workbench</button></div></div>`, null, { replace: modal.open });
   modalContent.querySelector('[name="workbenchSection"]').onchange = event => renderWorkbench(event.target.value);
   if (section === "profiles") wireProfileWorkbench(profiles, activeProfile.index, hardware);
@@ -8295,15 +8047,14 @@ async function renderWorkbench(section = "profiles") {
 
 function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
   let selectedIndex = initialIndex;
+  const hardwareMachineIds = () => (catalogue?.machines || []).map(machine => machine.id);
   const machineDefaults = {
-    a500: { addons: ["kick13", "df0-internal"], catalogMachine: "a500", filingSystem: "ofs", targetHardware: "a500-ofs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "512K" },
-    a500plus: { addons: ["kick204", "df0-internal", "chip-1024"], catalogMachine: "a500plus", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "1M" },
-    a600: { addons: ["kick205", "df0-internal", "ide-internal", "chip-1024"], catalogMachine: "a600", filingSystem: "ffs", targetHardware: "a1200-ffs", handlerBuild: "none", page: "4096", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "1M" },
-    a1200: { addons: ["kick31", "df0-internal", "ide-internal", "chip-2048", "fast-ram"], catalogMachine: "a1200", filingSystem: "ffs-intl", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
-    a2000: { addons: ["kick204", "df0-internal", "a2091", "chip-1024", "fast-ram"], catalogMachine: "a2000", filingSystem: "ffs", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "1M" },
-    a3000: { addons: ["kick31", "scsi-internal", "chip-2048", "fast-ram", "acc-68030"], catalogMachine: "a3000", filingSystem: "ffs-intl", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
-    cd32: { addons: ["kick31", "chip-2048"], catalogMachine: "cd32", filingSystem: "ffs-intl", targetHardware: "a1200-ffs", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
-    a4000: { addons: ["kick31", "chip-2048", "fast-ram", "acc-68040"], catalogMachine: "a4000", filingSystem: "ffs-intl", targetHardware: "tos", handlerBuild: "none", page: "8192", emulator: "fs-uae", debugger: "fs-uae-debug", ram: "2M" },
+    st: { addons: ["tos-104", "ram-1m", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "1M" },
+    megast: { addons: ["tos-104", "ram-2m", "drive-a-ds", "blitter", "monitor-mono", "auto-folder"], catalogMachine: "megast", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
+    ste: { addons: ["tos-162", "ram-1m", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "1M" },
+    megaste: { addons: ["tos-206", "ram-4m", "hd-floppy", "scsi-internal", "driver-hddriver", "monitor-mono", "desktop-inf"], catalogMachine: "megaste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "4M" },
+    tt030: { addons: ["tos-306", "ram-2m", "tt-ram", "hd-floppy", "scsi-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "tt030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
+    falcon030: { addons: ["tos-4xx", "ram-14m", "hd-floppy", "ide-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "falcon030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "14M" },
   };
   const selectedAddons = () => [
     ...[...modalContent.querySelectorAll('[name="profileAddon"]:checked')].map(input => input.value),
@@ -8391,22 +8142,15 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
       else removeInvalidDependants();
       refreshAddonDescriptions();
       const values = selectedAddons();
-      const machine = modalContent.querySelector('[name="profileMachine"]').value;
-      // A profile's filing system follows its Kickstart, because that is what
-      // decides which DOS types the machine can actually mount.
-      if (values.includes("kick13")) {
-        modalContent.querySelector('[name="profileFs"]').value = "ofs";
-        modalContent.querySelector('[name="profileTarget"]').value = "a500-ofs";
-      } else if (values.includes("kick204")) {
-        modalContent.querySelector('[name="profileFs"]').value = "ffs";
-        modalContent.querySelector('[name="profileTarget"]').value = "a1200-ffs";
-      } else if (values.includes("kick31") || values.includes("kick305")) {
-        modalContent.querySelector('[name="profileFs"]').value = "ffs-intl";
-        modalContent.querySelector('[name="profileTarget"]').value = "a1200-ffs";
+      // Storage decides the filing system: a floppy is FAT12 and a hard drive
+      // is FAT16, and a drive needs a driver unless EmuTOS is reading it.
+      const hasDrive = ["acsi-megafile", "acsi-third-party", "acsi2stm", "ultrasatan", "cosmosex", "ide-internal", "ide-adapter", "scsi-internal", "cf-adapter"].some(id => values.includes(id));
+      modalContent.querySelector('[name="profileFs"]').value = hasDrive ? "fat16" : "fat12";
+      modalContent.querySelector('[name="profileTarget"]').value = hasDrive ? "hd" : "floppy";
+      if (hasDrive && modalContent.querySelector('[name="profileDriver"]').value === "none") {
+        modalContent.querySelector('[name="profileDriver"]').value = values.includes("driver-emutos-builtin") ? "emutos" : "hddriver";
       }
-      if (["a590", "a2091", "a4091", "scsi-internal", "ide-internal", "cf-adapter"].some(id => values.includes(id))) {
-        modalContent.querySelector('[name="profileTarget"]').value = "tos";
-      }
+      if (!hasDrive) modalContent.querySelector('[name="profileDriver"]').value = "none";
       applyDependencies();
       updateAddonSummary();
     });
@@ -8419,22 +8163,25 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     wireAddonInputs();
   };
   const applyDependencies = profile => {
-    const usesHdf = modalContent.querySelector('[name="profileFs"]').value === "ffs-hd";
-    modalContent.querySelector('[name="profileHandler"]').disabled = !usesHdf;
-    if (!usesHdf) modalContent.querySelector('[name="profileHandler"]').value = "none";
+    // A driver is only meaningful once the profile has a hard drive to boot
+    // from; a floppy-only machine boots from TOS in ROM.
+    const usesDrive = modalContent.querySelector('[name="profileFs"]').value.startsWith("fat16");
+    modalContent.querySelector('[name="profileDriver"]').disabled = !usesDrive;
+    if (!usesDrive) modalContent.querySelector('[name="profileDriver"]').value = "none";
   };
   const fill = profile => {
-    const legacyMachine = { "Atari 500": "a500", "Atari 500+": "a500plus", "Atari 600": "a600", "Atari 1200": "a1200", "Atari 2000": "a2000", "Atari 3000": "a3000", "Atari 4000": "a4000", "Atari CD32": "cd32" };
-    const legacyFs = { "OFS": "ofs", "FFS": "ffs", "FastFileSystem": "ffs", "FFS + FastFileSystem": "ffs-hd", "GEMDOS": "ffs" };
+    // A profile saved by an older release can name a machine or a filing
+    // system this build no longer offers, so each field falls back to the
+    // default rather than leaving a select showing nothing.
+    const machines = new Set(hardwareMachineIds());
     modalContent.querySelector('[name="profileName"]').value = profile.name || "";
-    modalContent.querySelector('[name="profileMachine"]').value = legacyMachine[profile.machine] || profile.machine || "a500";
+    modalContent.querySelector('[name="profileMachine"]').value = machines.has(profile.machine) ? profile.machine : "st";
     modalContent.querySelector('[name="profileCatalogMachine"]').value = onlineMachineFromProfile(profile) || "all";
-    modalContent.querySelector('[name="profileFs"]').value = legacyFs[profile.filingSystem] || profile.filingSystem || "ofs";
-    modalContent.querySelector('[name="profileTarget"]').value = profile.targetHardware || "auto";
-    modalContent.querySelector('[name="profileHandler"]').value = profile.handlerBuild || "";
-    modalContent.querySelector('[name="profilePage"]').value = profile.page || "";
-    const legacyAddons = profile.addons || (profile.accelerated ? ["acc-68030"] : []);
-    renderAddons(legacyAddons);
+    modalContent.querySelector('[name="profileFs"]').value = WORKBENCH_FILE_SYSTEMS.some(([value]) => value === profile.filingSystem) ? profile.filingSystem : "fat12";
+    modalContent.querySelector('[name="profileTarget"]').value = TARGET_MEDIA.some(([value]) => value === profile.targetHardware) ? profile.targetHardware : "auto";
+    modalContent.querySelector('[name="profileDriver"]').value = DRIVE_DRIVER_BUILDS.some(([value]) => value === profile.driverBuild) ? profile.driverBuild : "none";
+    modalContent.querySelector('[name="profilePage"]').value = profile.page || "0";
+    renderAddons(profile.addons || []);
     modalContent.querySelector('[name="profileEmulator"]').value = profile.emulator || "auto";
     modalContent.querySelector('[name="profileDebugger"]').value = profile.debugger || "auto";
     const ram = modalContent.querySelector('[name="profileEmulatorRam"]');
@@ -8442,7 +8189,7 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     modalContent.querySelector('[name="profileEmulatorBoot"]').value = profile.emulatorBoot || "auto";
     applyDependencies(profile);
   };
-  const read = () => { const addons = selectedAddons(); return ({ name: modalContent.querySelector('[name="profileName"]').value.trim() || "My Atari setup", machine: modalContent.querySelector('[name="profileMachine"]').value, addons, catalogMachine: modalContent.querySelector('[name="profileCatalogMachine"]').value, filingSystem: modalContent.querySelector('[name="profileFs"]').value, targetHardware: modalContent.querySelector('[name="profileTarget"]').value, handlerBuild: modalContent.querySelector('[name="profileHandler"]').value, page: modalContent.querySelector('[name="profilePage"]').value.trim(), accelerated: addons.some(id => id.startsWith("acc-") || id === "pistorm"), menuType: "workbench", emulator: modalContent.querySelector('[name="profileEmulator"]').value, debugger: modalContent.querySelector('[name="profileDebugger"]').value, emulatorRam: modalContent.querySelector('[name="profileEmulatorRam"]').value, emulatorBoot: modalContent.querySelector('[name="profileEmulatorBoot"]').value }); };
+  const read = () => { const addons = selectedAddons(); return ({ name: modalContent.querySelector('[name="profileName"]').value.trim() || "My Atari setup", machine: modalContent.querySelector('[name="profileMachine"]').value, addons, catalogMachine: modalContent.querySelector('[name="profileCatalogMachine"]').value, filingSystem: modalContent.querySelector('[name="profileFs"]').value, targetHardware: modalContent.querySelector('[name="profileTarget"]').value, driverBuild: modalContent.querySelector('[name="profileDriver"]').value, page: modalContent.querySelector('[name="profilePage"]').value.trim(), accelerated: addons.some(id => id.startsWith("acc-")), menuType: "desktop", emulator: modalContent.querySelector('[name="profileEmulator"]').value, debugger: modalContent.querySelector('[name="profileDebugger"]').value, emulatorRam: modalContent.querySelector('[name="profileEmulatorRam"]').value, emulatorBoot: modalContent.querySelector('[name="profileEmulatorBoot"]').value }); };
   modalContent.querySelector('[name="profileSelect"]').onchange = event => {
     selectedIndex = Number(event.target.value);
     fill(profiles[selectedIndex]);
@@ -8454,7 +8201,7 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     modalContent.querySelector('[name="profileCatalogMachine"]').value = defaults.catalogMachine;
     modalContent.querySelector('[name="profileFs"]').value = defaults.filingSystem;
     modalContent.querySelector('[name="profileTarget"]').value = defaults.targetHardware;
-    modalContent.querySelector('[name="profileHandler"]').value = defaults.handlerBuild;
+    modalContent.querySelector('[name="profileDriver"]').value = defaults.driverBuild;
     modalContent.querySelector('[name="profilePage"]').value = defaults.page;
     modalContent.querySelector('[name="profileEmulator"]').value = defaults.emulator;
     modalContent.querySelector('[name="profileDebugger"]').value = defaults.debugger;
@@ -8492,14 +8239,14 @@ function wireRecipeWorkbench(recipes) {
   const fill = recipe => {
     modalContent.querySelector('[name="recipeName"]').value = recipe.name || "";
     modalContent.querySelector('[name="recipeNaming"]').value = recipe.naming || "source";
-    modalContent.querySelector('[name="recipeGroup"]').value = recipe.groupPrefix || "DISCS";
+    modalContent.querySelector('[name="recipeGroup"]').value = recipe.groupPrefix || "DISKS";
     modalContent.querySelector('[name="recipeOnline"]').checked = recipe.online !== false;
     modalContent.querySelector('[name="recipeCompat"]').checked = recipe.compatibility !== false;
     modalContent.querySelector('[name="recipeMenu"]').checked = recipe.addMenu !== false;
   };
   modalContent.querySelectorAll("[data-recipe-index]").forEach(button => button.onclick = () => { selectedIndex = Number(button.dataset.recipeIndex); fill(recipes[selectedIndex]); });
   modalContent.querySelector("[data-save-recipe]").onclick = () => {
-    const recipe = { name: modalContent.querySelector('[name="recipeName"]').value.trim() || "Collection import", naming: modalContent.querySelector('[name="recipeNaming"]').value, groupPrefix: modalContent.querySelector('[name="recipeGroup"]').value.trim() || "DISCS", online: modalContent.querySelector('[name="recipeOnline"]').checked, compatibility: modalContent.querySelector('[name="recipeCompat"]').checked, addMenu: modalContent.querySelector('[name="recipeMenu"]').checked };
+    const recipe = { name: modalContent.querySelector('[name="recipeName"]').value.trim() || "Collection import", naming: modalContent.querySelector('[name="recipeNaming"]').value, groupPrefix: modalContent.querySelector('[name="recipeGroup"]').value.trim() || "DISKS", online: modalContent.querySelector('[name="recipeOnline"]').checked, compatibility: modalContent.querySelector('[name="recipeCompat"]').checked, addMenu: modalContent.querySelector('[name="recipeMenu"]').checked };
     recipes[selectedIndex] = recipe; saveCollection(RECIPE_STORAGE_KEY, recipes); renderWorkbench("recipes"); toast("Import recipe saved");
   };
 }
@@ -8607,13 +8354,13 @@ window.AtariDesktopHost = Object.freeze({
       : [];
     if (!selected.length) return toast("The native chooser did not return a usable image.", true);
     const allRom = selected.length > 1 && selected.every(file => formats.isRomImage(file.name));
-    const hasFfs = selected.some(file => formats.isPotentialFfsImage(file.name));
+    const hasGemdos = selected.some(file => formats.isPotentialGemdosImage(file.name));
     const equalRomSize = allRom && selected.every(file => Number(file.size) === Number(selected[0].size));
     const canInterleave = equalRomSize && [2, 4].includes(selected.length);
-    showModal(`<div class="modal-heading"><span class="modal-kicker">OPEN LOCAL MEDIA</span><h2>Review selected image${selected.length === 1 ? "" : "s"}</h2><p>The native host reads these paths directly. The same format and target-hardware decisions used by the web host are applied before a private working copy is created.</p></div>
+    showModal(`<div class="modal-heading"><span class="modal-kicker">OPEN LOCAL MEDIA</span><h2>Review selected image${selected.length === 1 ? "" : "s"}</h2><p>The native host reads these paths directly. The same format and target-media decisions used by the web host are applied before a private working copy is created.</p></div>
       <div class="folder-import-preview">${selected.map((file, order) => `<code>${order + 1}. ${esc(file.name)} · ${humanSize(file.size)}</code>`).join("")}</div>
-      ${hasFfs ? '<div class="field"><label>FFS target hardware</label><select name="targetHardware"><option value="auto">Auto / inspect only</option><option value="hardfile">UAE hardfile · HDA + GEO sidecar</option><option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option><option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option><option value="tos">Atari 3000 / 4000 · TOS hard drive</option></select><small>Used only for possible FFS images.</small></div>' : ""}
-      ${allRom ? `<div class="field"><label>Multiple ROM files</label><select name="romSetMode"><option value="separate">Open as separate ROM images</option><option value="linear">One component set · consecutive banks</option>${canInterleave ? `<option value="byte-interleaved-${selected.length}">One component set · ${selected.length}-way byte interleave</option>` : ""}</select><small>${canInterleave ? "Choose a component-set layout only when these files are physical chips from one logical ROM." : "Interleaving requires two or four equal-sized components."}</small></div><div class="field"><label>ROM platform</label><select name="romPlatform"><option value="kickstart">Kickstart ROM · A500 to A4000</option><option value="cartridge">Cartridge · CD32 / CDTV extended ROM</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>` : selected.length === 1 ? '<div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for a headerless ROM with a generic filename.</small></div>' : ""}
+      ${hasGemdos ? `<div class="field"><label>Target media</label><select name="targetHardware">${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}</select><small>Used only for an image that may hold a GEMDOS volume.</small></div>` : ""}
+      ${allRom ? `<div class="field"><label>Multiple ROM files</label><select name="romSetMode"><option value="separate">Open as separate ROM images</option><option value="linear">One component set · consecutive banks</option>${canInterleave ? `<option value="byte-interleaved-${selected.length}">One component set · ${selected.length}-way byte interleave</option>` : ""}</select><small>${canInterleave ? "Choose a component-set layout only when these files are physical chips from one logical ROM." : "Interleaving requires two or four equal-sized components."}</small></div><div class="field"><label>ROM platform</label><select name="romPlatform"><option value="tos">TOS ROM · 192 KiB, 256 KiB or 512 KiB</option><option value="cartridge">Cartridge · 128 KiB at &amp;FA0000</option><option value="custom">Custom expansion or diagnostic ROM</option></select></div>` : selected.length === 1 ? '<div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for a headerless ROM with a generic filename.</small></div>' : ""}
       <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open">Open selected image${selected.length === 1 ? "" : "s"}</button></div>`, form => {
         const targetHardware = String(form.get("targetHardware") || "auto");
         const romSetMode = String(form.get("romSetMode") || "separate");
@@ -8635,13 +8382,13 @@ window.AtariDesktopHost = Object.freeze({
           targetHardware: "auto",
           rom: {
             layout: romSetMode,
-            platform: String(form.get("romPlatform") || "kickstart"),
+            platform: String(form.get("romPlatform") || "tos"),
             componentNames: selected.map(file => file.name),
           },
         }] : selected.map((file, offset) => ({
           paths: [file.path],
           preferredPane: reservePane(offset === 0 ? preferredIndex : null),
-          targetHardware: formats.isPotentialFfsImage(file.name) ? targetHardware : "auto",
+          targetHardware: formats.isPotentialGemdosImage(file.name) ? targetHardware : "auto",
           forceKind: (allRom || (selected.length === 1 && form.get("formatOverride") === "rom")) ? "rom" : "",
         }));
         window.webkit.messageHandlers.atariDesktop.postMessage(JSON.stringify({ command: "open-plans", plans }));
@@ -8650,7 +8397,7 @@ window.AtariDesktopHost = Object.freeze({
       const profileTarget = activeWorkbenchProfile().targetHardware || "auto";
       if (targetSelect && [...targetSelect.options].some(option => option.value === profileTarget)) targetSelect.value = profileTarget;
       const platformSelect = modalContent.querySelector('[name="romPlatform"]');
-      if (platformSelect && activeWorkbenchProfile().machine === "a4000") platformSelect.value = "a4000";
+      if (platformSelect && ["tt030", "falcon030"].includes(activeWorkbenchProfile().profile?.machine)) platformSelect.value = "tos";
   },
   showOpening(name, preferredIndex = null) {
     const index = Number.isInteger(preferredIndex) && panes[preferredIndex]

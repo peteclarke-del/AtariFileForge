@@ -64,9 +64,16 @@ does:
 | Falcon030 | TOS 4.00, 4.02, 4.04 | `tos404.img`, `tos402.img`, `tos400.img` |
 
 Any language variant is accepted: `tos104de.img` is still TOS 1.04. Within
-one release the `uk` file is preferred, then `us`, then the rest in name
-order. The Falcon ROMs have no language suffix because one ROM covers every
-language.
+one release the file with no language comes first, then `uk`, then `us`, then
+the rest in name order. The Falcon ROMs have no language suffix because one
+ROM covers every language, which is why the plain name ranks first.
+
+A collection gathered from the preservation archives carries alternative
+dumps beside the good ones, so two more rules apply. A file that does not
+decode as a ROM is ignored altogether, and between two dumps of one release
+the larger is taken. Both are needed: a dump of half the expected length
+still carries a perfectly good header and reports its version happily, and
+booting one gives a machine that hangs with nothing on screen.
 
 ## How the application chooses
 
@@ -93,6 +100,27 @@ conventional place to keep such disks alongside the ROMs; it is ignored by Git
 in the same way. The application does not select boot disks automatically:
 open one as a floppy and hand it to the emulator with an EmuTOS ROM if you
 want to see it load.
+
+## Hard-disk drivers
+
+Preparing a drive so that a real Atari will boot from it needs a hard-disk
+driver, and none is bundled. Every driver worth using is somebody's copyright:
+AHDI is Atari's, ICD Pro is ICD's, and the free alternatives have outlived the
+sites that hosted them. The application therefore installs from the copy you
+already own, which is almost certainly the one already sitting on a drive you
+have.
+
+Put each driver in its own folder under `firmware/drivers/`, or under
+`~/.config/atari-file-forge/drivers`, and the application will offer it by
+name. One level of nesting is read, so a folder per driver is the shape to
+use. Both locations are ignored by Git for the same reason the ROMs are.
+
+A driver you have not supplied is still listed, marked as not supplied and
+not selectable, so the choice you cannot make is visible rather than absent.
+
+You do not need a driver at all if you are booting the drive under EmuTOS,
+which mounts a partitioned drive without one. That is the default, and it is
+the only route that needs nothing you have to find first.
 
 ## Checking a ROM
 

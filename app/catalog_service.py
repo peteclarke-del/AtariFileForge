@@ -20,12 +20,20 @@ from .errors import DiskError
 from .outbound import checked_url as outbound_checked_url, http_url as outbound_http_url
 
 
-#: The media an Atari catalogue result may offer for download. LHA and LZX
-#: are the Atari's own archivers, DMS is DiskMasher, and the rest are disk
-#: images this workbench opens directly.
+#: The media an Atari ST catalogue result may offer for download. ``.st`` is a
+#: plain sector image, ``.msa`` a Magic Shadow Archiver image, ``.stx`` a Pasti
+#: capture, ``.dim`` a FastCopy Pro image, and ``.hfe`` and ``.scp`` are the
+#: Gotek and SuperCard Pro track formats. Almost everything on an archive is
+#: served inside a ZIP, so that is accepted and unpacked after download.
 DOWNLOADABLE_MEDIA = re.compile(
-    r"\.(?:zip|lha|lzx|dms|adf|adz|hdf|hda|hfe|ipf)(?:$|[?#])", re.I
+    r"\.(?:zip|stx|msa|dim|hfe|scp|st)(?:$|[?#])", re.I
 )
+
+#: Which disk format a download is preferred in, best first. A plain sector
+#: image needs no conversion; a Pasti capture preserves protection but only
+#: some tools read it; a ZIP has to be unpacked before anything can look
+#: inside it.
+MEDIA_PRIORITY = (".st", ".msa", ".stx", ".dim", ".hfe", ".scp", ".zip")
 
 DEFAULT_SOURCES = json.loads((Path(__file__).with_name("catalog_sources.json")).read_text("utf-8"))
 
@@ -132,10 +140,10 @@ class CatalogueService:
     ) -> bytes:
         """Read a catalogue page, optionally by submitting its search form.
 
-        Some archives only search through a POST form: OS4Depot's index takes
-        an ``f_fields`` field and ignores anything in the query string. A
-        posted request is cached under a key that includes the fields, so two
-        different searches are not served each other's results.
+        Some archives only search through a POST form, ignoring anything put
+        in the query string. A posted request is cached under a key that
+        includes the submitted fields, so two different searches are never
+        served each other's results.
         """
         url = self._http_url(url)
         key = url if not form else f"{url}#" + urllib.parse.urlencode(sorted(form.items()))
@@ -205,7 +213,11 @@ class CatalogueService:
                 haystack = " ".join(str(row.get(key, "")) for key in ("title", "publisher", "description", "year")).casefold()
                 if query and query not in haystack:
                     continue
-                if not row.get("downloadable"):
+                # A reference database records what a release is, not where to
+                # get it. Such a source is marked as not direct, and its rows
+                # are kept so the search can still answer "what is this", while
+                # a direct source's unusable row is still dropped.
+                if not row.get("downloadable") and source.get("direct", True):
                     continue
                 candidates.append(row)
             if any(row.get("resolver") for row in candidates):
@@ -245,6 +257,9 @@ class CatalogueService:
             "form-post": self._load_form_post,
             "category-crawl": self._load_category_crawl,
             "machine-index": self._load_machine_index,
+            "internet-archive": self._load_internet_archive,
+            "demozoo": self._load_demozoo,
+            "directory-listing": self._load_directory_listing,
         }
         loader = loaders.get(loader_name)
         if loader is None:
@@ -271,9 +286,8 @@ class CatalogueService:
         """Search an archive whose only search is a POST form.
 
         ``formFields`` names the fields and their values, with ``{query}``
-        standing for the search text. OS4Depot is the reason this exists: its
-        index accepts nothing in the query string and answers only a posted
-        ``f_fields``.
+        standing for the search text. This exists for the archives whose index
+        accepts nothing in the query string and answers only a posted form.
         """
         options = source.get("options", {})
         url = urllib.parse.urljoin(source["url"], str(options.get("queryTemplate") or ""))
@@ -296,9 +310,11 @@ class CatalogueService:
             "function-calls": self._parse_function_calls,
             "item-rows": self._parse_item_rows,
             "zip-links": self._parse_zip_links,
-            "package-paragraphs": self._parse_package_paragraphs,
             "query-media-tiles": self._parse_query_media_tiles,
             "html-cards": self._parse_html_cards,
+            "archive-documents": self._parse_archive_documents,
+            "demozoo-productions": self._parse_demozoo_productions,
+            "database-rows": self._parse_database_rows,
             "links": self._parse_links,
         }
         parser = parsers.get(parser_name)
@@ -307,11 +323,18 @@ class CatalogueService:
         return parser(source, body, context or {})
 
     def _resolve_row(self, row: dict) -> dict | None:
+        resolver = str(row.get("resolver") or "media-links")
+        # These two ask an API for the item's file list rather than reading the
+        # page a person would see, so they choose their own address instead of
+        # fetching ``pageUrl`` first.
+        if resolver == "archive-files":
+            return self._resolve_archive_files(row)
+        if resolver == "demozoo-downloads":
+            return self._resolve_demozoo_downloads(row)
         try:
             body = self._fetch(row["pageUrl"], limit=2 * 1024 * 1024, ttl=86400).decode("utf-8", "replace")
         except DiskError:
             return None
-        resolver = str(row.get("resolver") or "media-links")
         if resolver == "upload-buttons":
             return self._resolve_upload_buttons(row, body)
         if resolver != "media-links":
@@ -337,7 +360,7 @@ class CatalogueService:
         options = row.get("resolverOptions", {})
         extensions = tuple(
             str(value).lower().lstrip(".")
-            for value in options.get("mediaExtensions", ["adf", "adz", "dms", "adf", "hfe"])
+            for value in options.get("mediaExtensions", ["st", "msa", "stx", "dim", "hfe"])
         )
         archive_terms = [str(value).casefold() for value in options.get("archiveTerms", [])]
         requests = []
@@ -364,6 +387,311 @@ class CatalogueService:
         resolved["description"] = resolved["description"].replace(" Download availability is checked when installed.", "")
         return resolved
 
+    def _load_internet_archive(self, source: dict, query: str, _machine: str) -> list[dict]:
+        """Search one Internet Archive collection through its JSON APIs.
+
+        The advanced search answers with records rather than files, so a row
+        carries its item identifier and is turned into a download address later
+        by the ``archive-files`` resolver. That keeps a search to a single
+        request instead of one per result, and the bounded resolver window
+        decides how many items are actually opened.
+        """
+        options = source.get("options", {})
+        collection = str(options.get("collection") or "").strip()
+        if not collection:
+            raise DiskError(
+                f"{source.get('name') or source['id']} has no Internet Archive collection configured."
+            )
+        terms = _index_terms(query)
+        expression = f"collection:{collection}"
+        if terms:
+            expression += f" AND (title:({terms}) OR identifier:({terms}))"
+        parameters = urllib.parse.urlencode(
+            {
+                "q": expression,
+                "fl[]": ["identifier", "title", "date", "creator"],
+                "rows": max(1, min(200, int(options.get("rows", 50)))),
+                "page": 1,
+                "output": "json",
+            },
+            doseq=True,
+        )
+        url = f"{source['url']}?{parameters}"
+        body = self._fetch(
+            url,
+            limit=max(1, int(options.get("pageLimitMb", 8))) * 1024 * 1024,
+            ttl=max(60, int(options.get("cacheSeconds", 3600))),
+        ).decode("utf-8", "replace")
+        return self._parse_rows(
+            source, body, str(options.get("parser") or "archive-documents"), {"url": url}
+        )
+
+    @staticmethod
+    def _parse_archive_documents(source: dict, body: str, _context: dict) -> list[dict]:
+        """Turn an Internet Archive advanced-search answer into catalogue rows."""
+        options = source.get("options", {})
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError) as exc:
+            raise DiskError("The Internet Archive search did not return a readable answer.") from exc
+        documents = payload.get("response", {}).get("docs", []) if isinstance(payload, dict) else []
+        metadata_template = str(options.get("metadataUrl") or "https://archive.org/metadata/{identifier}")
+        details_template = str(options.get("detailsUrl") or "https://archive.org/details/{identifier}")
+        download_template = str(options.get("downloadUrl") or "https://archive.org/download/{identifier}/{name}")
+        extensions = [
+            str(value).lower().lstrip(".")
+            for value in options.get("mediaExtensions", ["st", "msa", "stx", "dim", "zip"])
+        ]
+        rows = []
+        for document in documents:
+            if not isinstance(document, dict):
+                continue
+            identifier = str(document.get("identifier") or "").strip()
+            if not identifier:
+                continue
+            quoted = urllib.parse.quote(identifier, safe="")
+            creator = document.get("creator")
+            publisher = (
+                ", ".join(str(value) for value in creator)
+                if isinstance(creator, list) else str(creator or "")
+            )
+            entry = _item(
+                str(document.get("title") or identifier),
+                publisher,
+                # The field is a full timestamp; only the year is meaningful
+                # for a release nobody dated more precisely than the year.
+                str(document.get("date") or "")[:4],
+                None,
+                details_template.replace("{identifier}", quoted),
+                "disk-image",
+                description=f"Internet Archive item {identifier}",
+                machines=source.get("machines", []),
+                downloadable=True,
+                resolver=str(options.get("resolver") or "archive-files"),
+            )
+            entry["resolverOptions"] = {
+                "metadataUrl": metadata_template.replace("{identifier}", quoted),
+                "downloadTemplate": download_template.replace("{identifier}", quoted),
+                "mediaExtensions": extensions,
+            }
+            rows.append(entry)
+        return rows
+
+    def _resolve_archive_files(self, row: dict) -> dict | None:
+        """Ask an Internet Archive item which of its files are disk images."""
+        options = row.get("resolverOptions") or {}
+        metadata_url = str(options.get("metadataUrl") or "")
+        if not metadata_url:
+            return None
+        try:
+            payload = json.loads(
+                self._fetch(metadata_url, limit=8 * 1024 * 1024, ttl=86400).decode("utf-8", "replace")
+            )
+        except (DiskError, TypeError, ValueError):
+            return None
+        extensions = tuple(
+            f".{str(value).lower().lstrip('.')}" for value in options.get("mediaExtensions", [])
+        )
+        template = str(options.get("downloadTemplate") or "")
+        choices = []
+        for entry in payload.get("files", []) if isinstance(payload, dict) else []:
+            name = str((entry or {}).get("name") or "")
+            if not name or not extensions or not name.lower().endswith(extensions):
+                continue
+            # An item's torrent and metadata sidecars end in .xml and .torrent,
+            # so the extension filter already excludes them; a name is quoted
+            # because plenty of them contain spaces and brackets.
+            choices.append(template.replace("{name}", urllib.parse.quote(name)))
+        if not choices:
+            return None
+        resolved = dict(row)
+        resolved["downloadChoices"] = list(dict.fromkeys(choices))
+        resolved["downloadUrl"] = resolved["downloadChoices"][0]
+        resolved["artifactType"] = "disk-image"
+        return resolved
+
+    def _load_demozoo(self, source: dict, query: str, machine: str) -> list[dict]:
+        """Search Demozoo's production API across the chosen Atari platforms.
+
+        Demozoo files a production under a numbered platform: 9 is the ST and
+        STE, 58 the TT and 17 the Falcon. A search for "all machines" therefore
+        has to ask more than once and merge the answers.
+        """
+        options = source.get("options", {})
+        platforms = options.get("machinePlatforms", {})
+        platforms = platforms if isinstance(platforms, dict) else {}
+        selected = platforms.get(machine) or platforms.get("all") or []
+        try:
+            identifiers = list(dict.fromkeys(int(value) for value in selected))[:4]
+        except (TypeError, ValueError):
+            identifiers = []
+        if not identifiers:
+            return []
+        template = str(options.get("queryTemplate") or "?platform={platformId}&title={query}&format=json")
+        cache_seconds = max(60, int(options.get("cacheSeconds", 3600)))
+
+        def load(platform_id: int) -> list[dict]:
+            relative = template.replace("{platformId}", str(platform_id)).replace(
+                "{query}", urllib.parse.quote_plus(query)
+            )
+            url = urllib.parse.urljoin(source["url"], relative)
+            body = self._fetch(
+                url,
+                limit=max(1, int(options.get("pageLimitMb", 8))) * 1024 * 1024,
+                ttl=cache_seconds,
+            ).decode("utf-8", "replace")
+            return self._parse_rows(
+                source,
+                body,
+                str(options.get("parser") or "demozoo-productions"),
+                {"url": url, "machine": machine},
+            )
+
+        rows: list[dict] = []
+        with ThreadPoolExecutor(max_workers=min(4, len(identifiers))) as pool:
+            for found in pool.map(load, identifiers):
+                rows.extend(found)
+        return list({row["pageUrl"]: row for row in rows}.values())
+
+    @staticmethod
+    def _parse_demozoo_productions(source: dict, body: str, _context: dict) -> list[dict]:
+        """Turn a Demozoo production listing into catalogue rows.
+
+        The listing names the production but not its files, so each row keeps
+        the API address of its own record for the ``demozoo-downloads``
+        resolver to read. A production with no ST media behind it is dropped
+        there rather than offered and then failing on install.
+        """
+        options = source.get("options", {})
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError) as exc:
+            raise DiskError("Demozoo did not return a readable answer.") from exc
+        platforms = options.get("machinePlatforms", {})
+        machines_by_platform: dict[int, list[str]] = {}
+        if isinstance(platforms, dict):
+            for name, identifiers in platforms.items():
+                if name == "all" or not isinstance(identifiers, list):
+                    continue
+                for identifier in identifiers:
+                    try:
+                        machines_by_platform.setdefault(int(identifier), []).append(str(name))
+                    except (TypeError, ValueError):
+                        continue
+        rows = []
+        for production in payload.get("results", []) if isinstance(payload, dict) else []:
+            if not isinstance(production, dict):
+                continue
+            title = str(production.get("title") or "").strip()
+            record = str(production.get("url") or "").strip()
+            if not title or not record:
+                continue
+            authors = [
+                str((nick or {}).get("name") or "") for nick in production.get("author_nicks") or []
+            ]
+            kinds = [str((kind or {}).get("name") or "") for kind in production.get("types") or []]
+            found: set[str] = set()
+            for platform in production.get("platforms") or []:
+                try:
+                    found.update(machines_by_platform.get(int((platform or {}).get("id")), []))
+                except (TypeError, ValueError):
+                    continue
+            entry = _item(
+                title,
+                ", ".join(name for name in authors if name),
+                str(production.get("release_date") or "")[:4],
+                None,
+                str(production.get("demozoo_url") or record),
+                "disk-image",
+                description=", ".join(kind for kind in kinds if kind),
+                machines=[machine for machine in MACHINE_ORDER if machine in found]
+                or source.get("machines", []),
+                downloadable=True,
+                resolver=str(options.get("resolver") or "demozoo-downloads"),
+            )
+            entry["resolverOptions"] = {"detailUrl": record}
+            rows.append(entry)
+        return rows
+
+    def _resolve_demozoo_downloads(self, row: dict) -> dict | None:
+        """Read one Demozoo production's own record for its download links."""
+        detail_url = str((row.get("resolverOptions") or {}).get("detailUrl") or "")
+        if not detail_url:
+            return None
+        try:
+            payload = json.loads(
+                self._fetch(detail_url, limit=2 * 1024 * 1024, ttl=86400).decode("utf-8", "replace")
+            )
+        except (DiskError, TypeError, ValueError):
+            return None
+        choices = [
+            str((link or {}).get("url") or "")
+            for link in (payload.get("download_links") or [])
+            if isinstance(payload, dict) and DOWNLOADABLE_MEDIA.search(str((link or {}).get("url") or ""))
+        ]
+        if not choices:
+            return None
+        resolved = dict(row)
+        resolved["downloadChoices"] = list(dict.fromkeys(choices))
+        resolved["downloadUrl"] = resolved["downloadChoices"][0]
+        resolved["artifactType"] = "disk-image"
+        return resolved
+
+    def _load_directory_listing(self, source: dict, _query: str, _machine: str) -> list[dict]:
+        """Crawl one level of an ordinary web server directory index.
+
+        Pigwa's ST game packs are published this way: a folder for each release
+        group, each folder holding the disk images. One level is walked because
+        that is the shape of the archive, and because a recursive crawl of an
+        FTP mirror is not something a search box should be able to start.
+        """
+        cached = self._catalogues.get(source["id"])
+        if cached and cached[0] > time.time():
+            return [dict(row) for row in cached[1]]
+        options = source.get("options", {})
+        cache_seconds = max(60, int(options.get("cacheSeconds", 86400)))
+        extensions = tuple(
+            f".{str(value).lower().lstrip('.')}"
+            for value in options.get("mediaExtensions", ["zip", "st", "msa", "stx"])
+        )
+        root = source["url"]
+        index = self._fetch(root, limit=4 * 1024 * 1024, ttl=cache_seconds).decode("utf-8", "replace")
+        folders = _listing_entries(index, lambda href: href.endswith("/"))[
+            : max(1, int(options.get("maxFolders", 24)))
+        ]
+
+        def load(folder: str) -> list[dict]:
+            url = urllib.parse.urljoin(root, folder)
+            try:
+                page = self._fetch(url, limit=4 * 1024 * 1024, ttl=cache_seconds).decode(
+                    "utf-8", "replace"
+                )
+            except DiskError:
+                return []
+            label = urllib.parse.unquote(folder).strip("/")
+            return [
+                _item(
+                    Path(urllib.parse.unquote(href)).stem,
+                    label,
+                    "",
+                    urllib.parse.urljoin(url, href),
+                    url,
+                    "disk-image",
+                    description=label,
+                    machines=source.get("machines", []),
+                )
+                for href in _listing_entries(page, lambda item: item.lower().endswith(extensions))
+            ]
+
+        rows: list[dict] = []
+        threads = max(1, min(8, int(options.get("crawlThreads", 4))))
+        with ThreadPoolExecutor(max_workers=min(threads, len(folders) or 1)) as pool:
+            for found in pool.map(load, folders):
+                rows.extend(found)
+        catalogue = rows[: max(1, int(options.get("maxEntries", 4000)))]
+        self._catalogues[source["id"]] = (time.time() + cache_seconds, catalogue)
+        return [dict(row) for row in catalogue]
+
     def _load_category_crawl(self, source: dict, _query: str, _machine: str) -> list[dict]:
         cached = self._catalogues.get(source["id"])
         if cached and cached[0] > time.time():
@@ -373,7 +701,7 @@ class CatalogueService:
         categories = [dict(category) for category in options.get("categories", []) if isinstance(category, dict)]
 
         def category_pages(category):
-            label = str(category.get("name") or "Atari 600 software")
+            label = str(category.get("name") or "Atari ST software")
             root_url = urllib.parse.urljoin(source["url"], str(category.get("url") or ""))
             required_path = str(category.get("childPath") or "")
             if not required_path:
@@ -462,7 +790,7 @@ class CatalogueService:
             return []
         title_match = re.search(r'<title>(.*?)</title>', body, re.I | re.S)
         title = _plain_text(title_match.group(1)).split(" - ")[0] if title_match else Path(urllib.parse.urlparse(url).path).stem
-        return [_item(title, publisher, "", downloads[0], url, "disk-image", description=category, machines=["a600"])]
+        return [_item(title, publisher, "", downloads[0], url, "disk-image", description=category, machines=source.get("machines", []))]
 
     def _load_machine_index(self, source: dict, _query: str, machine: str) -> list[dict]:
         options = source["options"]
@@ -576,7 +904,7 @@ class CatalogueService:
     @staticmethod
     def _parse_zip_links(source: dict, body: str, _context: dict) -> list[dict]:
         pattern = re.compile(
-            r'<a\s+href=["\']?([^"\'> ]+\.(?:zip|lha|lzx|dms|adf|adz|hdf|hda|hfe|ipf))["\']?[^>]*>([^<]+)</a>'
+            r'<a\s+href=["\']?([^"\'> ]+\.(?:zip|stx|msa|dim|hfe|scp|st))["\']?[^>]*>([^<]+)</a>'
             r'\s*(?:<b>([^<]*)</b>)?',
             re.I,
         )
@@ -589,8 +917,8 @@ class CatalogueService:
         # download address that would not fetch anything.
         resolver = str(options.get("rowResolver") or "") or None
         # The resolver needs to know which links on the page are the download.
-        # A default of "/download/" suits sites that use that path; OS4Depot
-        # serves its files from /share/, so the source says so.
+        # A default of "/download/" suits sites that use that path; a site that
+        # serves its files from somewhere else says so in its own settings.
         resolver_options = options.get("resolverOptions") if isinstance(options.get("resolverOptions"), dict) else {}
         rows, seen = [], set()
         for url, code, title in pattern.findall(body):
@@ -614,17 +942,49 @@ class CatalogueService:
         return rows
 
     @staticmethod
-    def _parse_package_paragraphs(source: dict, body: str, _context: dict) -> list[dict]:
-        rows = []
-        for paragraph in re.split(r"\r?\n\r?\n", body):
-            fields = {}
-            for line in paragraph.splitlines():
-                if ": " in line:
-                    key, value = line.split(": ", 1); fields[key] = value
-            if not fields.get("Package") or not fields.get("URL"):
+    def _parse_database_rows(source: dict, body: str, context: dict) -> list[dict]:
+        """Read a reference database's results where each row carries its facts.
+
+        Atarimania writes a result as one anchor holding two spans: the title
+        with a machine badge beside it, and a details line reading
+        "genre · publisher · country · year". Reading the whole anchor as text
+        would put every one of those in the title, so the spans are read apart.
+
+        Such a database records what a release is, not where to get it, so the
+        rows are marked as references rather than as downloads.
+        """
+        options = source.get("options", {})
+        base = str((context or {}).get("url") or source.get("url") or "")
+        try:
+            pattern = re.compile(str(options.get("linkPattern")), re.I) if options.get("linkPattern") else None
+        except re.error:
+            pattern = None
+        separator = str(options.get("detailSeparator") or "·")
+        rows, seen = [], set()
+        for href, inner in re.findall(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', body, re.I | re.S):
+            page = urllib.parse.urljoin(base, html.unescape(href))
+            if (pattern and not pattern.search(page)) or page in seen:
                 continue
-            rows.append(_item(fields.get("Package"), fields.get("Maintainer", ""), "", urllib.parse.urljoin(source["url"], fields["URL"]), source["url"], "tos-package", description=fields.get("Description", ""), machines=source.get("machines", []), version=fields.get("Version", "")))
-        return rows
+            spans = re.findall(r"<span[^>]*>(.*?)</span>", inner, re.I | re.S)
+            # The badge is a span nested inside the title span, so the title is
+            # what comes before it rather than the whole of the first span.
+            title = _plain_text(re.split(r"<span", spans[0], maxsplit=1)[0]) if spans else _plain_text(inner)
+            if len(title) < 2:
+                continue
+            seen.add(page)
+            details = _plain_text(spans[-1]) if len(spans) > 1 else ""
+            fields = [part.strip() for part in details.split(separator) if part.strip()]
+            publisher = fields[1] if len(fields) > 1 else ""
+            # A release nobody has attributed is spelled out rather than left
+            # blank, and a row with no country puts the year in this position.
+            if re.fullmatch(r"(?:19|20)\d{2}", publisher) or publisher.casefold() == "[no publisher]":
+                publisher = ""
+            year = re.search(r"\b(?:19|20)\d{2}\b", details)
+            rows.append(_item(
+                title, publisher, year.group(0) if year else "", None, page, "external",
+                description=details, machines=source.get("machines", []), downloadable=False,
+            ))
+        return rows[:300]
 
     @staticmethod
     def _parse_query_media_tiles(source: dict, body: str, context: dict) -> list[dict]:
@@ -678,11 +1038,11 @@ class CatalogueService:
     def _parse_links(source: dict, body: str, _context: dict) -> list[dict]:
         """Collect the result links on a catalogue's search page.
 
-        A site writes its own results as relative hrefs -- Lemon Atari links a
-        game as ``/game/defender`` -- so matching only ``https://`` finds the
-        outbound links in the page furniture and none of the results. Each href
-        is resolved against the page it came from before anything else looks at
-        it.
+        A site writes its own results as relative hrefs -- Atarimania links a
+        game as ``/games/atari-st-games-oids-10116`` -- so matching only
+        ``https://`` finds the outbound links in the page furniture and none of
+        the results. Each href is resolved against the page it came from before
+        anything else looks at it.
 
         ``linkPattern`` is how a source says which of its links are results. A
         search page also carries navigation, help and social links, and without
@@ -738,7 +1098,7 @@ class CatalogueService:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def download(self, token: str, preferred: str = "ofs") -> tuple[str, bytes, dict]:
+    def download(self, token: str, preferred: str = ".st") -> tuple[str, bytes, dict]:
         item = self.item(token)
         requests = item.get("downloadRequests") or []
         if requests:
@@ -755,11 +1115,20 @@ class CatalogueService:
         return name, self._fetch(url, ttl=60, limit=128 * 1024 * 1024), item
 
     @staticmethod
-    def _download_score(value: str, preferred: str) -> tuple[bool, bool]:
-        lowered = urllib.parse.urlparse(value).path.casefold()
-        ofs_hint = any(hint in lowered for hint in ("/ofs/", "5_25", ".adf", ".adz"))
-        ffs_hint = any(hint in lowered for hint in ("/ffs/", "3_5", ".adf"))
-        return (ffs_hint if preferred == "ffs" else ofs_hint, not (ofs_hint or ffs_hint))
+    def _download_score(value: str, preferred: str) -> tuple[int, int]:
+        """Rank one download address so ``max`` picks the best disk format.
+
+        An item is often published two or three ways over: a plain sector
+        image, the same disk as an MSA, and a ZIP holding both. Preferring the
+        image the workshop opens directly saves unpacking or converting one,
+        and the caller can name the format it would rather have.
+        """
+        suffix = Path(urllib.parse.urlparse(str(value)).path).suffix.casefold()
+        wanted = str(preferred or "").casefold()
+        if wanted and not wanted.startswith("."):
+            wanted = f".{wanted}"
+        rank = MEDIA_PRIORITY.index(suffix) if suffix in MEDIA_PRIORITY else len(MEDIA_PRIORITY)
+        return (1 if wanted and suffix == wanted else 0, len(MEDIA_PRIORITY) - rank)
 
     @staticmethod
     def _generated_download_url(url: str) -> str:
@@ -779,39 +1148,85 @@ class CatalogueService:
         )
 
 
-#: Every machine identifier, in the order the workbench lists them.
-MACHINE_ORDER = ("a500", "a500plus", "a600", "a1200", "a2000", "a3000", "a4000", "cd32")
+#: Every machine identifier, in the order the application lists them.
+MACHINE_ORDER = ("st", "megast", "ste", "megaste", "tt030", "falcon030")
 
-#: How a catalogue's compatibility prose names a machine. A chipset name is
-#: the usual form on an Atari database, because software is written for OCS,
-#: ECS or AGA rather than for one model.
-COMPATIBILITY_TOKENS = (
-    ("cd32", ("cd32",)),
-    ("a4000", ("a4000",)),
-    ("a3000", ("a3000",)),
-    ("a2000", ("a2000",)),
-    ("a1200", ("a1200",)),
-    ("a600", ("a600",)),
-    ("«plus500»", ("a500plus",)),
-    ("a500", ("a500",)),
-    ("aga", ("a1200", "a4000", "cd32")),
-    ("ecs", ("a500plus", "a600", "a3000")),
-    ("ocs", ("a500", "a2000")),
-)
+#: How a catalogue's compatibility prose names a machine. A model name is the
+#: usual form on an ST database, because software is written for a model family
+#: rather than for a chipset. The mapping is deliberately not symmetrical: a
+#: plain ST release runs on every one of these, while an STE release does not
+#: run on a plain ST, so it is only filed under the machines that can load it.
+COMPATIBILITY_TOKENS = {
+    "st": ("st", "megast", "ste", "megaste"),
+    "stf": ("st", "megast", "ste", "megaste"),
+    "stm": ("st", "megast", "ste", "megaste"),
+    "stfm": ("st", "megast", "ste", "megaste"),
+    "260st": ("st",),
+    "520st": ("st",),
+    "520stfm": ("st",),
+    "1040st": ("st",),
+    "1040stf": ("st",),
+    "1040ste": ("ste",),
+    "ste": ("ste", "megaste"),
+    "stez": ("ste", "megaste"),
+    "megast": ("megast",),
+    "megaste": ("megaste",),
+    "tt": ("tt030",),
+    "tt030": ("tt030",),
+    "falcon": ("falcon030",),
+    "falcon030": ("falcon030",),
+    "f030": ("falcon030",),
+}
 
 
 def _machines_from_compatibility(value: str, fallback: list[str]) -> list[str]:
-    """Translate catalogue compatibility prose into stable machine filters."""
-    compact = re.sub(r"[\s.]+", "", str(value)).casefold().replace("atari", "a")
-    # "A500+" contains "A500", so the plus is folded to its own token before
-    # anything is matched and the bare model can no longer match inside it.
-    compact = re.sub(r"a500(?:\+|plus)", "«plus500»", compact)
+    """Translate catalogue compatibility prose into stable machine filters.
+
+    Matching whole words rather than substrings is what keeps "Mega STE" out
+    of the plain ST bucket, because "megaste" contains both "megast" and "st".
+    A pair of adjacent words is tried before the second word on its own, since
+    a catalogue writes the two-word models with the space in.
+    """
+    words = re.findall(r"[a-z0-9]+", str(value).casefold())
     found: set[str] = set()
-    for token, machines in COMPATIBILITY_TOKENS:
-        if token in compact:
-            found.update(machines)
+    for index, word in enumerate(words):
+        if word == "atari":
+            continue
+        joined = f"{words[index - 1]}{word}" if index else ""
+        for candidate in (joined, word):
+            if candidate in COMPATIBILITY_TOKENS:
+                found.update(COMPATIBILITY_TOKENS[candidate])
+                break
     ordered = [machine for machine in MACHINE_ORDER if machine in found]
     return ordered or list(fallback)
+
+
+def _index_terms(query: str) -> str:
+    """Reduce a search box to terms a remote index query can carry safely.
+
+    An index query is a language of its own: quotes, colons, brackets and
+    boolean words all mean something to it. Passing a person's typing through
+    unaltered turns a search for "Oids (a:b)" into a syntax error at best.
+    Keeping only word characters cannot express anything but words.
+    """
+    return " ".join(re.findall(r"[A-Za-z0-9]+", str(query or ""))[:8])
+
+
+def _listing_entries(body: str, accept) -> list[str]:
+    """The entries of a web server directory index, in the order listed.
+
+    Such a page also carries its column-sort links, a link to the parent
+    directory, and whatever the operator wrote in the banner. Only a relative
+    href that stays inside the folder being read is an entry in it.
+    """
+    found: list[str] = []
+    for href in re.findall(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\']', body, re.I):
+        value = html.unescape(href)
+        if value.startswith(("?", "/", "#", "..")) or "://" in value:
+            continue
+        if accept(value) and value not in found:
+            found.append(value)
+    return found
 
 
 def _item(title, publisher, year, download, page, artifact, *, description="", machines=None, downloadable=True, version="", resolver=None):

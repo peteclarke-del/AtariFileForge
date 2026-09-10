@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import re
 
+from . import atari_paths
+
 
 EDITOR_PROJECT_FORMAT = "atari-file-forge-editor-project-1"
 REGION_KINDS = {"code", "text", "bytes", "words", "addresses", "bitmap"}
 
 
 def editor_project_key(path: str, side: int | None) -> str:
-    """Identify one editor annotation set by the view it was made in."""
-    return f"{side if side is not None else '-'}|{path}"
+    """Identify one editor annotation set by the view it was made in.
+
+    The path is canonicalised first. A client may spell an inner path with
+    either separator, and an annotation has to be found again whichever one
+    it was stored under.
+    """
+    return f"{side if side is not None else '-'}|{atari_paths.normalise(path)}"
 
 
 def _number(value: object, default: int = 0) -> int:

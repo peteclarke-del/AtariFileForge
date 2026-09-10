@@ -65,35 +65,16 @@ from ..file_editor import (
     verify_basic_source,
     encode_editor_replacement,
 )
-from ..fat_media import FatMediaError, build_hdf_card
+from ..fat_media import FatMediaError, build_image_card
 from ..operations import OperationRegistry
 from ..platform_contract import PlatformRuntime
 from ..workflow_recipe import build_workflow_recipe_bundle
-from ..dms import DMSError, dms_project
+from ..msa import MSAError, msa_project
+from ..dim import DIMError, dim_project
 from ..metadata_lookup import lookup_online, parse_distribution_filename
-from .common import apply_partition, optional_int, payload, protection_field
+from .common import apply_partition, attributes_field, optional_int, payload
+from ..filename_policy import session_name_policy
 from .. import atari_paths
-
-
-#: The stack GEMDOS gives a shell command when nothing sets one, and the
-#: range a Stack command may sensibly ask for.
-DEFAULT_STACK = 4096
-MIN_STACK = 1024
-MAX_STACK = 262144
-
-
-def _stack_bytes(value: object) -> int:
-    """Return the stack a test disk should set, as a decimal byte count.
-
-    GEMDOS ``Stack`` takes a byte count, so anything outside the range a real
-    machine accepts falls back to the shell default rather than being written
-    into a boot script that would then fail.
-    """
-    try:
-        number = int(str(value or "").strip() or DEFAULT_STACK)
-    except ValueError:
-        return DEFAULT_STACK
-    return number if MIN_STACK <= number <= MAX_STACK else DEFAULT_STACK
 
 
 def run_emulator_process(arguments: list[str], cwd: str, timeout: int):
@@ -284,8 +265,34 @@ def create_tools_blueprint(
         project["tests"] = [*project.get("tests", []), stored][-100:]
         return service.save_editor_project(session, path, side, project)
 
+    #: What an isolated BASIC test disk says instead of pretending to boot.
+    #:
+    #: A tokenised BASIC program is not a program TOS can start: it is a file
+    #: an interpreter loads. ST BASIC shipped with the machine and every other
+    #: dialect was bought separately, and none of them may be redistributed
+    #: here, so the disk carries the program, a plain statement of what it
+    #: needs, and no pretence that it will run on its own.
+    BASIC_NOTE = (
+        "This disk was written by Atari File Forge to test one BASIC program in\r\n"
+        "isolation. It holds the program and nothing else.\r\n"
+        "\r\n"
+        "A tokenised BASIC program is loaded by an interpreter rather than run by\r\n"
+        "TOS. Atari File Forge cannot supply one: ST BASIC came with the machine\r\n"
+        "and the other dialects were sold separately, and none of them may be\r\n"
+        "redistributed. Put your own interpreter on this disk, or in drive B:,\r\n"
+        "start it on the machine and load the program from A:.\r\n"
+    )
+
     @contextmanager
     def isolated_basic_media(session, configured, data: dict):
+        """Build a blank ST floppy holding one BASIC program and nothing else.
+
+        The point of an isolated run is that nothing on the original disk can
+        affect the result, so the test disk is a freshly formatted 720K floppy
+        with the program under test on it. It is left unbootable on purpose:
+        making the boot sector executable would say the machine can start from
+        it, and a disk holding a BASIC program cannot start anything.
+        """
         path = str(data.get("path") or "")
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
@@ -297,28 +304,25 @@ def create_tools_blueprint(
         original = service.read_file(session, path, side)
         source = data.get("source")
         content = encode_editor_replacement(original, str(source), True) if isinstance(source, str) else original
-        profile = configured.hardware_profile or {}
-        filing_system = str(profile.get("filingSystem") or "ofs").lower()
-        disk_format = "ffs" if "ffs" in filing_system else "adf"
-        scratch = service.create_blank(disk_format, "Editor", target_hardware=str(configured.target_hardware or "auto"))
-        stack = _stack_bytes(profile.get("stack"))
+        scratch = service.create_blank(
+            "ds-720k", "TEST", target_hardware=str(configured.target_hardware or "auto")
+        )
+        leaf = session_name_policy(scratch).normalise(
+            atari_paths.leaf(path) or "PROGRAM.BAS", fallback="PROGRAM"
+        )
         try:
             with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="editor-basic-", delete=False) as program_file:
                 program_file.write(content)
                 program_path = Path(program_file.name)
-            with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="editor-boot-", delete=False) as boot_file:
-                # A test disk boots straight into the program under test, with
-                # the stack the pane's hardware profile asks for.
-                boot_file.write(f"Stack {stack}\nST BASIC Program\n".encode("latin-1"))
-                boot_path = Path(boot_file.name)
+            with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="editor-note-", delete=False) as note_file:
+                note_file.write(BASIC_NOTE.encode("latin-1"))
+                note_path = Path(note_file.name)
             try:
-                service.put(scratch, "Program", program_path)
-                service.make_directory(scratch, "S")
-                service.put(scratch, "S/Startup-Sequence", boot_path)
-                service._run(["opt", str(scratch.path), "3"])
+                service.put(scratch, leaf, program_path)
+                service.put(scratch, "READ.ME", note_path)
             finally:
                 program_path.unlink(missing_ok=True)
-                boot_path.unlink(missing_ok=True)
+                note_path.unlink(missing_ok=True)
             yield scratch.path
         finally:
             service.discard_session(scratch)
@@ -326,7 +330,7 @@ def create_tools_blueprint(
     @contextmanager
     def whole_drive_media(session, configured):
         """Expose the complete hard drive to the emulator as one attached drive."""
-        if session.kind != "hdf":
+        if session.kind != "hd":
             raise DiskError("A whole-drive launch requires a hard-drive image.")
         temporary = tempfile.NamedTemporaryFile(
             dir=service.work_dir, prefix="hdf-card-", suffix=".img", delete=False,
@@ -336,7 +340,7 @@ def create_tools_blueprint(
         launch = copy(configured)
         launch.emulator_media_kind = "whole-drive"
         try:
-            build_hdf_card(session.path, path)
+            build_image_card(session.path, path)
             yield launch, path
         except FatMediaError as exc:
             raise DiskError(str(exc)) from exc
@@ -345,7 +349,7 @@ def create_tools_blueprint(
 
     def selected_media_probe(session, configured, *, debug: bool = False):
         """Build a command for a target without extracting or changing its bytes."""
-        if getattr(session, "kind", "") == "hdf":
+        if getattr(session, "kind", "") == "hd":
             probe = copy(configured)
             probe.emulator_media_kind = "whole-drive"
             return emulator_command(probe, Path("selected-hard-drive.img"), debug=debug)
@@ -368,7 +372,7 @@ def create_tools_blueprint(
         launch.hardware_profile = dict(configured.hardware_profile or {})
         launch.hardware_profile["emulatorBoot"] = "boot" if mode.endswith("auto") else "catalogue"
 
-        if getattr(session, "kind", "") == "hdf":
+        if getattr(session, "kind", "") == "hd":
             return whole_drive_media(session, launch)
 
         @contextmanager
@@ -468,34 +472,36 @@ def create_tools_blueprint(
             report = health_report(service, service.get(image_id), progress)
             return jsonify(report)
 
-    @blueprint.get("/api/images/<image_id>/ffs-installations/audit")
-    def audit_ffs_installations(image_id):
+    @blueprint.get("/api/images/<image_id>/drive-software/audit")
+    def audit_drive_software(image_id):
         session = service.get(image_id)
+        apply_partition(service, session, request.args.get("partition"))
         operation_id = request.args.get("operationId")
-        root = str(request.args.get("root") or "$")
+        root = str(request.args.get("root") or "")
         with operations.tracked(
             operation_id,
-            "Finding installed FFS software",
-            "Installed FFS software audit complete",
+            "Finding installed drive software",
+            "Installed drive-software audit complete",
         ) as progress:
-            result = service.audit_ffs_installations(session, root, progress)
+            result = service.audit_drive_software(session, root, progress)
             return jsonify(result)
 
-    @blueprint.post("/api/images/<image_id>/ffs-installations/repair")
-    @image_mutation("repairing installed FFS software")
-    def repair_ffs_installations(image_id):
+    @blueprint.post("/api/images/<image_id>/drive-software/repair")
+    @image_mutation("repairing installed drive software")
+    def repair_drive_software(image_id):
         session = service.get(image_id)
         data = payload()
+        apply_partition(service, session, data.get("partition"))
         operation_id = data.get("operationId")
         directories = data.get("directories")
         if not isinstance(directories, list):
-            raise DiskError("Choose the installed disk directories to repair.")
+            raise DiskError("Choose the installed software folders to repair.")
         with operations.tracked(
             operation_id,
-            "Rechecking proposed FFS repairs",
-            "Installed FFS software repair complete",
+            "Rechecking the proposed drive-software repairs",
+            "Installed drive-software repair complete",
         ) as progress:
-            result = service.repair_ffs_installations(session, directories, progress)
+            result = service.repair_drive_software(session, directories, progress)
             return jsonify(image=service.summary(session), repair=result)
 
     @blueprint.get("/api/images/<image_id>/manifest")
@@ -684,14 +690,19 @@ def create_tools_blueprint(
             optional_int(request.args.get("side")),
         ))
 
-    @blueprint.get("/api/images/<image_id>/dms-project")
-    def inspect_dms_project(image_id):
+    @blueprint.get("/api/images/<image_id>/container-project")
+    def inspect_container_project(image_id):
         session = service.get(image_id)
-        if session.kind != "dms":
-            raise DiskError("The dms project view is available only for DMS images.")
+        if session.kind not in {"msa", "dim"}:
+            raise DiskError(
+                "The container project view is available only for MSA and DIM images."
+            )
+        data = session.path.read_bytes()
         try:
-            return jsonify(dms_project(session.path.read_bytes()))
-        except DMSError as exc:
+            if session.kind == "msa":
+                return jsonify(msa_project(data))
+            return jsonify(dim_project(data))
+        except (MSAError, DIMError) as exc:
             raise DiskError(str(exc)) from exc
 
     @blueprint.get("/api/images/<image_id>/dependencies")
@@ -884,26 +895,27 @@ def create_tools_blueprint(
         )
         return jsonify(image=image, path=path, inspection=inspect_editable_file(service, session, path, side))
 
-    @blueprint.post("/api/images/<image_id>/inspect/dms-rebuild-preview")
-    @request_effect("read-only", "proving a DMS DMS track rebuild")
-    def preview_dms_member_rebuild(image_id):
+    @blueprint.post("/api/images/<image_id>/inspect/container-rebuild-preview")
+    @request_effect("read-only", "proving a track rebuild inside a disk container")
+    def preview_container_member_rebuild(image_id):
+        """Say whether one track of a container can be rewritten in place.
+
+        MSA and DIM are plain sectors under a header, so a complete track can
+        be rebuilt by converting to a sector image, editing and converting
+        back. A Pasti capture never can: it records a physical read that no
+        edit can be proved against.
+        """
         data = payload()
         session = service.get(image_id)
-        if session.kind != "dms":
-            raise DiskError("This structural comparison is only used by DMS archive projects.")
+        if session.kind not in {"msa", "dim", "stx"}:
+            raise DiskError(
+                "This structural comparison is only used by MSA, DIM and Pasti "
+                "container projects."
+            )
         path = str(data.get("path") or "")
-        apply_partition(service, session, data.get("partition"))
-        side = optional_int(data.get("side"))
-        current = inspect_editable_file(service, session, path, side)
-        if not current["editable"] or current["readOnly"]:
-            raise DiskError("This DMS member does not have a complete reconstruction proof.")
-        if str(data.get("sha256") or "") != current["sha256"]:
-            raise DiskError("The DMS member changed after the editor opened it. Reopen it before reviewing the rebuild.")
-        original = service.read_file(session, path, side)
-        replacement = encode_editor_replacement(
-            original, str(data.get("text") or ""), bool(current["tokenisedBasic"]),
-        )
-        return jsonify(service.preview_dms_member_replacement(session, path, replacement))
+        if not path:
+            raise DiskError("Choose a track to inspect before reviewing its rebuild.")
+        return jsonify(service.container_member_editability(session, path))
 
     @blueprint.put("/api/images/<image_id>/inspect/properties")
     @image_mutation("editing file properties")
@@ -913,14 +925,13 @@ def create_tools_blueprint(
         path = str(data.get("path") or "")
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
-        if not path or session.kind in {"rom", "dms"} or session.hfe_read_only:
+        if not path or session.kind in {"rom", "msa", "dim", "stx"} or session.hfe_read_only:
             raise DiskError("This file's catalogue properties cannot be changed in the current image.")
         image = update_file_properties(
             service, session, path, side, str(data.get("sha256") or ""),
-            protection=protection_field(data.get("protection")) or "",
-            comment=str(data.get("comment") or ""),
-            filetype=str(data.get("filetype") or ""),
+            protection=attributes_field(data.get("attributes")) or "",
             writable=bool(data.get("writable", True)),
+            datestamp=str(data.get("datestamp") or "") or None,
         )
         return jsonify(image=image, inspection=inspect_editable_file(service, session, path, side))
 
@@ -934,20 +945,29 @@ def create_tools_blueprint(
             step = int(data.get("step", 10))
         except (TypeError, ValueError) as exc:
             raise DiskError("The BASIC start and step must be whole numbers.") from exc
-        return jsonify(prepare_basic_source(str(data.get("text") or ""), start, step))
+        return jsonify(prepare_basic_source(
+            str(data.get("text") or ""), start, step, data.get("dialect"),
+        ))
 
     @blueprint.post("/api/images/<image_id>/inspect/basic/normalise")
     @request_effect("read-only", "normalising BASIC source for review")
     def normalise_basic(image_id):
         service.get(image_id)
-        return jsonify(normalise_basic_source(str(payload().get("text") or "")))
+        data = payload()
+        return jsonify(
+            normalise_basic_source(str(data.get("text") or ""), data.get("dialect"))
+        )
 
     @blueprint.post("/api/images/<image_id>/inspect/basic/verify")
     @request_effect("read-only", "verifying BASIC source")
     def verify_basic(image_id):
         service.get(image_id)
         data = payload()
-        return jsonify(verify_basic_source(str(data.get("text") or ""), str(data.get("baseline") or "")))
+        return jsonify(verify_basic_source(
+            str(data.get("text") or ""),
+            str(data.get("baseline") or ""),
+            data.get("dialect"),
+        ))
 
     @blueprint.get("/api/images/<image_id>/editor-project")
     def editor_project(image_id):
@@ -988,7 +1008,7 @@ def create_tools_blueprint(
             status["command"] = ""
             parent_message = str(exc)
         is_basic = str(request.args.get("basic") or "false").lower() in {"1", "true", "yes"}
-        isolated_basic = bool(is_basic and status["machine"] != "a4000" and status["available"])
+        isolated_basic = bool(is_basic and status["available"])
         if not parent_mountable and not isolated_basic:
             status["available"] = False
             status["message"] = parent_message or status["message"]
@@ -997,11 +1017,11 @@ def create_tools_blueprint(
             parentMountable=parent_mountable, parentMessage=parent_message,
             isolatedBasic=isolated_basic,
             mediaTarget=(
-                "whole-drive" if getattr(session, "kind", "") == "hdf" else "image"
+                "whole-drive" if getattr(session, "kind", "") == "hd" else "image"
             ),
             targetLabel=(
-                f"complete hard drive · {getattr(session, 'name', 'drive.hdf')}"
-                if getattr(session, "kind", "") == "hdf"
+                f"complete hard drive · {getattr(session, 'name', 'drive.img')}"
+                if getattr(session, "kind", "") == "hd"
                 else getattr(session, "name", "Current image")
             ),
         )
@@ -1010,7 +1030,7 @@ def create_tools_blueprint(
     @request_effect("external", "booting a hard drive in an emulator sandbox")
     def drive_sandbox(image_id):
         session = service.get(image_id)
-        if session.kind != "hdf":
+        if session.kind != "hd":
             raise DiskError("The isolated sandbox requires a complete hard-drive image.")
         data = payload()
         configured = requested_emulator_session(session, data)
@@ -1069,7 +1089,7 @@ def create_tools_blueprint(
         session = service.get(image_id)
         data = payload()
         configured = requested_emulator_session(session, data)
-        path = str(data.get("path") or ("drive" if session.kind == "hdf" else ""))
+        path = str(data.get("path") or ("drive" if session.kind == "hd" else ""))
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
         if bool(data.get("interactive")):
@@ -1131,37 +1151,37 @@ def create_tools_blueprint(
         return jsonify(stopped=True)
 
     @blueprint.post("/api/images/<image_id>/install/emulator")
-    @request_effect("external", "booting a drive with a disc to run its own installer")
+    @request_effect("external", "booting a drive with a disk to run its own installer")
     def install_under_emulation(image_id):
-        """Boot this hard drive with a title's discs already in the drives.
+        """Boot this hard drive with a title's disks already in the drives.
 
         Some software can only be installed by its own installer: it asks
-        which drawer, which language, which screen mode, and no tool can
+        which folder, which language, which screen mode, and no tool can
         answer those for somebody else. So this mode stops trying. It puts the
         machine in the state the installer needs and hands the operator the
         keyboard.
 
         The drive is handed over as a whole-drive image, the same way a
         hard-drive launch already works, so the installer sees the partitions
-        and the Workbench the operator actually built.
+        and the desktop the operator actually built.
         """
         session = service.get(image_id)
-        if session.kind != "hdf" and not service.summary(session).get("hardDisk"):
+        if session.kind != "hd" and not service.summary(session).get("hardDisk"):
             raise DiskError("Running an installer needs a hard-drive image to install onto.")
         data = payload()
         configured = requested_emulator_session(session, data)
-        discs = [service.get(str(item)) for item in (data.get("discs") or [])]
+        discs = [service.get(str(item)) for item in (data.get("disks") or [])]
         if not discs:
-            raise DiskError("Choose at least one disc for the installer to read.")
+            raise DiskError("Choose at least one disk for the installer to read.")
         if len(discs) > MAXIMUM_FLOPPY_DRIVES:
             raise DiskError(
                 f"An Atari has {MAXIMUM_FLOPPY_DRIVES} floppy drives. "
-                f"Insert up to {MAXIMUM_FLOPPY_DRIVES} discs and swap the rest as the installer asks."
+                f"Insert up to {MAXIMUM_FLOPPY_DRIVES} disks and swap the rest as the installer asks."
             )
         launch = copy(configured)
         launch.hardware_profile = dict(configured.hardware_profile or {})
-        # The installer is on the hard drive's Workbench, not on the disc, so
-        # the machine must boot the drive rather than the disc in DF0:.
+        # The installer is on the hard drive, not on the disk in A:, so the
+        # machine must boot the drive rather than the floppy.
         launch.hardware_profile["emulatorBoot"] = "boot"
         try:
             arguments, started = interactive_emulator.start(
@@ -1178,76 +1198,11 @@ def create_tools_blueprint(
             "interactive": True,
             "emulator": emulator.label,
             "machine": str(started.hardware_profile.get("machine") or ""),
-            "discs": [disc.name for disc in discs],
+            "disks": [disc.name for disc in discs],
             "summary": (
-                f"{emulator.label} is running with {len(discs)} disc"
+                f"{emulator.label} is running with {len(discs)} disk"
                 f"{'' if len(discs) == 1 else 's'} inserted. "
-                "Run the title's installer from the Workbench and point it at this drive."
-            ),
-            "displayMode": "native" if runtime.kind == "desktop" else "browser",
-            **({} if runtime.kind == "desktop" else {"viewerPort": 8668}),
-        })
-
-    @blueprint.post("/api/images/<image_id>/install/tos-cd")
-    @image_mutation("activating the CD driver and booting with a release CD")
-    def install_tos_cd(image_id):
-        """Boot this drive with the TOS release CD in the CD drive.
-
-        The installation is Commodore's work, not this application's. TOS
-        3.5 and 3.9 are installed by a script on the disc that reads the
-        versions the live system has loaded, asks a great many questions and
-        patches an existing installation in place. It says of itself that
-        pretend mode cannot be used with it, so there is no unattended path
-        and pretending otherwise would produce a drive that does not boot.
-
-        What can be done from here is everything up to that point: check the
-        disc, the processor and the drive, then put the machine in the state
-        the script needs and hand over the keyboard.
-        """
-        session = service.get(image_id)
-        data = payload()
-        apply_partition(service, session, data.get("partition"))
-        disc = service.get(str(data["disc"]))
-        checked = service.tos_cd_preflight(session, disc)
-        if not checked["ready"]:
-            raise DiskError(checked["blocking"][0])
-        # A stock Workbench 3.1 drive has the CD filing system in L: and the
-        # CD0 mountlist parked in Storage, which GEMDOS does not read, so the
-        # machine would boot and see no disc at all. Switching it on is a write
-        # to the image, which is why this route declares itself a mutation and
-        # takes an undo checkpoint before it runs.
-        driver = service.activate_cd_driver(session)
-        configured = requested_emulator_session(session, data)
-        launch = copy(configured)
-        launch.hardware_profile = dict(configured.hardware_profile or {})
-        # The installer is reached from the Workbench already on the drive, so
-        # the machine boots the drive and finds the disc waiting in the CD
-        # drive, exactly as it would with the CD in a real machine.
-        launch.hardware_profile["emulatorBoot"] = "boot"
-        try:
-            arguments, started = interactive_emulator.start(
-                whole_drive_media(session, launch),
-                debug=False,
-                cdroms=[disc.path],
-            )
-        except (ValueError, OSError, subprocess.SubprocessError) as exc:
-            raise DiskError(f"The emulator could not start: {exc}") from exc
-        emulator = configured_emulator(started)
-        release = checked["disc"]
-        return jsonify(result={
-            "time": datetime.now(timezone.utc).isoformat(),
-            "command": arguments[0],
-            "interactive": True,
-            "emulator": emulator.label,
-            "machine": str(started.hardware_profile.get("machine") or ""),
-            "release": release.get("label", ""),
-            "disc": disc.name,
-            "cdDriver": driver,
-            "warnings": checked.get("warnings", []),
-            "summary": (
-                f"{emulator.label} is running with {release.get('label', 'the disc')} "
-                f"in the CD drive as CD0:. Open the disc on the Workbench and run its "
-                f"installation icon; it will ask where to install and what to include."
+                "Run the title's installer from the desktop and point it at this drive."
             ),
             "displayMode": "native" if runtime.kind == "desktop" else "browser",
             **({} if runtime.kind == "desktop" else {"viewerPort": 8668}),
@@ -1334,7 +1289,7 @@ def create_tools_blueprint(
             command = []
             parent_message = str(exc)
         is_basic = str(request.args.get("basic") or "false").lower() in {"1", "true", "yes"}
-        isolated_basic = bool(is_basic and status["machine"] != "a4000" and status["available"])
+        isolated_basic = bool(is_basic and status["available"])
         available = bool(status["available"] and (parent_mountable or isolated_basic))
         return jsonify(
             available=available,
@@ -1345,11 +1300,11 @@ def create_tools_blueprint(
             parentMountable=parent_mountable, parentMessage=parent_message,
             isolatedBasic=isolated_basic, actions=["launch"] if available else [],
             mediaTarget=(
-                "whole-drive" if getattr(session, "kind", "") == "hdf" else "image"
+                "whole-drive" if getattr(session, "kind", "") == "hd" else "image"
             ),
             targetLabel=(
-                f"complete hard drive · {getattr(session, 'name', 'drive.hdf')}"
-                if getattr(session, "kind", "") == "hdf"
+                f"complete hard drive · {getattr(session, 'name', 'drive.img')}"
+                if getattr(session, "kind", "") == "hd"
                 else getattr(session, "name", "Current image")
             ),
         )
@@ -1360,7 +1315,7 @@ def create_tools_blueprint(
         session = service.get(image_id)
         data = payload()
         configured = requested_emulator_session(session, data)
-        path = str(data.get("path") or ("drive" if session.kind == "hdf" else ""))
+        path = str(data.get("path") or ("drive" if session.kind == "hd" else ""))
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
         action = str(data.get("action") or "launch").strip().lower()
@@ -1430,7 +1385,7 @@ def create_tools_blueprint(
         runs = data.get("runs")
         if not isinstance(runs, list):
             raise DiskError("BASIC packing requires a list of safe statement runs.")
-        return jsonify(pack_basic_lines(runs))
+        return jsonify(pack_basic_lines(runs, data.get("dialect")))
 
     @blueprint.get("/api/images/<image_id>/disassembly")
     def inspect_disassembly(image_id):
@@ -1440,7 +1395,14 @@ def create_tools_blueprint(
             raise DiskError("Choose a file to disassemble.")
         try:
             origin = int(str(request.args.get("origin")), 0) if request.args.get("origin") not in (None, "") else None
-            start = int(str(request.args.get("start") or "0"), 0)
+            # An absent offset is not the same as zero. Zero is a deliberate
+            # request to disassemble from the first byte of the file, header
+            # included; absent lets the decoder start at the code.
+            start = (
+                int(str(request.args.get("start")), 0)
+                if request.args.get("start") not in (None, "")
+                else None
+            )
             length = int(str(request.args.get("length")), 0) if request.args.get("length") not in (None, "") else None
         except ValueError as exc:
             raise DiskError("Origin, offset and length must be valid decimal or 0x-prefixed numbers.") from exc

@@ -1,247 +1,146 @@
 [
   {
-    "id": "aminet",
-    "name": "Aminet",
+    "id": "internet-archive-st-games",
+    "name": "Internet Archive Atari ST games",
     "type": "configured",
-    "url": "https://aminet.net/",
+    "url": "https://archive.org/advancedsearch.php",
     "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32",
-      "tos"
+      "st",
+      "megast",
+      "ste",
+      "megaste",
+      "tt030",
+      "falcon030"
     ],
     "enabled": true,
     "direct": true,
     "options": {
-      "loader": "page",
-      "parser": "zip-links",
-      "queryTemplate": "search?query={query}",
-      "defaultPublisher": "Aminet contributors",
-      "cacheSeconds": 3600
-    }
-  },
-  {
-    "id": "whdload",
-    "name": "WHDLoad install packages",
-    "type": "configured",
-    "url": "https://whdload.de/games/",
-    "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32"
-    ],
-    "enabled": false,
-    "direct": true,
-    "options": {
-      "loader": "page",
-      "parser": "zip-links",
-      "defaultPublisher": "WHDLoad",
-      "cacheSeconds": 86400
-    },
-    "disabledReason": "whdload.de serves 403 for /games/ to every client tried, browser user agents included, while the rest of the site answers normally. The installer index is not reachable programmatically."
-  },
-  {
-    "id": "hall-of-light",
-    "name": "Hall of Light Atari database",
-    "type": "configured",
-    "url": "https://atari.abime.net/",
-    "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32"
-    ],
-    "enabled": false,
-    "direct": false,
-    "options": {
-      "loader": "page",
-      "parser": "links",
-      "queryTemplate": "games/search?q={query}",
-      "cacheSeconds": 86400
-    },
-    "disabledReason": "Hall of Light now sits behind an Anubis proof-of-work bot check, which answers an ordinary HTTP client with a challenge page instead of the catalogue. There is no query this tool can send that reaches the database."
-  },
-  {
-    "id": "lemon-atari",
-    "name": "Lemon Atari",
-    "type": "configured",
-    "url": "https://www.lemonatari.com/",
-    "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32"
-    ],
-    "enabled": true,
-    "direct": false,
-    "options": {
-      "loader": "page",
-      "parser": "links",
-      "queryTemplate": "games/list.php?list_title={query}",
-      "cacheSeconds": 86400,
-      "linkPattern": "/game/"
-    }
-  },
-  {
-    "id": "everygamegoing",
-    "name": "Every Game Going (machine identifiers must be configured)",
-    "type": "configured",
-    "url": "https://www.everygamegoing.com/",
-    "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32"
-    ],
-    "enabled": false,
-    "direct": true,
-    "options": {
-      "loader": "machine-index",
-      "parser": "item-rows",
-      "resolver": "media-links",
-      "landingTemplate": "landingMachineType/items/machine_type_id/{machineId}/paarent_type/games/",
-      "itemPathPrefix": "/litem/",
-      "downloadPathContains": "/download/",
-      "machineProfiles": {},
-      "cacheSeconds": 86400
-    }
-  },
-  {
-    "id": "itch-atari",
-    "name": "itch.io Atari downloads",
-    "type": "configured",
-    "url": "https://itch.io/search",
-    "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32",
-      "tos"
-    ],
-    "enabled": true,
-    "direct": true,
-    "options": {
-      "loader": "page",
-      "parser": "html-cards",
-      "queryTemplate": "?q={machineQuery}+{query}",
-      "machineQueries": {
-        "a500": "atari 500",
-        "a500plus": "atari 500",
-        "a600": "atari 600",
-        "a1200": "atari 1200",
-        "a2000": "atari 2000",
-        "a3000": "atari 3000",
-        "a4000": "atari 4000",
-        "cd32": "atari cd32",
-        "tos": "tos",
-        "all": "atari"
-      },
-      "cardClass": "game_cell",
-      "titleClass": "game_title",
-      "descriptionClass": "game_text",
-      "publisherClass": "game_author",
-      "resolver": "upload-buttons",
-      "resolverOptions": {
-        "mediaExtensions": [
-          "adf",
-          "adz",
-          "dms",
-          "hdf",
-          "hda",
-          "lha",
-          "lzx",
-          "hfe",
-          "ipf"
-        ],
-        "archiveTerms": [
-          "atari",
-          "adf",
-          "whdload",
-          "aga",
-          "ocs",
-          "ecs"
-        ],
-        "requestTemplate": "{pageUrl}/file/{uploadId}?source=view_game&as_props=1"
-      },
-      "resultValidationLimit": 40,
+      "loader": "internet-archive",
+      "parser": "archive-documents",
+      "resolver": "archive-files",
+      "collection": "softwarelibrary_atari_st_games",
+      "metadataUrl": "https://archive.org/metadata/{identifier}",
+      "downloadUrl": "https://archive.org/download/{identifier}/{name}",
+      "detailsUrl": "https://archive.org/details/{identifier}",
+      "mediaExtensions": [
+        "st",
+        "msa",
+        "stx",
+        "dim",
+        "zip"
+      ],
+      "rows": 50,
+      "resultValidationLimit": 24,
       "detailThreads": 6,
       "cacheSeconds": 3600
     }
   },
   {
-    "id": "os4depot",
-    "name": "OS4Depot TOS 4 packages",
+    "id": "demozoo",
+    "name": "Demozoo Atari ST productions",
     "type": "configured",
-    "url": "https://os4depot.net/",
+    "url": "https://demozoo.org/api/v1/productions/",
     "machines": [
-      "tos"
+      "st",
+      "megast",
+      "ste",
+      "megaste",
+      "tt030",
+      "falcon030"
     ],
     "enabled": true,
     "direct": true,
     "options": {
-      "loader": "form-post",
-      "parser": "zip-links",
-      "queryTemplate": "index.php?function=search&tool=simple",
-      "formFields": {
-        "f_fields": "{query}",
-        "f_quicksearch": "Search"
+      "loader": "demozoo",
+      "parser": "demozoo-productions",
+      "resolver": "demozoo-downloads",
+      "queryTemplate": "?platform={platformId}&title={query}&format=json",
+      "machinePlatforms": {
+        "st": [9],
+        "megast": [9],
+        "ste": [9],
+        "megaste": [9],
+        "tt030": [58],
+        "falcon030": [17],
+        "all": [9, 58, 17]
       },
-      "defaultPublisher": "OS4Depot contributors",
-      "encoding": "iso-8859-15",
-      "cacheSeconds": 3600,
-      "rowResolver": "media-links",
-      "resolverOptions": {
-        "downloadPathContains": "/share/"
-      }
+      "resultValidationLimit": 20,
+      "detailThreads": 4,
+      "cacheSeconds": 3600
     }
   },
   {
-    "id": "aminet-dev",
-    "name": "Aminet development tree",
+    "id": "pigwa",
+    "name": "Pigwa Atari ST game packs",
     "type": "configured",
-    "url": "https://aminet.net/tree?path=dev",
+    "url": "https://ftp.pigwa.net/stuff/collections/Atari%20ST%20game%20packs/",
     "machines": [
-      "a500",
-      "a500plus",
-      "a600",
-      "a1200",
-      "a2000",
-      "a3000",
-      "a4000",
-      "cd32",
-      "tos"
+      "st",
+      "megast",
+      "ste",
+      "megaste"
     ],
-    "enabled": false,
+    "enabled": true,
     "direct": true,
     "options": {
+      "loader": "directory-listing",
+      "mediaExtensions": [
+        "zip",
+        "st",
+        "msa",
+        "stx"
+      ],
+      "maxFolders": 24,
+      "maxEntries": 4000,
+      "crawlThreads": 4,
+      "cacheSeconds": 86400
+    }
+  },
+  {
+    "id": "atarimania",
+    "name": "Atarimania ST database",
+    "type": "configured",
+    "url": "https://www.atarimania.com/",
+    "machines": [
+      "st",
+      "megast",
+      "ste",
+      "megaste",
+      "tt030",
+      "falcon030"
+    ],
+    "enabled": true,
+    "direct": false,
+    "options": {
       "loader": "page",
-      "parser": "package-paragraphs",
+      "parser": "database-rows",
+      "queryTemplate": "search?q={query}&m=S",
+      "linkPattern": "/games/atari-st-games-",
+      "detailSeparator": "·",
+      "cacheSeconds": 86400
+    }
+  },
+  {
+    "id": "atari-legend",
+    "name": "Atari Legend",
+    "type": "configured",
+    "url": "https://www.atarilegend.com/",
+    "machines": [
+      "st",
+      "megast",
+      "ste",
+      "megaste",
+      "tt030",
+      "falcon030"
+    ],
+    "enabled": true,
+    "direct": false,
+    "options": {
+      "loader": "page",
+      "parser": "links",
+      "queryTemplate": "games/search?title={query}",
+      "linkPattern": "atarilegend\\.com/games/[^/?#]+$",
+      "pageLimitMb": 8,
       "cacheSeconds": 86400
     }
   }

@@ -14,8 +14,8 @@
         <dl class="about-facts">
           <dt>Edition</dt><dd>${esc(host)}</dd>
           <dt>Filesystem engine</dt><dd>${esc(details.engine)}</dd>
-          <dt>Formats</dt><dd>OFS ADF/ADZ, HFE, SCP, HDF, FFS and GEMDOS, Hardfile HDA/GEO, HDF/RAW, DMS, ROM and Kickstart ROM</dd>
-          <dt>Platforms</dt><dd>Atari 500 and Master, Atari 600, Atari 4000 and TOS</dd>
+          <dt>Formats</dt><dd>ST, MSA, DIM and STX floppies, HFE, SCP and IPF flux, AHDI and MBR hard disks, bare GEMDOS volumes, TOS and cartridge ROMs</dd>
+          <dt>Platforms</dt><dd>Atari ST, Mega ST, STE, Mega STE, TT030 and Falcon030</dd>
           <dt>Licence</dt><dd>MIT License · Copyright © 2026 Pete Clarke</dd>
         </dl>
         <nav class="about-links" aria-label="Project links">

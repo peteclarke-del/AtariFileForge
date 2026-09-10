@@ -1,56 +1,37 @@
 """Routes for turning a floppy into something a hard drive can run.
 
-Four modes reach an image from here and each declares what it does to one.
-Staging, installing a staged title, installing Workbench, installing WHDLoad
-and placing a slave all write into a volume and are declared as mutations,
-which is what gets them an undo checkpoint before they run. Staging is a
-mutation because it now writes onto the drive being built rather than into a
-directory on this machine, which is what lets the install be finished in an
-emulator or on the real hardware. Booting the emulator changes nothing this
-application owns, so it is external.
+Three of the four install modes reach an image from here and each declares
+what it does to one. Staging, installing a staged title, copying in a single
+program, preparing a drive and putting a title on the desktop all write into a
+volume and are declared as mutations, which is what gets them an undo
+checkpoint before they run. Staging is a mutation because it writes onto the
+drive being built rather than into a directory on this machine, which is what
+lets the install be finished in Hatari or on the real hardware. The fourth
+mode, running the title's own installer, starts an emulator and changes
+nothing this application owns, so it lives with the other emulator routes.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from flask import Blueprint, jsonify, request
 
-from .. import whdload
 from ..disk_service import DiskError, DiskService
+from ..drive_preparation import (
+    DEFAULT_FOLDERS,
+    DRIVERLESS,
+    describe_drivers,
+)
 from ..install_service import (
     DEFAULT_INSTALL_PARENT,
     DEFAULT_STAGING_PARENT,
-    DEFAULT_WHDLOAD_PARENT,
 )
-from ..lha import is_lha_bytes
-from ..tos_cd import REQUIRED_PROCESSOR, describe_releases
-from ..workbench_install import describe_roles
 from ..operations import OperationRegistry
 from .common import apply_partition, payload
 from .effects import image_mutation, request_effect
 
 
-#: A slave is a few kilobytes and its archive not much more. A ceiling this
-#: far above either still refuses a whole disc image sent by mistake.
-SLAVE_UPLOAD_LIMIT = 4 * 1024 * 1024
-
-#: The same ceiling the downloader applies, so an archive supplied by hand and
-#: one fetched from the author's site are held to one rule.
-ARCHIVE_UPLOAD_LIMIT = whdload.DOWNLOAD_LIMIT
-
-
 def create_install_blueprint(service: DiskService, operations: OperationRegistry) -> Blueprint:
     blueprint = Blueprint("install", __name__)
-
-    def uploaded(field: str, limit: int) -> tuple[str, bytes]:
-        upload = request.files.get(field)
-        if upload is None or not upload.filename:
-            raise DiskError("No file was supplied.")
-        data = upload.read(limit + 1)
-        if len(data) > limit:
-            raise DiskError(f"{upload.filename} is larger than the {limit // (1024 * 1024)} MB limit.")
-        return Path(upload.filename).name, data
 
     # ------------------------------------------------------------------
     # Staging
@@ -62,7 +43,7 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
 
         Staging writes onto the target volume, so the list is a property of an
         image and is read back off it. A drive built elsewhere still reports
-        what is sitting in its staging drawer.
+        what is sitting in its staging folder.
         """
         session = service.get(image_id)
         apply_partition(service, session, request.args.get("partition"))
@@ -74,9 +55,9 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         )
 
     @blueprint.post("/api/images/<image_id>/install/stage")
-    @image_mutation("staging a disc onto a drive")
+    @image_mutation("staging a disk onto a drive")
     def stage(image_id):
-        """Extract one disc into a drawer on the drive it is destined for."""
+        """Extract one disk into a folder on the drive it is destined for."""
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
@@ -86,14 +67,14 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         with operations.tracked(
             data.get("operationId"),
             f"Staging {title or source.name}",
-            "Disc staged",
+            "Disk staged",
         ) as progress:
             staged = service.stage_disk(
                 source,
                 session,
                 title or source.name,
                 parent=str(data.get("stagingParent") or ""),
-                disc_label=str(data.get("discLabel") or "").strip() or None,
+                disk_label=str(data.get("diskLabel") or "").strip() or None,
                 progress=progress,
             )
         return jsonify(image=service.summary(session), staged=staged)
@@ -127,155 +108,108 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
                 str(data["name"]),
                 parent=str(data.get("parent", DEFAULT_INSTALL_PARENT)),
                 staging=str(data.get("stagingParent") or ""),
-                drawer=str(data.get("drawer") or "") or None,
+                folder=str(data.get("folder") or "") or None,
                 progress=progress,
             )
         return jsonify(image=service.summary(session), **result)
 
     # ------------------------------------------------------------------
-    # Workbench
+    # One program on its own
     # ------------------------------------------------------------------
 
-    @blueprint.get("/api/install/workbench/disks")
-    def workbench_disks():
-        """The disk set an install wants, so the interface can ask for it."""
-        return jsonify(roles=describe_roles())
-
-    @blueprint.post("/api/images/<image_id>/install/workbench/survey")
-    @request_effect("read-only", "identifying Workbench install discs")
-    def survey_workbench(image_id):
-        """Identify a pile of opened discs and propose a set to install from.
-
-        This changes nothing: it reads volume names out of images that are
-        already open and says what it found, so the operator can correct the
-        choice before a drive is written to.
-        """
+    @blueprint.post("/api/images/<image_id>/install/program")
+    @image_mutation("copying a program onto a drive")
+    def install_program(image_id):
+        """Copy one program off a disk into a folder on this drive."""
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        discs = [service.get(str(identifier)) for identifier in data.get("discs") or []]
-        if not discs:
-            raise DiskError("Choose the Workbench floppy images to install from.")
+        source = service.get(str(data["sourceImage"]))
+        apply_partition(service, source, data.get("sourcePartition"))
+        result = service.install_program(
+            source,
+            session,
+            str(data.get("path") or ""),
+            parent=str(data.get("parent", DEFAULT_INSTALL_PARENT)),
+            name=str(data.get("name") or ""),
+        )
+        return jsonify(image=service.summary(session), program=result)
+
+    # ------------------------------------------------------------------
+    # Preparing the drive itself
+    # ------------------------------------------------------------------
+
+    @blueprint.get("/api/install/drivers")
+    def drivers():
+        """The driver choices, so the interface can explain what it wants."""
         return jsonify(
-            survey=service.survey_workbench_discs(
-                discs, version=str(data.get("version") or "")
-            ),
+            drivers=describe_drivers(),
+            folders=list(DEFAULT_FOLDERS),
+            default=DRIVERLESS,
         )
 
-    @blueprint.post("/api/images/<image_id>/install/workbench")
-    @image_mutation("installing Workbench")
-    def install_workbench(image_id):
-        """Copy the chosen Workbench disks into this volume."""
-        data = payload()
-        session = service.get(image_id)
-        apply_partition(service, session, data.get("partition"))
-        chosen = data.get("discs") or {}
-        if not isinstance(chosen, dict) or not chosen:
-            raise DiskError("Choose which disc plays each part before installing.")
-        discs = {str(role): service.get(str(identifier)) for role, identifier in chosen.items()}
-        with operations.tracked(
-            data.get("operationId"),
-            "Installing Workbench",
-            "Workbench installed",
-        ) as progress:
-            result = service.install_workbench(
-                session,
-                discs,
-                version=str(data.get("version") or ""),
-                create_drawers=data.get("createDrawers", True) is not False,
-                progress=progress,
-            )
-        return jsonify(image=service.summary(session), workbench=result)
-
-    # ------------------------------------------------------------------
-    # TOS 3.5 and 3.9, published on CD
-    # ------------------------------------------------------------------
-
-    @blueprint.get("/api/install/tos-cd/releases")
-    def tos_cd_releases():
-        """The CD releases this recognises, and what each one needs."""
-        return jsonify(releases=describe_releases(), processor=REQUIRED_PROCESSOR)
-
-    @blueprint.post("/api/images/<image_id>/install/tos-cd/preflight")
-    @request_effect("read-only", "checking whether a drive can take an TOS CD")
-    def tos_cd_preflight(image_id):
-        """Say whether this drive, this hardware and this disc can work.
-
-        Checked before anything is launched, because every one of these is
-        knowable from the outset and the alternative is an operator watching a
-        machine boot in order to be told. Nothing here writes to anything.
-        """
-        data = payload()
-        session = service.get(image_id)
-        apply_partition(service, session, data.get("partition"))
-        disc = service.get(str(data["disc"]))
-        return jsonify(preflight=service.tos_cd_preflight(session, disc))
-
-    # ------------------------------------------------------------------
-    # WHDLoad
-    # ------------------------------------------------------------------
-
-    @blueprint.get("/api/images/<image_id>/install/whdload")
-    def whdload_state(image_id):
+    @blueprint.get("/api/images/<image_id>/install/driver")
+    def driver_state(image_id):
+        """What this drive has been prepared with, read off the drive itself."""
         session = service.get(image_id)
         apply_partition(service, session, request.args.get("partition"))
-        return jsonify(
-            whdload=service.whdload_status(session),
-            defaultParent=DEFAULT_WHDLOAD_PARENT,
-        )
+        state = service.drive_preparation(session)
+        return jsonify(driver=state["driver"], preparation=state)
 
-    @blueprint.post("/api/images/<image_id>/install/whdload")
-    @image_mutation("installing WHDLoad")
-    def install_whdload(image_id):
-        """Install WHDLoad, from the author's site or from a supplied archive.
+    @blueprint.post("/api/images/<image_id>/install/driver")
+    @image_mutation("preparing a drive to be booted")
+    def prepare_driver(image_id):
+        """Prepare this drive: a driver where one is wanted, and a desktop.
 
-        The upload path is not a convenience. Somebody working offline, or
-        behind a network that will not reach whdload.de, still needs the
-        install to be possible, and the archive they already have is the same
-        archive the download would have fetched.
+        The licence position is the reason there is no download here. AHDI,
+        HDDRIVER, the PP driver and the ICD driver are each somebody's
+        copyright and none of them may be redistributed by this application,
+        so the operator's own copy is what gets installed. EmuTOS is the one
+        thing that may ship, and EmuTOS needs no driver.
         """
+        data = payload()
         session = service.get(image_id)
-        if request.files.get("archive") is not None:
-            name, data = uploaded("archive", ARCHIVE_UPLOAD_LIMIT)
-            if not is_lha_bytes(data):
-                raise DiskError(f"{name} is not an LHA archive. WHDLoad is published as WHDLoad_usr.lha.")
-            apply_partition(service, session, request.form.get("partition"))
-            source, url = f"the supplied {name}", ""
-            keep = request.form.get("keepPreferences", "true") != "false"
-            operation_id = request.form.get("operationId")
-        else:
-            data = None
-            body = payload()
-            apply_partition(service, session, body.get("partition"))
-            source = url = ""
-            keep = bool(body.get("keepPreferences", True))
-            operation_id = body.get("operationId")
-
-        with operations.tracked(operation_id, "Installing WHDLoad", "WHDLoad installed") as progress:
-            if data is None:
-                progress("Fetching WHDLoad", 0, None)
-                release = whdload.download()
-                data, source, url = release.archive_bytes, release.source, release.url
-            result = service.install_whdload(
-                session, data, source=source, url=url, keep_preferences=keep, progress=progress
+        apply_partition(service, session, data.get("partition"))
+        with operations.tracked(
+            data.get("operationId"),
+            "Preparing the drive",
+            "Drive prepared",
+        ) as progress:
+            result = service.prepare_drive(
+                session,
+                driver=str(data.get("driver") or DRIVERLESS),
+                create_folders=data.get("createFolders", True) is not False,
+                desktop=data.get("desktop", True) is not False,
+                progress=progress,
             )
-        return jsonify(image=service.summary(session), whdload=result)
+        return jsonify(image=service.summary(session), **result)
 
-    @blueprint.post("/api/images/<image_id>/install/whdload/slave")
-    @image_mutation("adding a WHDLoad slave")
-    def add_slave(image_id):
-        """Place a slave the operator supplied.
-
-        There is no download here on purpose: slaves are not published in any
-        form this application can fetch, and offering a button that always
-        failed would be worse than not offering one.
-        """
+    @blueprint.post("/api/images/<image_id>/install/desktop")
+    @image_mutation("installing an application on the desktop")
+    def install_desktop(image_id):
+        """Put one program on the desktop and tell GEM how to start it."""
+        data = payload()
         session = service.get(image_id)
-        apply_partition(service, session, request.form.get("partition"))
-        name, data = uploaded("slave", SLAVE_UPLOAD_LIMIT)
-        result = service.install_whdload_slave(
-            session, str(request.form.get("destination") or ""), data, name
+        apply_partition(service, session, data.get("partition"))
+        program = str(data.get("program") or "").strip()
+        if not program:
+            raise DiskError("Choose the program the desktop should install.")
+        result = service.install_desktop_application(
+            session,
+            program,
+            documents=str(data.get("documents") or ""),
+            label=str(data.get("label") or ""),
+            on_desktop=data.get("onDesktop", True) is not False,
         )
-        return jsonify(image=service.summary(session), slave=result)
+        return jsonify(image=service.summary(session), desktop=result)
+
+    @blueprint.post("/api/images/<image_id>/install/preparation")
+    @request_effect("read-only", "reading how a drive has been prepared")
+    def preparation(image_id):
+        """Report a drive's preparation for a partition chosen in the request."""
+        data = payload()
+        session = service.get(image_id)
+        apply_partition(service, session, data.get("partition"))
+        return jsonify(preparation=service.drive_preparation(session))
 
     return blueprint

@@ -4,13 +4,13 @@ services:
     image: atari-file-forge:latest
     container_name: atari-file-forge
     # The container still listens on 8666 for the application and 8668 for the
-    # noVNC view of the managed Hatari display. Only the host side moves,
-    # because 8666 and 8668 are commonly already taken -- the sibling Acorn
-    # File Forge uses exactly those, and the two are meant to run side by side.
-    # Override with ATARI_FILE_FORGE_PORT and ATARI_FILE_FORGE_VNC_PORT.
+    # emulator display. Only the host side moves, because those two ports are
+    # commonly already taken: the sibling File Forge applications publish 8666,
+    # 8668, 8674 and 8675, and they are all meant to run side by side. Override
+    # with ATARI_FILE_FORGE_PORT and ATARI_FILE_FORGE_VNC_PORT.
     ports:
-      - "${ATARI_FILE_FORGE_PORT:-8674}:8666"
-      - "${ATARI_FILE_FORGE_VNC_PORT:-8675}:8668"
+      - "${ATARI_FILE_FORGE_PORT:-8684}:8666"
+      - "${ATARI_FILE_FORGE_VNC_PORT:-8685}:8668"
     environment:
       ATARI_FILE_FORGE_WORK_DIR: /app/work
       ATARI_MAX_UPLOAD_GIB: "8"
