@@ -251,9 +251,6 @@ def prepared_snapshot(service, session, progress: Callable | None = None):
             (lambda current, total: progress("Copying an isolated image snapshot", current, total))
             if progress else None,
         )
-        if session.descriptor_path:
-            configured.descriptor_path = root / session.descriptor_path.name
-            shutil.copy2(session.descriptor_path, configured.descriptor_path)
         configured.lock = threading.RLock()
         configured.finalised_mtime_ns = None
         service.prepare_download(configured, progress)

@@ -24,13 +24,6 @@ class ImageSession:
     name: str
     kind: str
     path: Path
-    #: Always None on the Atari, and reported as such. Every Atari image is
-    #: one file: a partitioned drive keeps its table in its own root sector
-    #: and a bare volume its parameter block in its own boot sector, so there
-    #: is nothing that has to be opened alongside it. The two fields remain
-    #: because saved sessions, checkpoints and reports still name them.
-    descriptor_name: str | None = None
-    descriptor_path: Path | None = None
     dirty: bool = False
     #: The parsed MSA, DIM or STX container this session was opened from,
     #: cached the first time the header is read. A plain sector image has

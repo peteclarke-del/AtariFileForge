@@ -38,12 +38,9 @@ class SessionDiskMixin:
             path = folder / self.safe_filename(metadata.get("workingFile") or name)
             if not path.is_file() or path.parent != folder:
                 raise ValueError
-            descriptor_name = metadata.get("descriptorName")
-            descriptor_file = metadata.get("descriptorFile")
-            descriptor_path = folder / descriptor_file if descriptor_file else None
-            if descriptor_path and (not descriptor_path.is_file() or descriptor_path.parent != folder):
-                descriptor_path = None
-                descriptor_name = None
+            # A session.json written by an earlier build may still name a
+            # companion geometry file. An Atari image never had one, so those
+            # keys are left unread and such a session restores like any other.
             kind = metadata.get("kind") or self.detect_kind(name)
             if kind not in {
                 "gemdos", "hd", "msa", "dim", "stx", "iso", "rom", "tosrom",
@@ -54,8 +51,6 @@ class SessionDiskMixin:
                 name=name,
                 kind=kind,
                 path=path,
-                descriptor_name=descriptor_name,
-                descriptor_path=descriptor_path,
                 dirty=bool(metadata.get("dirty", True)),
                 partition=(
                     int(metadata["partition"])
@@ -180,19 +175,12 @@ class SessionDiskMixin:
                 if not image_path.is_file() or image_path.parent != metadata_path.parent:
                     continue
                 stat = image_path.stat()
-                descriptor_file = metadata.get("descriptorFile")
-                descriptor_path = (
-                    metadata_path.parent / self.safe_filename(descriptor_file)
-                    if descriptor_file
-                    else None
-                )
                 recovered.append({
                     "id": image_id,
                     "name": name,
                     "kind": str(metadata.get("kind") or self.detect_kind(name)),
                     "size": stat.st_size,
                     "modified": stat.st_mtime_ns // 1_000_000,
-                    "hasDescriptor": bool(descriptor_path and descriptor_path.is_file()),
                     "targetHardware": str(metadata.get("targetHardware") or "auto"),
                 })
             except (OSError, KeyError, ValueError, json.JSONDecodeError):
@@ -255,8 +243,6 @@ class SessionDiskMixin:
 
         with session.lock:
             session.name = safe_name
-            if session.descriptor_path:
-                session.descriptor_name = Path(session.descriptor_path).name
             session.hfe_export_path = None
             session.scp_export_path = None
             self._persist_session(session)
@@ -267,7 +253,7 @@ class SessionDiskMixin:
 
     def oldest_checkpoint_snapshot(
         self, session: ImageSession
-    ) -> tuple[Path, Path | None, dict] | None:
+    ) -> tuple[Path, dict] | None:
         with session.lock:
             try:
                 return self.checkpoints.oldest_snapshot(session)
@@ -423,8 +409,6 @@ class SessionDiskMixin:
             "revision": f"{image_size:x}-{image_stat.st_mtime_ns:x}",
             "hardDisk": self.is_bare_hard_drive(session, image_size),
             "dirty": session.dirty,
-            "hasDescriptor": bool(session.descriptor_path),
-            "descriptorName": session.descriptor_name,
             "doubleSided": self.is_double_sided(session),
             "containerFormat": "hfe" if session.hfe_original_path else "scp" if session.scp_original_path else None,
             # A CD is read-only by construction, so saying so here is what

@@ -18,10 +18,10 @@ MAX_COMPARE_RANGES = 20_000
 
 
 def _target_path(session: ImageSession, target: str) -> Path:
+    # An Atari image is one file, so the image itself is the only thing the
+    # raw editor can ever be pointed at.
     if target == "image":
         return session.path
-    if target == "descriptor" and session.descriptor_path is not None:
-        return session.descriptor_path
     raise DiskError("That raw image component is not available.")
 
 
@@ -153,7 +153,7 @@ def raw_image_range(
             "data": data.hex().upper(),
             "version": _version(path),
             "target": target,
-            "targetName": session.descriptor_name if target == "descriptor" else session.name,
+            "targetName": session.name,
             "readOnly": bool(session.hfe_read_only),
         }
 

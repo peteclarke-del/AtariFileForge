@@ -649,9 +649,8 @@ checkpoints and recent automatic points. Any listed point can be restored, and
 named points can be deleted when no longer required. Restoring a checkpoint
 first saves the state it is replacing as a fresh automatic undo point.
 
-Checkpoints include the complete working image, its matching descriptor when
-present, its displayed filename, source metadata, hardware target, warnings and
-dirty state. Partition and directory caches are rebuilt after a restore. Every
+Checkpoints include the complete working image, its displayed filename, source
+metadata, hardware target, warnings and dirty state. Partition and directory caches are rebuilt after a restore. Every
 pane showing the restored image refreshes from the restored bytes.
 
 On filesystems that support reflinks, snapshots use copy-on-write cloning. A
@@ -1328,8 +1327,8 @@ checkpoint, builds and proves a guarded `.affpatch.zip`, records the physical
 and logical identity of the required base image, and calculates the exact
 hashes produced by that deterministic replay. Hardware-profile choices and
 accepted compatibility reports are retained as non-secret decisions. The
-bundled README gives the complete replay command. Rebuild stops if the base,
-descriptor, patch payload or final output differs from the recorded identity.
+bundled README gives the complete replay command. Rebuild stops if the base
+image, patch payload or final output differs from the recorded identity.
 Original image bytes are not duplicated in the workflow ZIP.
 
 This facility covers writable sector-image, hard-disk and ROM sessions. Flux

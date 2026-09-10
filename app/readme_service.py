@@ -275,7 +275,6 @@ def build_download_readme(
     generated: datetime | None = None,
     *,
     image_checksum: str | None = None,
-    descriptor_checksum: str | None = None,
     deployment: dict | None = None,
 ) -> str:
     moment = generated or datetime.now().astimezone()
@@ -340,12 +339,6 @@ def build_download_readme(
             f"- Base machine: {profile.get('machine') or 'not specified'}",
             "- Fitted options: " + (", ".join(profile.get("addons") or []) or "stock machine"),
             f"- Managed emulator: {profile.get('emulator') or 'automatic'}",
-        ))
-    if session.descriptor_path:
-        lines.extend((
-            f"- Descriptor filename: `{session.descriptor_name}`",
-            f"- Descriptor size: {session.descriptor_path.stat().st_size:,} bytes",
-            f"- Descriptor SHA-256: `{descriptor_checksum or sha256_path(session.descriptor_path)}`",
         ))
     if session.compatibility_reports:
         accepted = session.compatibility_reports[-1]
@@ -440,7 +433,6 @@ def write_download_readme(
     generated: datetime | None = None,
     *,
     image_checksum: str | None = None,
-    descriptor_checksum: str | None = None,
     deployment: dict | None = None,
 ) -> Path:
     target = session.path.parent / "download-README.md"
@@ -451,7 +443,6 @@ def write_download_readme(
             image_path,
             generated,
             image_checksum=image_checksum,
-            descriptor_checksum=descriptor_checksum,
             deployment=deployment,
         ),
         encoding="utf-8",

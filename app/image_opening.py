@@ -52,7 +52,6 @@ def open_image_upload(
         session = service.create_from_stream(
             image_item.filename,
             image_item.stream,
-            None,
             target_hardware,
             rom_options,
             force_kind,
@@ -82,7 +81,6 @@ def open_image_path(
     if image_path.suffix.casefold() != ".zip":
         session = service.create_from_path(
             image_path,
-            None,
             target_hardware,
             rom_options,
             force_kind,

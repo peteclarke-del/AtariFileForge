@@ -55,9 +55,9 @@ def _regular_file(value: object, label: str) -> Path:
 def _physical_media_details(service: DiskService, session) -> dict:
     """Describe the medium an open image would be written to a drive as.
 
-    An Atari image carries no geometry sidecar, so everything needed is in
-    the image itself: the boot sector says what shape the disk is, and the
-    extension says which container the bytes are in.
+    An Atari image describes itself, so everything needed is in the image:
+    the boot sector says what shape the disk is, and the extension says which
+    container the bytes are in.
     """
     if session.kind == "hd":
         raise DiskError(

@@ -26,10 +26,7 @@ window.AtariFormats = (() => {
   const isoPattern = /\.(iso|cdr)$/i;
 
   return {
-    accept: imageExtensions.map(extension => `.${extension}`).concat(".geo", ".zip", ".lzh", ".lha").join(","),
-    // A bare hard-disk image carries no geometry of its own, so it travels
-    // with a small ".geo" sidecar that records cylinders, heads and sectors.
-    isDescriptor: name => /\.geo$/i.test(name),
+    accept: imageExtensions.map(extension => `.${extension}`).concat(".zip", ".lzh", ".lha").join(","),
     isArchive: name => archivePattern.test(name),
     isFloppyImage: name => floppyPattern.test(name) || archivePattern.test(name),
     isImage: name => imagePattern.test(name),

@@ -703,10 +703,9 @@ differences and navigates to the next changed offset.
 The **Structure template** control decodes the bytes at the cursor without
 changing them. The templates are Automatic, Generic values, GEMDOS boot sector,
 GEMDOS directory entry, AHDI partition table, TOS ROM header, GEMDOS program
-header, Hard-disk geometry sidecar, MSA header and track, and a custom JSON
-template you load yourself. Automatic mode recognises only safe signatures:
-`$0E0F` or an `.msa` name for MSA, a `.geo` name for a geometry sidecar,
-`$601A` for a program, `$602E` or the valid GEM entry longword `$87654321` for
+header, MSA header and track, and a custom JSON template you load yourself.
+Automatic mode recognises only safe signatures: `$0E0F` or an `.msa` name for
+MSA, `$601A` for a program, `$602E` or the valid GEM entry longword `$87654321` for
 a TOS ROM, a drive-image extension or a `GEM`, `BGM` or `RAW` identifier for a
 partition table, and a `$60` branch with a 512-byte sector size at offset
 `$0B` for a boot sector. A directory entry is 32 bytes anywhere inside a
