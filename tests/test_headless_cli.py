@@ -286,6 +286,34 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_VALIDATION)
         self.assertIn("must be different", result["result"]["error"])
 
+    def test_import_creates_the_destination_folder_only_when_asked(self):
+        """The command line has no separate folder command, so import must offer one."""
+        service = Mock()
+        session = SimpleNamespace()
+
+        cli._ensure_parent(service, session, "GAMES\\PROGRAM.PRG", False)
+        service.make_directory.assert_not_called()
+
+        cli._ensure_parent(service, session, "GAMES\\PROGRAM.PRG", True)
+        service.make_directory.assert_called_once_with(session, "GAMES")
+
+    def test_import_accepts_a_destination_folder_that_is_already_there(self):
+        """Asking for a folder that exists has the outcome the caller wanted."""
+        service = Mock()
+        service.make_directory.side_effect = DiskError("GAMES already exists.")
+        cli._ensure_parent(service, SimpleNamespace(), "GAMES\\PROGRAM.PRG", True)
+
+    def test_import_still_reports_a_folder_it_could_not_create(self):
+        service = Mock()
+        service.make_directory.side_effect = DiskError("The disk is full.")
+        with self.assertRaises(DiskError):
+            cli._ensure_parent(service, SimpleNamespace(), "GAMES\\PROGRAM.PRG", True)
+
+    def test_import_at_the_root_needs_no_folder(self):
+        service = Mock()
+        cli._ensure_parent(service, SimpleNamespace(), "PROGRAM.PRG", True)
+        service.make_directory.assert_not_called()
+
     def test_recipe_records_image_interpretation_context(self):
         args = SimpleNamespace(target_hardware="hd", force_kind="rom")
         self.assertEqual(cli._recorded_open_context(args), {
