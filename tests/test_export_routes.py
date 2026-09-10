@@ -21,7 +21,7 @@ class ExportRouteTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.service = Mock()
-        self.session = SimpleNamespace(kind="ofs", name="disk.adf")
+        self.session = SimpleNamespace(kind="gemdos", name="disk.st")
         self.service.get.return_value = self.session
         app = Flask(__name__)
         app.register_blueprint(
@@ -43,7 +43,7 @@ class ExportRouteTests(unittest.TestCase):
 
     def test_available_formats_are_listed_for_the_open_image(self) -> None:
         self.service.export_formats.return_value = [
-            {"format": "native", "extension": "adf", "label": "Native sector image (.adf)"},
+            {"format": "native", "extension": "st", "label": "Native sector image (.st)"},
             {"format": "scp", "extension": "scp", "label": "SuperCard Pro flux image (.scp)"},
         ]
         response = self.client.get(f"/api/images/{'a' * 32}/export/formats")
@@ -62,9 +62,9 @@ class ExportRouteTests(unittest.TestCase):
         self.assertEqual(json.loads(response.data)["formats"], [])
 
     def test_export_defaults_to_the_native_sector_image(self) -> None:
-        output = self.root / "disk-export.adf"
+        output = self.root / "disk-export.st"
         output.write_bytes(b"SECTORS")
-        self.service.export_image.return_value = (output, "disk-export.adf")
+        self.service.export_image.return_value = (output, "disk-export.st")
         response = self.client.get(f"/api/images/{'a' * 32}/export")
         self.assertEqual(response.status_code, 200)
         # send_file keeps the handle open until the response is released.

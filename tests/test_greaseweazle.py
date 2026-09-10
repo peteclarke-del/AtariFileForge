@@ -20,6 +20,7 @@ from atari_greaseweazle import (
     image_format,
     stable_snapshot,
 )
+from tests.msa_fixture import DS_720K, blank_image
 
 try:
     from flask import Flask, jsonify
@@ -228,7 +229,9 @@ class GreaseweazleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             image_path = root / "physical.st"
-            image_path.write_bytes(b"disk")
+            # Greaseweazle is told the shape of a plain sector image by the
+            # image's own boot sector, so the fixture carries a real one.
+            image_path.write_bytes(blank_image(DS_720K))
             session = ImageSession("image-id", "physical.st", "gemdos", image_path)
             service = Mock(work_dir=root)
             service.get.return_value = session
@@ -263,7 +266,9 @@ class GreaseweazleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             image_path = root / "physical.st"
-            image_path.write_bytes(b"disk")
+            # Greaseweazle is told the shape of a plain sector image by the
+            # image's own boot sector, so the fixture carries a real one.
+            image_path.write_bytes(blank_image(DS_720K))
             session = ImageSession("image-id", "physical.st", "gemdos", image_path)
             service = Mock(work_dir=root)
             service.get.return_value = session

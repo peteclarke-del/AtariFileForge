@@ -19,7 +19,7 @@ from pathlib import Path
 
 from app import whdload
 from app.disk_service import DiskError, DiskService
-from app.ffs_items import delete_ffs_items
+from app.gemdos_items import delete_gemdos_items as delete_ffs_items
 from app.install_service import slugify
 from tests.lha_fixture import archive, level1_member
 

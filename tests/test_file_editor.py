@@ -29,7 +29,15 @@ from app.file_editor import (
     write_file_range,
 )
 from app.operations import OperationCancelled
-from tests.dms_fixture import minimal_dms
+from app.msa import st_to_msa
+from tests.msa_fixture import blank_image
+from app.floppy_geometry import geometry as floppy_geometry
+
+
+def _msa_container() -> bytes:
+    """A real Magic Shadow Archiver image of an empty double-density disk."""
+    shape = floppy_geometry("ds-80t-9s")
+    return st_to_msa(blank_image(shape), shape)
 
 
 class FileEditorTests(unittest.TestCase):
@@ -65,7 +73,7 @@ class FileEditorTests(unittest.TestCase):
         self.assertEqual(analyse_content(b"*DIR GAMES\rCHAIN \"MENU\"\r", "$.COMMANDS")[0], "script")
         self.assertEqual(analyse_content(b"A readable document\r", "$.NOTES")[0], "text")
         self.assertEqual(analyse_content(bytes.fromhex("A90020F4FF60"), "$.CODE")[0], "binary")
-        self.assertEqual(analyse_content(minimal_dms(), "$.DMS")[0], "container")
+        self.assertEqual(analyse_content(_msa_container(), "GAME.MSA")[0], "container")
 
     def test_listing_classifier_uses_atari_metadata_without_reading_content(self):
         # A Workbench Tool icon proves the file is an executable, and a
@@ -238,13 +246,13 @@ class FileEditorTests(unittest.TestCase):
             folder.cleanup()
         self.assertEqual(other["view"], "script")
 
-    def test_extensionless_dms_opens_as_a_browsable_container(self):
-        folder, service = self.service_with_file(minimal_dms())
+    def test_a_stored_disk_container_opens_as_a_browsable_container(self):
+        folder, service = self.service_with_file(_msa_container())
         try:
             report = inspect_editable_file(
                 service,
                 SimpleNamespace(target_hardware="a600", hfe_read_only=False, kind="ffs"),
-                "$.DMS.THRUST", None,
+                "GAME.MSA", None,
             )
         finally:
             folder.cleanup()

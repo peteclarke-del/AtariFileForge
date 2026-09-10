@@ -295,7 +295,10 @@ def create_desktop_blueprint(
         # layout it was not asked for. Flux needs nothing: it records what
         # the head saw.
         disk_format = None
-        if image_format(suffix).format_on_read:
+        # ``image_format`` reads a suffix off a filename, and a bare ".st" has
+        # no suffix of its own, so it is asked about the file that will
+        # actually be written.
+        if image_format(f"{CAPTURE_STEM}{suffix}").format_on_read:
             layout = data.get("geometry") or "ds-720k"
             try:
                 shape = floppy_geometry(str(layout))
