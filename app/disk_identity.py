@@ -20,12 +20,12 @@ from typing import TYPE_CHECKING
 from .errors import DiskError
 from .filename_policy import ATARI_NAME_LIMIT
 from .metadata_lookup import enrich_from_distribution_filename
-from .ofs_compat import (
-    _EXECUTE_TARGET,
-    _STACK_SETTING,
+from .boot_sector import (
+    EXECUTE_TARGET as _EXECUTE_TARGET,
     MAX_STACK,
     MIN_STACK,
-    _looks_like_atari_script,
+    STACK_SETTING as _STACK_SETTING,
+    looks_like_text_script as _looks_like_atari_script,
 )
 from . import atari_paths
 
