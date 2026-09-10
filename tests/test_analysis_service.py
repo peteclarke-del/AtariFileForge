@@ -584,6 +584,26 @@ class HealthReportTests(unittest.TestCase):
             any(item["code"] == NAME_LOWER_CASE for item in naming["findings"])
         )
 
+    def test_a_drive_with_no_partition_open_reports_its_table_and_stops(self) -> None:
+        service = FakeService(
+            partitions=[
+                {"device": "C:", "id": "GEM", "sizeBytes": 16 * 1024 * 1024},
+                {"device": "D:", "id": "BGM", "sizeBytes": 300 * 1024 * 1024},
+            ],
+            summary={"revision": "1", "scheme": "ahdi", "byteSwapped": True},
+        )
+
+        report = health_report(service, make_session("hd"))
+        checks = {check["name"]: check for check in report["checks"]}
+
+        self.assertIn("2 partition(s) declared under the AHDI scheme", checks["Partition table"]["detail"])
+        self.assertEqual(checks["TOS partition limits"]["status"], "warn")
+        self.assertTrue(
+            any(item["code"] == TOS_MOUNT_LIMIT for item in checks["TOS partition limits"]["findings"])
+        )
+        self.assertEqual(checks["Byte order"]["status"], "warn")
+        self.assertIn("Open a partition", checks["Volume checks"]["detail"])
+
     def test_the_report_can_be_aborted_at_a_safe_boundary(self) -> None:
         service = FakeService()
 

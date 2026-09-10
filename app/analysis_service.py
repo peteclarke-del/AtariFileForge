@@ -1090,6 +1090,16 @@ def _gather_programs(service, session, entries, limit=64) -> tuple[list, dict]:
     return programs, auto_headers
 
 
+def _score(checks: list[dict], repairable: list[dict], progress=None) -> dict:
+    """Finish a health report: one status word over every check gathered."""
+    score = "healthy" if all(item["status"] == "pass" for item in checks) else (
+        "attention" if not any(item["status"] == "fail" for item in checks) else "failed"
+    )
+    if progress:
+        progress("Health check complete", 1, 1)
+    return {"status": score, "checks": checks, "repairable": repairable}
+
+
 def health_report(service, session, progress=None) -> dict:
     checks: list[dict] = []
     repairable: list[dict] = []
@@ -1115,6 +1125,20 @@ def health_report(service, session, progress=None) -> dict:
         summary = service.summary(session) or {}
     except (AttributeError, DiskError):
         summary = {}
+
+    profile = session.hardware_profile or {}
+    if profile:
+        additions = ", ".join(profile.get("addons") or []) or "stock machine"
+        record(
+            "structural",
+            "Hardware profile",
+            "pass",
+            f"{profile.get('name', 'Custom')} · {profile.get('machine', 'Atari ST')} · {additions}",
+        )
+    checks.extend(
+        {"category": "structural", "name": "Compatibility warning", "status": "warn", "detail": warning}
+        for warning in getattr(session, "warnings", []) or []
+    )
 
     if session.kind in {"rom", "tosrom"}:
         if progress:
@@ -1198,6 +1222,17 @@ def health_report(service, session, progress=None) -> dict:
                     "but an ACSI device needs the un-swapped bytes.",
                     [_finding(BYTE_SWAPPED, session.name, "Written in IDE word order.")],
                 )
+        # A partitioned drive that has no partition selected is several
+        # volumes, not one, so the volume checks below wait until the operator
+        # opens one of them rather than reporting a failure against the drive.
+        if session.kind == "hd" and getattr(session, "partition", None) is None:
+            record(
+                "structural",
+                "Volume checks",
+                "pass",
+                "Open a partition to check its catalogue, names, boot sector and AUTO folder.",
+            )
+            return _score(checks, repairable, progress)
         if progress:
             progress("Cataloguing the volume", 0, None)
         entries: list[tuple[str, dict]] = []
@@ -1330,26 +1365,7 @@ def health_report(service, session, progress=None) -> dict:
             launch,
         )
 
-    warnings = list(getattr(session, "warnings", []) or [])
-    profile = session.hardware_profile or {}
-    if profile:
-        additions = ", ".join(profile.get("addons") or []) or "stock machine"
-        record(
-            "structural",
-            "Hardware profile",
-            "pass",
-            f"{profile.get('name', 'Custom')} · {profile.get('machine', 'Atari ST')} · {additions}",
-        )
-    checks.extend(
-        {"category": "structural", "name": "Compatibility warning", "status": "warn", "detail": warning}
-        for warning in warnings
-    )
-    score = "healthy" if all(item["status"] == "pass" for item in checks) else (
-        "attention" if not any(item["status"] == "fail" for item in checks) else "failed"
-    )
-    if progress:
-        progress("Health check complete", 1, 1)
-    return {"status": score, "checks": checks, "repairable": repairable}
+    return _score(checks, repairable, progress)
 
 
 # ---------------------------------------------------------------------------
