@@ -21,10 +21,11 @@ of the same workflow.
 
 ![Atari File Forge in light mode](docs/images/atari-file-forge-light.png)
 
-The light palette follows Workbench 2.0 and 3.1: the grey chassis and window
-furniture of an A1200 desktop, lifted by Commodore blue and the Workbench
-orange used for selection and alerts. Dark mode follows Workbench 1.3, with its
-`#0055AA` screen, white text and the same orange highlight.
+The light palette follows the GEM desktop of TOS 1.x and 2.06 on a colour
+monitor: the medium-resolution green desktop, white windows with black window
+furniture, the beige-grey ST chassis, TOS blue for primary actions and the warm
+Atari Fuji orange for the selected row. Dark mode follows the ST low-resolution
+screen, with its black desktop, white text and the same Fuji highlight.
 
 ![Atari File Forge in dark mode](docs/images/atari-file-forge-dark.png)
 
@@ -40,12 +41,18 @@ reorders panes.
 
 The operating-system colour preference is used on first visit. The Light / Dark
 button in the header stores the chosen mode in the current host's private
-state. Theme colours live
-in `app/static/theme.css` as semantic custom properties. Layout, typography and
-component geometry live separately in `app/static/styles.css`, so another
-palette can be introduced without rewriting the interface. Any new palette
-should keep normal text at 4.5:1 or better, large text and meaningful graphics
-at 3:1 or better, and a clearly visible keyboard focus indicator.
+state. Light mode is the GEM desktop as TOS drew it on a colour monitor: the
+medium-resolution green desktop, white windows with black window furniture and
+text, the beige-grey ST chassis for the chrome, TOS blue for primary actions
+and title bars, and the warm end of the Atari Fuji rainbow for the selected
+row. Dark mode is the ST low-resolution screen: a black desktop, white text,
+the default sixteen-colour palette used sparingly for file-kind badges and
+syntax colouring, and the same warm Fuji accent for selection and focus. Theme
+colours live in `app/static/theme.css` as semantic custom properties. Layout,
+typography and component geometry live separately in `app/static/styles.css`,
+so another palette can be introduced without rewriting the interface. Any new
+palette should keep normal text at 4.5:1 or better, large text and meaningful
+graphics at 3:1 or better, and a clearly visible keyboard focus indicator.
 
 ## Quick start
 
