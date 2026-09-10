@@ -6720,7 +6720,12 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
   updateSourceEditorStatus(root);
 }
 
-async function renderDisassemblyEditor(index, entry, path, inspection, architecture = "auto", origin = "", start = "0", length = "8192", focusOffset = null, target = null) {
+// `start` and `length` are empty by default rather than 0 and 8192, so that
+// the first listing of a file lets the decoder choose. For an Atari program
+// that means starting at the code instead of at the 28-byte header. The boxes
+// are then filled in from what came back, so the reader can see the offset and
+// change it.
+async function renderDisassemblyEditor(index, entry, path, inspection, architecture = "auto", origin = "", start = "", length = "", focusOffset = null, target = null) {
   const pane = panes[index];
   if (!target) retainEditorDocument(index, pane, entry, path, "disassembly");
   const query = new URLSearchParams({
@@ -6736,7 +6741,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
       <label>Processor<select name="architecture">${["68000", "68010", "68020", "68030", "68040", "68060"].map(target => `<option value="${target}" ${report.architecture === target ? "selected" : ""}>MC${target}</option>`).join("")}</select></label>
       <label>Origin<input name="origin" value="0x${Number(report.origin).toString(16).toUpperCase()}"></label>
       <label>File offset<input name="start" value="${Number(report.start)}"></label>
-      <label>Bytes<input name="length" value="${Number(length) || 8192}"></label>
+      <label>Bytes<input name="length" value="${Number(length) || Math.max(0, Number(report.end) - Number(report.start)) || 8192}"></label>
       <button class="button small disassembly-refresh" type="button">Disassemble</button>
     </div>
     <div class="disassembly-source" style="${disassemblyColumnStyle(report)}" role="textbox" aria-readonly="true" aria-label="Disassembled source"><div class="disassembly-source-head" aria-hidden="true"><span></span><span>Address</span><span>Bytes</span><span>Instruction</span><span>Annotation</span></div>${disassemblySource(report)}</div>

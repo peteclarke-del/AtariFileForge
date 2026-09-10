@@ -644,31 +644,38 @@ class ProgramDisassemblyTests(unittest.TestCase):
         seven lines that meant nothing.
         """
         program = self._program(b"\x4e\x71" * 8)
-        header, start, length = _program_body(program, 0, None)
+        header, start, length = _program_body(program, None, None)
         self.assertEqual(start, 28)
         self.assertEqual(length, 16)
         self.assertEqual(header["text"], 16)
 
     def test_a_symbol_table_is_not_disassembled_as_code(self) -> None:
         program = self._program(b"\x4e\x71" * 4, symbols=b"SYMBOLDATA" * 4)
-        _header, start, length = _program_body(program, 0, None)
+        _header, start, length = _program_body(program, None, None)
         self.assertEqual((start, length), (28, 8))
 
-    def test_a_caller_asking_for_a_range_gets_that_range(self) -> None:
-        """Reading the header deliberately has to stay possible."""
+    def test_an_offset_of_zero_is_a_deliberate_request_for_the_header(self) -> None:
+        """Absent and zero are different answers to "where do I start?".
+
+        Zero means the reader wants the first byte of the file, header and
+        all. Absent means they have not said, and the decoder should start
+        where the code is. Collapsing the two loses the only way to look at
+        a program header in the disassembler.
+        """
         program = self._program(b"\x4e\x71" * 8)
         self.assertEqual(_program_body(program, 0, 28)[1:], (0, 28))
+        self.assertEqual(_program_body(program, 0, None)[1:], (0, None))
         self.assertEqual(_program_body(program, 2, None)[1:], (2, None))
 
     def test_a_file_that_is_not_a_program_is_left_where_it_was(self) -> None:
-        header, start, length = _program_body(b"not a program at all" * 8, 0, None)
+        header, start, length = _program_body(b"not a program at all" * 8, None, None)
         self.assertIsNone(header)
         self.assertEqual((start, length), (0, None))
 
     def test_a_truncated_program_is_not_treated_as_one(self) -> None:
         """The sizes have to account for the bytes that are there."""
         claimed = struct.pack(">HIIIIIIH", 0x601A, 1_000_000, 0, 0, 0, 0, 0, 0)
-        header, start, _length = _program_body(claimed + b"\x4e\x71", 0, None)
+        header, start, _length = _program_body(claimed + b"\x4e\x71", None, None)
         self.assertIsNone(header)
         self.assertEqual(start, 0)
 

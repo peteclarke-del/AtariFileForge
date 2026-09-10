@@ -102,11 +102,21 @@ async function closeModal(page) {
   await wait(page, 500);
 }
 
-async function openImage(page, file, paneIndex = 0) {
+async function openImage(page, file, paneIndex = 0, { asRawRom = false } = {}) {
   await page.locator(".pane").nth(paneIndex).locator(".pane-open").click();
   await wait(page, 1000);
   await page.setInputFiles('#modal input[name="images"]', [file]);
   await wait(page, 700);
+  // A TOS ROM normally opens as its decoded segments, which is the right
+  // default. The ROM Workbench works on the bytes, so those pictures ask for
+  // the raw view the open dialog offers.
+  if (asRawRom) {
+    await page.evaluate(() => {
+      const select = document.querySelector('#modal select[name="formatOverride"]');
+      if (select) { select.value = "rom"; select.dispatchEvent(new Event("change", { bubbles: true })); }
+    });
+    await wait(page, 400);
+  }
   await page.click("[data-open-selection]");
   // Opening reads and identifies the whole image, which on a hard disk takes a
   // while. Wait for the dialog to go rather than for a fixed time.
@@ -155,6 +165,22 @@ async function clearToasts(page) {
     document.querySelectorAll(".toast-region > *").forEach(node => node.remove());
   });
   await wait(page, 250);
+}
+
+// Double-clicking a row is how anybody opens a file, and the editor picks its
+// own view from what the bytes turn out to be.
+async function openFile(page, name) {
+  await page.evaluate(target => {
+    const row = [...document.querySelectorAll(".pane .file-row")]
+      .find(candidate => (candidate.dataset.name || "") === target);
+    if (!row) throw new Error(`No such file on this disk: ${target}`);
+    row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  }, name);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(page, 500);
+    if (await modalIsOpen(page)) break;
+  }
+  await wait(page, 3000);
 }
 
 async function shot(page, directory, name) {
@@ -319,6 +345,22 @@ scene("staged-installations", HELP, async page => {
   await wait(page, 2000);
   await command(page, "Tools", "staged-installations");
   await wait(page, 3500);
+});
+
+scene("rom-workbench-overview", HELP, async page => {
+  await openImage(page, ROM, 0, { asRawRom: true });
+  await command(page, "Tools", "rom-workbench");
+  await wait(page, 6000);
+});
+
+scene("file-editor-script", HELP, async page => {
+  await openImage(page, DISKS.battleHawks);
+  await openFile(page, "DESKTOP.INF");
+});
+
+scene("file-editor-disassembly", HELP, async page => {
+  await openImage(page, DISKS.battleHawks);
+  await openFile(page, "B_HAWK.PRG");
 });
 
 module.exports = { SHOTS };
