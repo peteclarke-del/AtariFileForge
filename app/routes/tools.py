@@ -1151,19 +1151,19 @@ def create_tools_blueprint(
         return jsonify(stopped=True)
 
     @blueprint.post("/api/images/<image_id>/install/emulator")
-    @request_effect("external", "booting a drive with a disc to run its own installer")
+    @request_effect("external", "booting a drive with a disk to run its own installer")
     def install_under_emulation(image_id):
-        """Boot this hard drive with a title's discs already in the drives.
+        """Boot this hard drive with a title's disks already in the drives.
 
         Some software can only be installed by its own installer: it asks
-        which drawer, which language, which screen mode, and no tool can
+        which folder, which language, which screen mode, and no tool can
         answer those for somebody else. So this mode stops trying. It puts the
         machine in the state the installer needs and hands the operator the
         keyboard.
 
         The drive is handed over as a whole-drive image, the same way a
         hard-drive launch already works, so the installer sees the partitions
-        and the Workbench the operator actually built.
+        and the desktop the operator actually built.
         """
         session = service.get(image_id)
         if session.kind != "hd" and not service.summary(session).get("hardDisk"):
@@ -1172,16 +1172,16 @@ def create_tools_blueprint(
         configured = requested_emulator_session(session, data)
         discs = [service.get(str(item)) for item in (data.get("disks") or [])]
         if not discs:
-            raise DiskError("Choose at least one disc for the installer to read.")
+            raise DiskError("Choose at least one disk for the installer to read.")
         if len(discs) > MAXIMUM_FLOPPY_DRIVES:
             raise DiskError(
                 f"An Atari has {MAXIMUM_FLOPPY_DRIVES} floppy drives. "
-                f"Insert up to {MAXIMUM_FLOPPY_DRIVES} discs and swap the rest as the installer asks."
+                f"Insert up to {MAXIMUM_FLOPPY_DRIVES} disks and swap the rest as the installer asks."
             )
         launch = copy(configured)
         launch.hardware_profile = dict(configured.hardware_profile or {})
-        # The installer is on the hard drive's Workbench, not on the disc, so
-        # the machine must boot the drive rather than the disc in DF0:.
+        # The installer is on the hard drive, not on the disk in A:, so the
+        # machine must boot the drive rather than the floppy.
         launch.hardware_profile["emulatorBoot"] = "boot"
         try:
             arguments, started = interactive_emulator.start(
@@ -1200,9 +1200,9 @@ def create_tools_blueprint(
             "machine": str(started.hardware_profile.get("machine") or ""),
             "disks": [disc.name for disc in discs],
             "summary": (
-                f"{emulator.label} is running with {len(discs)} disc"
+                f"{emulator.label} is running with {len(discs)} disk"
                 f"{'' if len(discs) == 1 else 's'} inserted. "
-                "Run the title's installer from the Workbench and point it at this drive."
+                "Run the title's installer from the desktop and point it at this drive."
             ),
             "displayMode": "native" if runtime.kind == "desktop" else "browser",
             **({} if runtime.kind == "desktop" else {"viewerPort": 8668}),
