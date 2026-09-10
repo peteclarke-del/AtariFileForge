@@ -88,10 +88,10 @@ You need:
 - a current browser with JavaScript, `dialog`, IndexedDB and drag-and-drop
   support.
 
-Large HDA, HDF and RAW images require additional temporary space while an image
+Large hard-disk images require additional temporary space while an image
 is uploaded, checkpointed and packaged. Allow space for the source image, its
 working copy and the finished ZIP at the same time. Raspberry Pi builds also
-need room for native HxCFE, Capstone and FS-UAE compilation.
+need room for the native HxCFE and Capstone builds.
 
 ## Install on desktop Linux, macOS or Windows
 
@@ -175,7 +175,7 @@ The build performs the following platform-sensitive work:
 1. Builds a native Capstone installation when no suitable wheel can be used.
 2. Builds the pinned HxCFloppyEmulator command-line converter (`hxcfe`), its
    private libraries and the upstream licence.
-3. Builds the FS-UAE runtime components.
+3. Installs the emulator runtime components.
 4. Installs Trixie package names appropriate to the target architecture,
    including `liballegro4.4t64`.
 5. Verifies that Capstone exposes M68K support for every 68000-family mode.
