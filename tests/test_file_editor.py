@@ -14,7 +14,7 @@ from app.disk_service import DiskService
 from app.file_editor import (
     _format_basic_listing,
     _printable_strings,
-    _renumber_tokenised,
+    _renumber_listing,
     disassemble_file,
     disassemble_file_data,
     inspect_editable_file,
@@ -261,12 +261,12 @@ class FileEditorTests(unittest.TestCase):
         self.assertTrue(report["readOnly"])
         self.assertFalse(report["editable"])
 
-    def test_renumber_updates_encoded_targets_not_string_contents(self):
-        program = tokenise('10 GOTO 30\n20 PRINT "30"\n30 END')
-        listing = detokenise(_renumber_tokenised(program, 100, 20))
+    def test_renumber_updates_destinations_not_string_contents(self):
+        """A quoted 30 is text, not a line, and must survive a renumber."""
+        listing = _renumber_listing('10 GOTO 30\n20 PRINT "30"\n30 FULLW 2', 100, 20)
         self.assertIn("100 GOTO 140", listing)
         self.assertIn('120 PRINT "30"', listing)
-        self.assertIn("140 END", listing)
+        self.assertIn("140 FULLW 2", listing)
 
     def test_prepare_basic_renumbers_newly_edited_listing(self):
         result = prepare_basic_source('10 PRINT "A"\n15 GOSUB 10\n20 END', 1000, 10)

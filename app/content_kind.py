@@ -97,6 +97,17 @@ BATCH_KEYWORDS = (
     "PAUSE|PRINT|REM|REN|RENAME|RD|RMDIR|RUN|SET|SETENV|TYPE|VER"
 )
 
+#: Words that only appear in a BASIC listing. A saved program is recognised
+#: from its bytes, but a listing saved as plain text has to be told from an
+#: ordinary document, and these are what separate the two: the statements ST
+#: BASIC and STOS write, and the block words GFA indents with.
+BASIC_STATEMENTS = (
+    "CIRCLE|CLEAR|CLOSE|CLS|COLOR|COLOUR|DATA|DEFFN|DEFINT|DIM|DO|ELSE|END|"
+    "ENDIF|FOR|FULLW|GOSUB|GOTO|IF|INPUT|LET|LINE|LOCATE|LOOP|NEXT|ON|OPEN|"
+    "PBOX|PCIRCLE|PRINT|PUT|READ|REM|REPEAT|RESTORE|RETURN|RUN|SELECT|"
+    "SOUND|STOP|SUB|SYSTAB|THEN|UNTIL|VDISYS|WEND|WHILE|WIDTH|WINDOW"
+)
+
 SCRIPT_COMMAND_RE = re.compile(
     r"^\s*(?:(#[a-zA-Z])\s*(.*)|"
     rf"(?:{MINT_CNF_KEYWORDS}|{BATCH_KEYWORDS})\b\s*(.*))$"
@@ -107,17 +118,20 @@ _SCRIPT_ACTION_RE = re.compile(
 )
 
 
-def format_basic_listing(source: str) -> str:
-    """Give every numbered BASIC line one visible separator after its number."""
-    formatted = []
-    for line in source.splitlines():
-        match = re.match(r"^(\d+)(.*)$", line)
-        if not match:
-            formatted.append(line)
-            continue
-        number, body = match.groups()
-        formatted.append(f"{number} {body[1:] if body.startswith((' ', chr(9))) else body}")
-    return "\n".join(formatted)
+def format_basic_listing(source: str, *, numbered: bool = True) -> str:
+    """Give every numbered BASIC line one visible separator after its number.
+
+    Only a numbered dialect is touched. GFA BASIC has no line numbers and
+    indents its blocks instead, so reformatting a GFA listing here would
+    strip exactly the structure that makes it readable.
+    """
+    if not numbered:
+        return str(source)
+    try:
+        from atarinut.basic.stbasic import format_listing
+    except ImportError:  # pragma: no cover - the tokeniser ships with the app
+        return str(source)
+    return format_listing(source)
 
 
 def is_gemdos_program(data: bytes) -> bool:
@@ -126,50 +140,55 @@ def is_gemdos_program(data: bytes) -> bool:
 
 
 def basic_details(data: bytes) -> dict | None:
-    """Describe a tokenised BASIC program, or return None for anything else.
+    """Describe a saved BASIC program, or return None for anything else.
 
-    The dialect is whichever one in the tokeniser's own table scans the
-    program, tried richest first, so a program using keywords a later release
-    added is not mis-read as a damaged earlier one. The dialect names are the
-    tokeniser's to choose; nothing here depends on what they are called.
+    Which BASIC it is comes from the bytes rather than the name, and the
+    decode is the one ``app.basic_listing`` performs, so the inspector, the
+    editor and a report all describe the same program the same way.
+
+    ``editable`` follows the dialect's own writable flag. STOS BASIC is
+    deliberately not writable: this build reads its token stream and does not
+    encode it, so a STOS program opens read-only rather than risking a save
+    the interpreter would refuse to load.
     """
+    from .basic_listing import decode_program
+
+    decoded = decode_program(data)
+    if decoded is None:
+        return None
     try:
-        from atarinut.basic import DIALECTS, Verdict, detect, detokenise, scan_program
-    except ImportError:
+        from atarinut.basic import detokenise, dialect_for
+    except ImportError:  # pragma: no cover - the tokeniser ships with the app
         return None
-    detection = detect(data)
-    if detection.verdict not in {Verdict.BASIC, Verdict.BASIC_TRAILING}:
+    program = data[: decoded.program_length]
+    try:
+        source = format_basic_listing(
+            detokenise(program, dialect=dialect_for(decoded.dialect)),
+            numbered=decoded.line_numbers,
+        )
+    except Exception:
         return None
-    program_length = int(detection.program_length or len(data))
-    program = data[:program_length]
-    for dialect in reversed(list(DIALECTS.values())):
-        try:
-            lines = list(scan_program(program, dialect=dialect))
-            if not lines:
-                continue
-            source = format_basic_listing(detokenise(program, dialect=dialect))
-        except Exception:
-            continue
-        return {
-            "source": source,
-            "dialect": dialect.name,
-            "lineCount": len(lines),
-            "firstLine": lines[0].line_number,
-            "lastLine": lines[-1].line_number,
-            "trailingBytes": len(data) - program_length,
-            "programLength": program_length,
-            "compound": len(data) > program_length,
-            # The tokenised prefix can be replaced independently while
-            # retaining a known trailing payload byte for byte.
-            "editable": program_length <= 64 * 1024,
-            "editNote": (
-                f"The {len(data) - program_length:,}-byte trailing payload will be "
-                "preserved unchanged."
-                if len(data) > program_length
-                else ""
-            ),
-        }
-    return None
+    trailing = len(data) - decoded.program_length
+    return {
+        "source": source,
+        "dialect": decoded.dialect,
+        "dialectId": decoded.dialect_id,
+        "lineNumbers": decoded.line_numbers,
+        "lineCount": len(decoded.lines),
+        "firstLine": decoded.lines[0].number if decoded.lines else None,
+        "lastLine": decoded.lines[-1].number if decoded.lines else None,
+        "trailingBytes": trailing,
+        "programLength": decoded.program_length,
+        "compound": trailing > 0,
+        # The program can be replaced independently while retaining a known
+        # trailing payload byte for byte.
+        "editable": decoded.writable and decoded.program_length <= 64 * 1024,
+        "editNote": (
+            f"The {trailing:,}-byte trailing payload will be preserved unchanged."
+            if trailing > 0
+            else decoded.reason if not decoded.writable else ""
+        ),
+    }
 
 
 def script_details(data: bytes, path: str, printable_ratio: float) -> dict | None:
@@ -275,7 +294,7 @@ def metadata_kind(name: str, filetype: int | str | None = None) -> str | None:
         return "program"
     if suffix in PROGRAM_EXTENSIONS:
         return "program"
-    if suffix in {".bas", ".gfa", ".sto", ".stb", ".bak"} and suffix != ".bak":
+    if suffix in {".bas", ".gfa", ".lst", ".asc", ".sto", ".stb"}:
         return "basic"
     if leaf in SCRIPT_NAMES or suffix in SCRIPT_EXTENSIONS:
         return "script"

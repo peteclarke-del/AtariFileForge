@@ -939,20 +939,29 @@ def create_tools_blueprint(
             step = int(data.get("step", 10))
         except (TypeError, ValueError) as exc:
             raise DiskError("The BASIC start and step must be whole numbers.") from exc
-        return jsonify(prepare_basic_source(str(data.get("text") or ""), start, step))
+        return jsonify(prepare_basic_source(
+            str(data.get("text") or ""), start, step, data.get("dialect"),
+        ))
 
     @blueprint.post("/api/images/<image_id>/inspect/basic/normalise")
     @request_effect("read-only", "normalising BASIC source for review")
     def normalise_basic(image_id):
         service.get(image_id)
-        return jsonify(normalise_basic_source(str(payload().get("text") or "")))
+        data = payload()
+        return jsonify(
+            normalise_basic_source(str(data.get("text") or ""), data.get("dialect"))
+        )
 
     @blueprint.post("/api/images/<image_id>/inspect/basic/verify")
     @request_effect("read-only", "verifying BASIC source")
     def verify_basic(image_id):
         service.get(image_id)
         data = payload()
-        return jsonify(verify_basic_source(str(data.get("text") or ""), str(data.get("baseline") or "")))
+        return jsonify(verify_basic_source(
+            str(data.get("text") or ""),
+            str(data.get("baseline") or ""),
+            data.get("dialect"),
+        ))
 
     @blueprint.get("/api/images/<image_id>/editor-project")
     def editor_project(image_id):
@@ -1435,7 +1444,7 @@ def create_tools_blueprint(
         runs = data.get("runs")
         if not isinstance(runs, list):
             raise DiskError("BASIC packing requires a list of safe statement runs.")
-        return jsonify(pack_basic_lines(runs))
+        return jsonify(pack_basic_lines(runs, data.get("dialect")))
 
     @blueprint.get("/api/images/<image_id>/disassembly")
     def inspect_disassembly(image_id):

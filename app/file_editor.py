@@ -802,67 +802,145 @@ def _apply_editor_project(report: dict, project: dict, data: bytes, origin: int,
     report["rows"] = rows
 
 
-def _renumber_tokenised(program: bytes, start: int, step: int) -> bytes:
+#: The dialect the editing helpers assume when a request names none. It is
+#: the numbered, text-saving BASIC Atari shipped, which is the one those
+#: helpers were written for; every other dialect has to be named outright so
+#: a listing is never re-encoded as a BASIC it was not written in.
+DEFAULT_BASIC_DIALECT = "st-basic"
+
+
+def _basic_dialect(name: object = None):
+    """Resolve the dialect a request named, and refuse one that cannot be written."""
     try:
-        from atarinut.basic import TokenKind, scan_program
-        from atarinut.basic.linenumber import encode_line_number
-    except ImportError as exc:
-        raise DiskError("The ST BASIC editing library is unavailable.") from exc
-    lines = list(scan_program(program))
-    if not lines:
+        from atarinut.basic import dialect_for
+    except ImportError as exc:  # pragma: no cover - the tokeniser ships with the app
+        raise DiskError("The BASIC editing library is unavailable.") from exc
+    try:
+        dialect = dialect_for(str(name or DEFAULT_BASIC_DIALECT))
+    except Exception as exc:
+        raise DiskError(f"“{name}” is not a BASIC this build reads.") from exc
+    if not dialect.writable:
+        raise DiskError(
+            f"{dialect.name} is read-only in this build: its token stream is "
+            "decoded but never re-encoded, so a saved program could not be "
+            "proved to load again."
+        )
+    return dialect
+
+
+def _dialect_of(data: bytes):
+    """Return the dialect a saved program is written in, refusing an unwritable one."""
+    try:
+        from atarinut.basic import Verdict, detect
+    except ImportError as exc:  # pragma: no cover - the tokeniser ships with the app
+        raise DiskError("The BASIC editing library is unavailable.") from exc
+    detection = detect(data)
+    if detection.verdict not in {Verdict.BASIC, Verdict.BASIC_TRAILING} or detection.dialect is None:
+        raise DiskError("The file is no longer a recognised BASIC program.")
+    if not detection.dialect.writable:
+        raise DiskError(
+            f"{detection.dialect.name} is read-only in this build: its token "
+            "stream is decoded but never re-encoded, so a saved program could "
+            "not be proved to load again."
+        )
+    return detection.dialect
+
+
+def _renumber_listing(listing: str, start: int, step: int) -> str:
+    """Renumber a numbered listing and every reference that follows it.
+
+    Renumbering is a text transform. ST BASIC saves its listing as characters,
+    so the numbers at the start of each line and the destinations named by
+    GOTO, GOSUB, THEN, RESTORE and RUN are all ordinary text, and rewriting
+    them is the whole of the job.
+    """
+    rows = listing.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    numbered = [
+        (index, int(match.group(1)), row[match.end():])
+        for index, row in enumerate(rows)
+        if (match := re.match(r"^\s*(\d+)[ \t]?", row))
+    ]
+    if not numbered:
         raise DiskError("The BASIC program contains no numbered lines.")
-    if start < 0 or step < 1 or start + step * (len(lines) - 1) > 32767:
+    if start < 0 or step < 1 or start + step * (len(numbered) - 1) > 32767:
         raise DiskError("Choose line numbers from 0 to 32767 with a positive step.")
-    mapping = {line.line_number: start + index * step for index, line in enumerate(lines)}
-    result = bytearray(program)
-    for line in lines:
-        replacement = mapping[line.line_number]
-        result[line.start + 1] = replacement >> 8
-        result[line.start + 2] = replacement & 0xFF
-        for token in line.tokens:
-            if token.kind is TokenKind.LINENUM:
-                referenced = int(token.value)
-                if referenced in mapping:
-                    result[token.start + 1:token.start + 4] = encode_line_number(mapping[referenced])
-    return bytes(result)
+    mapping = {
+        original: start + position * step
+        for position, (_index, original, _body) in enumerate(numbered)
+    }
+
+    def retarget(match: "re.Match[str]") -> str:
+        referenced = int(match.group(2))
+        return f"{match.group(1)}{mapping.get(referenced, referenced)}"
+
+    for position, (index, original, body) in enumerate(numbered):
+        body = re.sub(
+            r"(\b(?:GOTO|GOSUB|RESTORE|THEN|RUN|ELSE)\s+)(\d+)",
+            retarget,
+            body,
+            flags=re.IGNORECASE,
+        )
+        rows[index] = f"{mapping[original]} {body.lstrip()}".rstrip()
+    return "\n".join(rows)
 
 
-def prepare_basic_source(source: str, start: int, step: int) -> dict:
+def prepare_basic_source(source: str, start: int, step: int, dialect: object = None) -> dict:
+    """Renumber a listing, and prove the result still encodes."""
+    chosen = _basic_dialect(dialect)
+    if not chosen.line_numbers:
+        raise DiskError(
+            f"{chosen.name} has no line numbers; it indents its blocks instead, "
+            "so there is nothing to renumber."
+        )
     try:
         from atarinut.basic import detokenise, scan_program, tokenise
-        program = tokenise(source.replace("\r\n", "\n").replace("\r", "\n"))
-        renumbered = _renumber_tokenised(program, start, step)
+        cleaned = source.replace("\r\n", "\n").replace("\r", "\n")
+        program = tokenise(_renumber_listing(cleaned, start, step), dialect=chosen)
         return {
-            "text": _format_basic_listing(detokenise(renumbered)),
-            "lineCount": len(list(scan_program(renumbered))),
+            "text": _format_basic_listing(
+                detokenise(program, dialect=chosen), numbered=chosen.line_numbers
+            ),
+            "lineCount": len(list(scan_program(program, dialect=chosen))),
+            "dialect": chosen.name,
+            "dialectId": chosen.identifier,
         }
     except DiskError:
         raise
     except Exception as exc:
-        raise DiskError(f"The BASIC listing could not be tokenised: {exc}") from exc
+        raise DiskError(f"The BASIC listing could not be encoded: {exc}") from exc
 
 
-def normalise_basic_source(source: str) -> dict:
+def normalise_basic_source(source: str, dialect: object = None) -> dict:
+    chosen = _basic_dialect(dialect)
     try:
         from atarinut.basic import detokenise, scan_program, tokenise
-        program = tokenise(source.replace("\r\n", "\n").replace("\r", "\n"))
+        program = tokenise(
+            source.replace("\r\n", "\n").replace("\r", "\n"), dialect=chosen
+        )
         return {
-            "text": _format_basic_listing(detokenise(program)),
-            "lineCount": len(list(scan_program(program))),
+            "text": _format_basic_listing(
+                detokenise(program, dialect=chosen), numbered=chosen.line_numbers
+            ),
+            "lineCount": len(list(scan_program(program, dialect=chosen))),
+            "dialect": chosen.name,
+            "dialectId": chosen.identifier,
         }
     except Exception as exc:
-        raise DiskError(f"The pasted text is not a valid numbered ST BASIC listing: {exc}") from exc
+        raise DiskError(f"The pasted text is not a valid {chosen.name} listing: {exc}") from exc
 
 
-def verify_basic_source(source: str, baseline: str = "") -> dict:
-    """Tokenise, detokenise and retokenise source, reporting its exact round trip."""
+def verify_basic_source(source: str, baseline: str = "", dialect: object = None) -> dict:
+    """Encode, decode and re-encode a listing, reporting its exact round trip."""
+    chosen = _basic_dialect(dialect)
     try:
         from atarinut.basic import detokenise, scan_program, tokenise
         cleaned = source.replace("\r\n", "\n").replace("\r", "\n")
-        program = tokenise(cleaned)
-        listing = _format_basic_listing(detokenise(program))
-        repeated = tokenise(listing)
-        scanned = list(scan_program(program))
+        program = tokenise(cleaned, dialect=chosen)
+        listing = _format_basic_listing(
+            detokenise(program, dialect=chosen), numbered=chosen.line_numbers
+        )
+        repeated = tokenise(listing, dialect=chosen)
+        scanned = list(scan_program(program, dialect=chosen))
         ranges = []
         for index, line in enumerate(scanned):
             end = scanned[index + 1].start if index + 1 < len(scanned) else len(program)
@@ -875,9 +953,9 @@ def verify_basic_source(source: str, baseline: str = "") -> dict:
         diff = list(unified_diff(baseline_lines, listing.splitlines(), fromfile="original", tofile="proposed", lineterm=""))
         warnings = []
         if program != repeated:
-            warnings.append("Tokenising the round-trip listing did not reproduce identical bytes.")
+            warnings.append("Encoding the round-trip listing did not reproduce identical bytes.")
         if len(program) > 65535:
-            warnings.append("The tokenised program exceeds 64 KiB and may not fit the target machine.")
+            warnings.append("The saved program exceeds 64 KiB and may not fit the target machine.")
         return {
             "valid": not warnings,
             "roundTripExact": program == repeated,
@@ -887,25 +965,36 @@ def verify_basic_source(source: str, baseline: str = "") -> dict:
             "lineRanges": ranges,
             "destinations": destinations,
             "diff": diff[:4000],
+            "dialect": chosen.name,
+            "dialectId": chosen.identifier,
             "warnings": warnings,
         }
     except Exception as exc:
-        raise DiskError(f"The BASIC listing could not complete a tokenisation round trip: {exc}") from exc
+        raise DiskError(f"The BASIC listing could not complete an encoding round trip: {exc}") from exc
 
 
-def pack_basic_lines(runs: list[list[str]]) -> dict:
-    """Pack ordered BASIC statements using the tokeniser's real line limit.
+def pack_basic_lines(runs: list[list[str]], dialect: object = None) -> dict:
+    """Pack ordered BASIC statements using the encoder's real line limit.
 
-    The browser decides which physical-line boundaries are semantically safe to
-    remove.  This helper has the narrower job of fitting those safe runs into as
-    few tokenised ST BASIC 1.0 lines as possible.  Measuring the actual token stream
-    matters because keywords and line destinations occupy fewer bytes than their
-    readable source spelling.
+    The browser decides which physical-line boundaries are semantically safe
+    to remove. This helper has the narrower job of fitting those safe runs
+    into as few saved lines as possible. Measuring what the encoder actually
+    produces matters because a keyword and a line destination can occupy
+    fewer bytes than their readable spelling.
+
+    Only a numbered dialect is packed: a line number is what a statement can
+    be joined onto, and a dialect without them has nothing to pack into.
     """
+    chosen = _basic_dialect(dialect)
+    if not chosen.line_numbers:
+        raise DiskError(
+            f"{chosen.name} has no line numbers, so its statements cannot be "
+            "packed onto fewer of them."
+        )
     try:
         from atarinut.basic import tokenise
     except ImportError as exc:
-        raise DiskError("The ST BASIC editing library is unavailable.") from exc
+        raise DiskError("The BASIC editing library is unavailable.") from exc
 
     packed: list[list[int]] = []
     for run_number, raw_run in enumerate(runs, start=1):
@@ -917,7 +1006,7 @@ def pack_basic_lines(runs: list[list[str]]) -> dict:
         for statement in statements:
             candidate = [*current, statement]
             try:
-                tokenise(f"10 {':'.join(candidate)}")
+                tokenise(f"10 {':'.join(candidate)}", dialect=chosen)
                 current = candidate
             except Exception as exc:
                 if not current:
@@ -928,7 +1017,7 @@ def pack_basic_lines(runs: list[list[str]]) -> dict:
                 groups.append(len(current))
                 current = [statement]
                 try:
-                    tokenise(f"10 {statement}")
+                    tokenise(f"10 {statement}", dialect=chosen)
                 except Exception as single_exc:
                     raise DiskError(
                         f"A BASIC statement in packing run {run_number} cannot fit on a "
@@ -1017,36 +1106,45 @@ def update_file_properties(
     return service.summary(session)
 
 
-def _encode_editor_text(text: str, basic: bool) -> bytes:
+def _encode_editor_text(text: str, basic: bool, dialect=None) -> bytes:
     """Encode edited text the way GEMDOS stores it: one newline per line."""
     try:
         normalised = text.replace("\r\n", "\n").replace("\r", "\n")
         if basic:
             from atarinut.basic import tokenise
-            return tokenise(normalised)
+
+            return tokenise(normalised, dialect=dialect or _basic_dialect())
         return normalised.encode("latin-1", "strict")
+    except DiskError:
+        raise
     except Exception as exc:
         raise DiskError(f"The edited file could not be encoded: {exc}") from exc
 
 
-def _preserve_basic_payload(original: bytes, tokenised: bytes) -> bytes:
-    """Replace only an ST BASIC 1.0 program prefix and retain a proven trailing payload."""
+def _preserve_basic_payload(original: bytes, program: bytes) -> bytes:
+    """Replace only the BASIC program and retain a proven trailing payload."""
     try:
         from atarinut.basic import Verdict, detect
-    except ImportError as exc:
-        raise DiskError("The ST BASIC editing library is unavailable.") from exc
+    except ImportError as exc:  # pragma: no cover - the tokeniser ships with the app
+        raise DiskError("The BASIC editing library is unavailable.") from exc
     detection = detect(original)
     if detection.verdict not in {Verdict.BASIC, Verdict.BASIC_TRAILING}:
-        raise DiskError("The file is no longer a recognised tokenised BASIC program.")
+        raise DiskError("The file is no longer a recognised BASIC program.")
     program_length = int(detection.program_length or len(original))
     if program_length < 2 or program_length > len(original):
         raise DiskError("The original BASIC program boundary is invalid.")
-    return tokenised + original[program_length:]
+    return program + original[program_length:]
 
 
 def encode_editor_replacement(original: bytes, text: str, basic: bool) -> bytes:
-    """Encode editor text and preserve any recognised compound BASIC payload."""
-    encoded = _encode_editor_text(text, basic)
+    """Encode editor text and preserve any recognised compound BASIC payload.
+
+    The dialect comes from the bytes being replaced rather than from the
+    request, so an edited program is always saved as the BASIC it was written
+    in and a read-only one is refused before anything is written.
+    """
+    dialect = _dialect_of(original) if basic else None
+    encoded = _encode_editor_text(text, basic, dialect)
     return _preserve_basic_payload(original, encoded) if basic else encoded
 
 
@@ -1078,22 +1176,18 @@ def save_editor_text_as(
         raise DiskError(f"“{leaf}” already exists in this directory.")
 
     row = _find_row(service, session, path, side)
-    content = _encode_editor_text(text, basic)
-    if basic:
-        content = _preserve_basic_payload(current, content)
-    filetype = row.get("filetype") or None
-    protection = str(row.get("protectionText") or row.get("protection") or "") or None
-    comment = str(row.get("comment") or "") or None
-    # A locked entry shows neither the write nor the delete flag.
-    attributes = str(row.get("attr") or "")
-    was_locked = bool(attributes) and ("w" not in attributes or "d" not in attributes)
+    content = encode_editor_replacement(current, text, basic)
+    attributes = str(row.get("attributes") or row.get("attr") or "") or None
+    # The read-only bit is the one attribute a copy must carry: a file the
+    # desktop refuses to delete has to stay that way.
+    was_locked = bool(attributes) and "r" in attributes
     with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="file-save-as-", delete=False) as temporary:
         temporary.write(content)
         temporary_path = Path(temporary.name)
     try:
-        service.put(session, destination, temporary_path, protection, comment, filetype, side)
+        service.put(session, destination, temporary_path, attributes)
         if was_locked:
-            service.set_access(session, [destination], writable=False, side=side)
+            service.set_access(session, [destination], writable=False)
     finally:
         temporary_path.unlink(missing_ok=True)
     return service.summary(session), destination
