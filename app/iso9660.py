@@ -1,28 +1,32 @@
-"""Read an ISO 9660 CD image, including the Atari extensions Atari CDs use.
+"""Read an ISO 9660 CD image, as MetaDOS on an Atari would present one.
 
-TOS 3.5 and 3.9 were published on CD, as were the OS4 releases and a great
-deal of other Atari material, so a workshop that cannot open an ISO cannot see
-any of it. This reads one.
+A great deal of ST and Falcon material was published on CD, and much more of
+it has been mastered onto one since, so a workshop that cannot open an ISO
+cannot see any of it. This reads one.
 
 It is read directly from the file rather than loaded into memory, because a CD
-image is up to seven hundred megabytes and the interesting ones here are
-already close to five hundred. A directory listing should not cost half a
-gigabyte of resident memory, and an ISO is random access by construction, so
-seeking is both cheaper and simpler than holding the whole disc.
+image is up to seven hundred megabytes and the interesting ones are already
+close to five hundred. A directory listing should not cost half a gigabyte of
+resident memory, and an ISO is random access by construction, so seeking is
+both cheaper and simpler than holding the whole disc.
 
-Three naming schemes have to be reconciled, and real Atari discs use all of
-them. The base ISO name is upper case, eight-and-three by default, and carries
-a ``;1`` version suffix that nobody wants to see. **Joliet** publishes proper
+Three naming schemes have to be reconciled, and real discs use all of them.
+The base ISO name is upper case, eight-and-three by default, and carries a
+``;1`` version suffix that nobody wants to see; that is the name MetaDOS
+itself hands to a GEMDOS program, which is why it is still read and shown
+rather than treated as an implementation detail. **Joliet** publishes proper
 names in UCS-2 in a second directory tree. **Rock Ridge** publishes them in an
-``NM`` entry attached to the ordinary record. The TOS 3.5 disc has Joliet,
-the 3.9 disc has Rock Ridge, and the OS4 disc has Rock Ridge with continuation
-areas, so all three paths are exercised by discs somebody will actually open.
+``NM`` entry attached to the ordinary record.
 
-The one that matters most here is ``AS``, the Atari extension to Rock Ridge. It
-carries the file's protection bits and its comment, which is exactly the
-metadata this application refuses to lose everywhere else: a loader that
-arrives without its ``e`` bit does not run, and the failure looks nothing like
-a missing permission. An Atari CD records them, so they are read.
+Joliet is preferred, then Rock Ridge, then the base tree. Nothing hangs off
+the base tree's records that would be lost by reading a better name from
+elsewhere: the file metadata a disc can carry here is what an entry's own
+directory record says, and both trees describe the same files.
+
+A file on a CD is read-only by construction, so every entry reports the
+GEMDOS attributes an Atari would see for it: read-only, plus the directory
+attribute for a drawer and the hidden attribute when the disc marks the entry
+hidden. The recording datestamp comes from the directory record.
 
 The reader is deliberately suspicious of its input. A CD image is a file from
 somewhere else, and a malformed or hostile one must not be able to walk this
@@ -69,7 +73,38 @@ MAX_CONTINUATIONS = 8
 JOLIET_ESCAPES = (b"%/@", b"%/C", b"%/E")
 
 #: Directory record flags.
+FLAG_HIDDEN = 0x01
 FLAG_DIRECTORY = 0x02
+
+#: The GEMDOS file attribute bits, as ``Fsfirst`` reports them, and the letter
+#: each one is printed as. A CD can only ever produce three of them, but the
+#: full set is named so the formatting is the same everywhere.
+ATTR_READ_ONLY = 0x01
+ATTR_HIDDEN = 0x02
+ATTR_SYSTEM = 0x04
+ATTR_VOLUME = 0x08
+ATTR_DIRECTORY = 0x10
+ATTR_ARCHIVE = 0x20
+
+_ATTRIBUTE_LETTERS = (
+    (ATTR_READ_ONLY, "r"),
+    (ATTR_HIDDEN, "h"),
+    (ATTR_SYSTEM, "s"),
+    (ATTR_VOLUME, "v"),
+    (ATTR_DIRECTORY, "d"),
+    (ATTR_ARCHIVE, "a"),
+)
+
+
+def format_attributes(value: int) -> str:
+    """Print a GEMDOS attribute byte as the letters a listing shows.
+
+    A set bit prints its letter and a clear one prints a dash, so the width is
+    the same for every entry and a column of them lines up.
+    """
+    return "".join(
+        letter if int(value) & bit else "-" for bit, letter in _ATTRIBUTE_LETTERS
+    )
 
 
 class Iso9660Error(Exception):
@@ -85,17 +120,21 @@ class IsoEntry:
     directory: bool
     length: int = 0
     extent: int = 0
-    #: Atari protection bits from an ``AS`` entry, as the raw GEMDOS long.
-    #: ``None`` when the disc does not record them.
-    protection: int | None = None
-    #: The Atari file comment from an ``AS`` entry.
-    comment: str = ""
+    #: The GEMDOS attribute byte an Atari would see. Everything on a CD is
+    #: read-only, so that bit is always set; the directory and hidden bits
+    #: follow the entry's own directory-record flags.
+    attributes: int = ATTR_READ_ONLY
     #: Recording date, as the seven-byte ISO field decoded to a datestamp.
     datestamp: str = ""
 
     @property
     def is_file(self) -> bool:
         return not self.directory
+
+    @property
+    def attribute_letters(self) -> str:
+        """The attribute byte in the spelling a listing shows."""
+        return format_attributes(self.attributes)
 
 
 @dataclass
@@ -123,9 +162,13 @@ def _both_endian_32(data: bytes, offset: int) -> int:
 def _decode_name(raw: bytes, joliet: bool) -> str:
     """Turn an ISO file identifier into the name to show.
 
-    Joliet identifiers are UCS-2 big endian. Base identifiers are ASCII, upper
-    case, and carry a ``;1`` version suffix that is an artefact of the format
-    rather than part of the name.
+    Joliet identifiers are UCS-2 big endian and are shown as written. Base
+    identifiers are level 1: ASCII, eight-and-three, upper case, and carrying a
+    ``;1`` version suffix that is an artefact of the format rather than part of
+    the name. They are upper-cased rather than trusted to already be so,
+    because a mastering tool that wrote them in mixed case produced a name
+    MetaDOS on the Atari would not show, and two entries differing only in
+    case would then look like two files where the machine sees one.
     """
     if joliet:
         try:
@@ -133,7 +176,7 @@ def _decode_name(raw: bytes, joliet: bool) -> str:
         except UnicodeDecodeError:
             name = raw.decode("latin-1", "replace")
     else:
-        name = raw.decode("latin-1", "replace")
+        name = raw.decode("latin-1", "replace").upper()
     version = name.rfind(";")
     if version > 0:
         name = name[:version]
@@ -179,32 +222,6 @@ def _susp_entries(area: bytes) -> list[tuple[str, int, bytes]]:
         entries.append((signature.decode("ascii"), version, area[offset + 4:offset + length]))
         offset += length
     return entries
-
-
-def _atari_metadata(payload: bytes) -> tuple[int | None, str]:
-    """Decode an ``AS`` entry into Atari protection bits and a comment.
-
-    The Atari extension records what GEMDOS keeps and ISO 9660 has nowhere to
-    put. A flags byte says which of the two are present, the protection is a
-    four-byte field whose low half is the ``hsparwed`` long, and the comment is
-    a counted string.
-    """
-    if not payload:
-        return None, ""
-    flags = payload[0]
-    offset = 1
-    protection: int | None = None
-    comment = ""
-    if flags & 0x01:
-        if len(payload) < offset + 4:
-            return None, ""
-        protection = struct.unpack_from(">I", payload, offset)[0] & 0xFFFF
-        offset += 4
-    if flags & 0x02 and len(payload) > offset:
-        size = payload[offset]
-        offset += 1
-        comment = payload[offset:offset + size].decode("latin-1", "replace")
-    return protection, comment
 
 
 class Iso9660Image:
@@ -261,19 +278,19 @@ class Iso9660Image:
         """Choose the tree to read the disc through.
 
         A disc may publish the same files twice: once in the base tree and
-        again in a Joliet tree carrying long names. Preferring Joliet is the
-        usual choice and it is the wrong one here, because the Atari
-        extensions hang off the base tree's records. Reading the TOS 3.5
-        disc through Joliet produced perfectly good names and lost the
-        protection bits and comments on all six thousand files.
+        again in a Joliet tree carrying long names. Joliet wins, then Rock
+        Ridge in the base tree, then the base tree's own eight-and-three
+        names with the version suffix stripped.
 
-        So the base tree wins whenever it carries Rock Ridge, which is what
-        ``AS`` and ``NM`` indicate, and Joliet is the fallback for a disc whose
-        base tree really is eight-and-three upper case with nothing attached.
+        Preferring Joliet costs nothing here. Both trees describe the same
+        files and share their data extents, and the metadata this reader
+        reports -- the GEMDOS attributes and the recording date -- is in the
+        directory record of whichever tree is being read, so there is nothing
+        attached to the base tree that reading Joliet would lose.
 
-        The first primary descriptor wins. The TOS 3.9 disc carries two,
-        which is not what the standard describes, and taking the last would
-        read a different tree from the one every other reader uses.
+        The first primary descriptor wins. A disc carrying two is not what the
+        standard describes but does happen, and taking the last would read a
+        different tree from the one every other reader uses.
         """
         primary: _Descriptor | None = None
         joliet: _Descriptor | None = None
@@ -306,7 +323,7 @@ class Iso9660Image:
                     joliet = descriptor
             elif kind == PRIMARY and primary is None:
                 primary = descriptor
-        chosen = primary if primary is not None and self._has_rock_ridge(primary) else (joliet or primary)
+        chosen = joliet or primary
         if chosen is None:
             raise Iso9660Error(
                 f"{self.path.name} has no ISO 9660 volume descriptor, so it is not a CD image."
@@ -314,37 +331,6 @@ class Iso9660Image:
         if not chosen.volume:
             chosen.volume = self.path.stem
         return chosen
-
-    def _has_rock_ridge(self, descriptor: _Descriptor) -> bool:
-        """Whether this tree's records carry Rock Ridge or the Atari extension.
-
-        Answered by looking at the root's own records rather than by trusting
-        the ``SP`` indicator alone, because what matters is whether the
-        entries an operator will read actually carry ``NM`` and ``AS``.
-        """
-        try:
-            block = self._sector(
-                descriptor.root_extent,
-                -(-min(descriptor.root_length, SECTOR * 4) // SECTOR) or 1,
-            )
-        except Iso9660Error:
-            return False
-        offset = 0
-        seen = 0
-        while offset + 33 <= len(block) and seen < 8:
-            record_length = block[offset]
-            if record_length < 33 or offset + record_length > len(block):
-                break
-            name_length = block[offset + 32]
-            system_start = 33 + name_length + ((name_length + 1) % 2)
-            for signature, _version, _payload in _susp_entries(
-                block[offset + system_start:offset + record_length]
-            ):
-                if signature in ("NM", "AS"):
-                    return True
-            seen += 1
-            offset += record_length
-        return False
 
     # ------------------------------------------------------------------
     # Directories
@@ -362,15 +348,13 @@ class Iso9660Image:
         sectors = self._sector(block, 1 + (offset + length) // SECTOR)
         return sectors[offset:offset + length]
 
-    def _rock_ridge(self, area: bytes) -> tuple[str, int | None, str]:
-        """Read the alternate name and Atari metadata out of a system-use area.
+    def _rock_ridge_name(self, area: bytes) -> str:
+        """Read the alternate name out of a system-use area.
 
         ``CE`` chains are followed a bounded number of times: a disc that
         pointed a continuation at itself would otherwise never finish.
         """
         name_parts: list[str] = []
-        protection: int | None = None
-        comment = ""
         pending = area
         for _ in range(MAX_CONTINUATIONS):
             if not pending:
@@ -381,16 +365,10 @@ class Iso9660Image:
                     # The low flag bit says another NM entry continues this
                     # name, which is how a long name spans continuations.
                     name_parts.append(payload[1:].decode("latin-1", "replace"))
-                elif signature == "AS":
-                    atari_protection, atari_comment = _atari_metadata(payload)
-                    if atari_protection is not None:
-                        protection = atari_protection
-                    if atari_comment:
-                        comment = atari_comment
                 elif signature == "CE":
                     following = self._continuation(payload)
             pending = following
-        return "".join(name_parts), protection, comment
+        return "".join(name_parts)
 
     def _records(self, extent: int, length: int, parent: str) -> list[IsoEntry]:
         """Decode one directory extent into entries.
@@ -424,19 +402,27 @@ class Iso9660Image:
                 offset += record_length
                 continue
             system_start = 33 + name_length + ((name_length + 1) % 2)
-            alternate, protection, comment = self._rock_ridge(record[system_start:])
+            # A Joliet tree carries the long name in the identifier itself, so
+            # Rock Ridge is only consulted when the base tree is being read.
+            alternate = "" if self._descriptor.joliet else self._rock_ridge_name(record[system_start:])
             name = alternate or _decode_name(raw_name, self._descriptor.joliet)
             if not name or name in (".", "..") or "/" in name:
                 offset += record_length
                 continue
+            is_directory = bool(flags & FLAG_DIRECTORY)
             entries.append(IsoEntry(
                 name=name,
                 path=f"{parent}/{name}" if parent else name,
-                directory=bool(flags & FLAG_DIRECTORY),
+                directory=is_directory,
                 length=_both_endian_32(record, 10),
                 extent=_both_endian_32(record, 2),
-                protection=protection,
-                comment=comment,
+                # Nothing on a disc can be written, so every entry is
+                # read-only; the other two bits are what the record says.
+                attributes=(
+                    ATTR_READ_ONLY
+                    | (ATTR_DIRECTORY if is_directory else 0)
+                    | (ATTR_HIDDEN if flags & FLAG_HIDDEN else 0)
+                ),
                 datestamp=_decode_datestamp(record[18:25]),
             ))
             offset += record_length
@@ -455,6 +441,7 @@ class Iso9660Image:
             directory=True,
             extent=self._descriptor.root_extent,
             length=self._descriptor.root_length,
+            attributes=ATTR_READ_ONLY | ATTR_DIRECTORY,
         )
         for index, part in enumerate(parts):
             if not entry.directory:
@@ -527,10 +514,17 @@ def is_iso_name(filename: str) -> bool:
 
 
 __all__ = [
+    "ATTR_ARCHIVE",
+    "ATTR_DIRECTORY",
+    "ATTR_HIDDEN",
+    "ATTR_READ_ONLY",
+    "ATTR_SYSTEM",
+    "ATTR_VOLUME",
     "Iso9660Error",
     "Iso9660Image",
     "IsoEntry",
     "SECTOR",
+    "format_attributes",
     "is_iso_bytes",
     "is_iso_name",
 ]
