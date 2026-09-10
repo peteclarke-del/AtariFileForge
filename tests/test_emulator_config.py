@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import shutil
 import struct
 import tempfile
@@ -64,6 +65,35 @@ def _hatari():
         yield
 
 
+#: Sizes and mapped addresses by release, so a fixture ROM is the shape the
+#: real one is. A ROM built any other way is rejected before it is offered,
+#: which is the point of the check.
+_ROM_SHAPE = {
+    "100": (192, 0xFC0000), "102": (192, 0xFC0000), "104": (192, 0xFC0000),
+    "106": (256, 0xE00000), "162": (256, 0xE00000),
+    "205": (256, 0xE00000), "206": (256, 0xE00000),
+    "306": (512, 0xE00000),
+    "400": (512, 0xE00000), "402": (512, 0xE00000), "404": (512, 0xE00000),
+}
+
+
+def rom_bytes(name: str) -> bytes:
+    """A ROM the decoder accepts, shaped by the release its name states."""
+    release = re.match(r"tos(\d{3})", name)
+    kilobytes, base = _ROM_SHAPE.get(release.group(1) if release else "", (192, 0xFC0000))
+    version = int(release.group(1), 16) if release else 0x104
+    size = kilobytes * 1024
+    data = bytearray(size)
+    struct.pack_into(">H", data, 0x00, 0x602E)
+    struct.pack_into(">H", data, 0x02, version)
+    struct.pack_into(">I", data, 0x04, base + 0x30)
+    struct.pack_into(">I", data, 0x08, base)
+    struct.pack_into(">I", data, 0x0C, base + size)
+    struct.pack_into(">I", data, 0x18, 0x04141993)
+    struct.pack_into(">H", data, 0x1C, 0x0006)
+    return bytes(data)
+
+
 @contextlib.contextmanager
 def _firmware(*names: str):
     """An operator ROM directory holding exactly ``names``, and no repository ROMs.
@@ -76,7 +106,7 @@ def _firmware(*names: str):
         roms = Path(temporary) / "tos"
         roms.mkdir()
         for name in names:
-            (roms / name).write_bytes(b"\0" * 16)
+            (roms / name).write_bytes(rom_bytes(name))
         with patch.object(emulator_config, "TOS_DIR", roms), patch.object(
             emulator_config, "REPOSITORY_TOS_DIR", Path(temporary) / "absent",
         ):
@@ -354,8 +384,8 @@ class FirmwareLookupTests(unittest.TestCase):
             repository = Path(temporary) / "repository"
             operator.mkdir()
             repository.mkdir()
-            (operator / "tos104us.img").write_bytes(b"\0" * 16)
-            (repository / "tos104uk.img").write_bytes(b"\0" * 16)
+            (operator / "tos104us.img").write_bytes(rom_bytes("tos104us.img"))
+            (repository / "tos104uk.img").write_bytes(rom_bytes("tos104uk.img"))
             with patch.object(emulator_config, "TOS_DIR", operator), patch.object(
                 emulator_config, "REPOSITORY_TOS_DIR", repository,
             ):
