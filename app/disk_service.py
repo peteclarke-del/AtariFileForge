@@ -83,7 +83,6 @@ from .rom import (
     RomError,
     bank_number,
     make_cartridge_rom,
-    parse_rom_header,
     validate_bank_size,
     validate_layout,
     validate_platform,

@@ -15,6 +15,7 @@ from .analysis_service import build_manifest
 from .checksum import sha256_path
 from .disk_service import DiskError, DiskService, ImageSession
 from .image_diff import compare_images, manifest_fingerprint
+from .disk_service import BLANK_FORMATS as _BLANK_FORMATS
 from .image_patch import apply_patch_archive, inspect_patch_archive, write_patch_archive
 
 
@@ -22,21 +23,14 @@ RESULT_FORMAT = "atari-file-forge-cli-result"
 RESULT_VERSION = 1
 RECIPE_FORMAT = "atari-file-forge-recipe"
 RECIPE_VERSION = 1
-BLANK_FORMATS = frozenset({
-    # Double-density floppies, one per writable DOS type.
-    "adf", "adf-intl", "adf-dc", "ffs", "ffs-intl", "ffs-dc",
-    # High-density floppies.
-    "adf-hd", "ffs-hd", "ffs-hd-dc",
-    # The same floppies wrapped as HFE for a Gotek or HxC.
-    "hfe-adf", "hfe-adf-hd", "hfe-ffs", "hfe-ffs-intl", "hfe-ffs-dc", "hfe-ffs-hd",
-    # Hard drives, disk banks and ROMs.
-    "hardfile", "ffs-hard", "ffs-physical", "rom", "kickfs",
-    # Accepted spellings of a plain OFS floppy.
-    "ofs", "adz",
-})
+#: Everything ``create_blank`` accepts, named exactly as the disk service
+#: names it: the engine's own floppy geometries, the same floppies wrapped
+#: as HxC flux, a partitioned hard disk, a bare volume and the two ROM
+#: shapes.
+BLANK_FORMATS = frozenset(_BLANK_FORMATS)
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 RECIPE_ACTIONS = frozenset({
-    "create", "import-file", "compact", "convert-dms", "apply-patch", "save",
+    "create", "import-file", "compact", "convert-container", "apply-patch", "save",
 })
 
 
@@ -61,7 +55,6 @@ def progress_to_stderr(stream):
 @contextmanager
 def open_image(
     image: Path,
-    descriptor: Path | None = None,
     *,
     target_hardware: str = "auto",
     force_kind: str | None = None,
@@ -70,11 +63,9 @@ def open_image(
     image = Path(image)
     if not image.is_file():
         raise FileNotFoundError(f"Image not found: {image}")
-    if descriptor is not None and not Path(descriptor).is_file():
-        raise FileNotFoundError(f"Descriptor not found: {descriptor}")
     with tempfile.TemporaryDirectory(prefix="atari-file-forge-cli-") as work:
         service = DiskService(work)
-        session = _load_image(service, image, descriptor, target_hardware, force_kind)
+        session = _load_image(service, image, target_hardware, force_kind)
         try:
             yield service, session
         finally:
@@ -85,26 +76,16 @@ def open_image(
 def _load_image(
     service: DiskService,
     image: Path,
-    descriptor: Path | None,
     target_hardware: str,
     force_kind: str | None,
 ) -> ImageSession:
     with image.open("rb") as source:
-        if descriptor is None:
-            return service.create_from_stream(
-                image.name,
-                source,
-                target_hardware=target_hardware,
-                force_kind=force_kind,
-            )
-        with Path(descriptor).open("rb") as companion:
-            return service.create_from_stream(
-                image.name,
-                source,
-                (Path(descriptor).name, companion),
-                target_hardware=target_hardware,
-                force_kind=force_kind,
-            )
+        return service.create_from_stream(
+            image.name,
+            source,
+            target_hardware=target_hardware,
+            force_kind=force_kind,
+        )
 
 
 @contextmanager
@@ -112,21 +93,17 @@ def open_image_pair(
     first: Path,
     second: Path,
     *,
-    first_descriptor: Path | None = None,
-    second_descriptor: Path | None = None,
     target_hardware: str = "auto",
     force_kind: str | None = None,
 ) -> Iterator[tuple[DiskService, ImageSession, ImageSession]]:
     """Open two images under one service for comparison and patch operations."""
-    for path, descriptor in ((first, first_descriptor), (second, second_descriptor)):
+    for path in (first, second):
         if not Path(path).is_file():
             raise FileNotFoundError(f"Image not found: {path}")
-        if descriptor is not None and not Path(descriptor).is_file():
-            raise FileNotFoundError(f"Descriptor not found: {descriptor}")
     with tempfile.TemporaryDirectory(prefix="atari-file-forge-cli-") as work:
         service = DiskService(work)
-        left = _load_image(service, Path(first), first_descriptor, target_hardware, force_kind)
-        right = _load_image(service, Path(second), second_descriptor, target_hardware, force_kind)
+        left = _load_image(service, Path(first), target_hardware, force_kind)
+        right = _load_image(service, Path(second), target_hardware, force_kind)
         try:
             yield service, left, right
         finally:
@@ -138,7 +115,6 @@ def open_image_pair(
 def source_identity(
     path: Path,
     *,
-    descriptor: Path | None = None,
     service: DiskService | None = None,
     session: ImageSession | None = None,
     progress=None,
@@ -154,18 +130,6 @@ def source_identity(
             if progress else None,
         ),
     }
-    if descriptor is not None:
-        descriptor = Path(descriptor)
-        result["descriptor"] = {
-            "name": descriptor.name,
-            "size": descriptor.stat().st_size,
-            "sha256": sha256_path(
-                descriptor,
-                (lambda current, total: progress(
-                    f"Hashing {descriptor.name}", current, total
-                )) if progress else None,
-            ),
-        }
     if service is not None and session is not None:
         manifest = build_manifest(service, session, progress)
         result.update(
@@ -175,21 +139,12 @@ def source_identity(
     return result
 
 
-def verify_identity(path: Path, expected: dict, descriptor: Path | None = None) -> dict:
+def verify_identity(path: Path, expected: dict) -> dict:
     """Reject a recipe source whose exact bytes no longer match its record."""
-    actual = source_identity(path, descriptor=descriptor)
+    actual = source_identity(path)
     for field in ("size", "sha256"):
         if actual.get(field) != expected.get(field):
             raise DiskError(f"Recipe source {path.name} failed its expected {field} check.")
-    expected_descriptor = expected.get("descriptor")
-    if expected_descriptor:
-        if "descriptor" not in actual:
-            raise DiskError(f"Recipe source {path.name} requires its recorded descriptor.")
-        for field in ("size", "sha256"):
-            if actual["descriptor"].get(field) != expected_descriptor.get(field):
-                raise DiskError(
-                    f"Recipe descriptor {Path(descriptor).name} failed its expected {field} check."
-                )
     return actual
 
 
@@ -202,15 +157,16 @@ def save_image(
     progress=None,
     verify: Callable[[list[dict]], None] | None = None,
 ) -> list[dict]:
-    """Finalise and copy an image, including a matching Hardfile descriptor."""
+    """Finalise an image and copy it to its output path.
+
+    An Atari image is always one file: a partitioned drive carries its own
+    table and a bare volume its own parameter block, so there is nothing to
+    write alongside it.
+    """
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     prepared = service.prepare_download(session, progress)
-    if session.descriptor_path and output.suffix.lower() not in {".hdf", ".hda"}:
-        raise DiskError("A paired Hardfile image output must use the HDA extension.")
     outputs = [(prepared, output)]
-    if session.descriptor_path:
-        outputs.append((session.descriptor_path, output.with_suffix(".geo")))
     for _source, destination in outputs:
         if destination.exists() and not force:
             raise FileExistsError(f"Output already exists: {destination}")
@@ -277,14 +233,6 @@ def load_recipe(path: Path) -> dict:
             raise DiskError(f"Recipe source {alias} has no valid expected size.")
         if not SHA256_PATTERN.fullmatch(str(identity.get("sha256") or "")):
             raise DiskError(f"Recipe source {alias} has no valid expected SHA-256.")
-        descriptor = identity.get("descriptor")
-        if descriptor is not None and (
-            not isinstance(descriptor, dict)
-            or not isinstance(descriptor.get("size"), int)
-            or descriptor["size"] < 0
-            or not SHA256_PATTERN.fullmatch(str(descriptor.get("sha256") or ""))
-        ):
-            raise DiskError(f"Recipe source {alias} has an invalid descriptor identity.")
     for index, action in enumerate(document["actions"], start=1):
         if not isinstance(action, dict) or action.get("action") not in RECIPE_ACTIONS:
             raise DiskError(f"Recipe action {index} is not supported or is incomplete.")
