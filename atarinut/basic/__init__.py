@@ -246,6 +246,27 @@ def dialect_for(name: str) -> Dialect:
 _NUMBERED_LINE = re.compile(r"^\s*\d+[ \t]")
 
 
+def _vocabulary(dialect: Dialect) -> frozenset[str]:
+    return frozenset(dialect.keywords) | frozenset(word.upper() for word in dialect.compound)
+
+
+#: STOS and ST BASIC both number their lines, so the line numbers say nothing
+#: about which one a listing is. What separates them is the words only one of
+#: them has: no ST BASIC has ``CLW`` or ``WAIT VBL``, and no STOS has ``FULLW``
+#: or ``VDISYS``. Both sets are derived rather than written out, so adding a
+#: keyword to a dialect sharpens the test rather than leaving it stale.
+_STOS_ONLY = _vocabulary(STOS_BASIC) - _vocabulary(ST_BASIC)
+_ST_ONLY = _vocabulary(ST_BASIC) - _vocabulary(STOS_BASIC)
+
+
+def _vocabulary_score(upper: str, words: frozenset[str]) -> int:
+    """How many of ``words`` appear in the listing, counting each word once."""
+    return sum(
+        1 for word in words
+        if re.search(r"(?<![A-Z0-9_.])" + re.escape(word) + r"(?![A-Z0-9_$#])", upper)
+    )
+
+
 def _as_text(data: bytes) -> str | None:
     """Decode bytes as a listing, or return ``None`` when they are not text."""
     if not data:
@@ -262,21 +283,28 @@ def _detect_text(text: str) -> Detection:
         return Detection(Verdict.NOT_BASIC, None, "The file holds no lines.")
     numbered = sum(1 for row in rows if _NUMBERED_LINE.match(row))
     upper = text.upper()
-    gfa_score = sum(2 for word in GFA_MARKERS if re.search(rf"\b{word}\b", upper))
     if numbered < len(rows) * 0.8:
+        gfa_score = sum(2 for word in GFA_MARKERS if re.search(rf"\b{word}\b", upper))
         if gfa_score >= 4:
-            return Detection(Verdict.BASIC, GFA_BASIC_3, f"An unnumbered GFA BASIC listing of {len(rows)} lines.", len(text), len(rows))
-        return Detection(Verdict.NOT_BASIC, None, "The lines carry no line numbers and no GFA BASIC structure.")
-    stos_score = sum(
-        2 for word in ("SCREEN OPEN", "SPRITE", "PUT BOB", "WAIT VBL", "CURS OFF", "AUTO BACK",
-                       "SET ZONE", "WINDOPEN", "MOUSE KEY", "CLW", "INK ", "POLYMARK")
-        if word in upper
-    )
-    st_score = stbasic.score(text)
+            return Detection(Verdict.BASIC, GFA_BASIC_3,
+                             f"An unnumbered GFA BASIC listing of {len(rows)} lines.", len(text), len(rows))
+        return Detection(Verdict.NOT_BASIC, None,
+                         "The lines carry no line numbers and no GFA BASIC structure.")
+    stos_score = _vocabulary_score(upper, _STOS_ONLY)
+    st_score = _vocabulary_score(upper, _ST_ONLY)
     if stos_score > st_score:
-        return Detection(Verdict.BASIC, STOS_BASIC, f"A numbered STOS BASIC listing of {len(rows)} lines.", len(text), len(rows))
-    if st_score >= 3:
-        return Detection(Verdict.BASIC, ST_BASIC, f"A numbered ST BASIC listing of {len(rows)} lines.", len(text), len(rows))
+        return Detection(Verdict.BASIC, STOS_BASIC,
+                         f"A numbered STOS BASIC listing of {len(rows)} lines, "
+                         f"using {stos_score} word(s) only STOS has.", len(text), len(rows))
+    if st_score > stos_score and st_score >= 2:
+        return Detection(Verdict.BASIC, ST_BASIC,
+                         f"A numbered ST BASIC listing of {len(rows)} lines, "
+                         f"using {st_score} word(s) only ST BASIC has.", len(text), len(rows))
+    if stos_score or st_score:
+        return Detection(Verdict.BASIC, ST_BASIC,
+                         f"A numbered BASIC listing of {len(rows)} lines. Nothing in it "
+                         "separates ST BASIC from STOS, so the ST's own BASIC is assumed.",
+                         len(text), len(rows))
     return Detection(Verdict.NOT_BASIC, None, "Numbered lines, but no recognisable BASIC keywords.")
 
 
