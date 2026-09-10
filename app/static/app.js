@@ -354,8 +354,8 @@ function paneLabel(index) {
 //: controller reaches 1.44M.
 const FLOPPY_GEOMETRIES = Object.freeze([
   { value: "ss-360k", label: "360K", size: 368640, singleSided: true, hfe: "" },
-  { value: "ss-400k", label: "400K", size: 409600, singleSided: true, hfe: "hfe-st-360k" },
-  { value: "ss-440k", label: "440K", size: 450560, singleSided: true, hfe: "hfe-st-360k" },
+  { value: "ss-400k", label: "400K", size: 409600, singleSided: true, hfe: "hfe-st-400k" },
+  { value: "ss-440k", label: "440K", size: 450560, singleSided: true, hfe: "hfe-st-440k" },
   { value: "ds-720k", label: "720K", size: 737280, singleSided: false, hfe: "hfe-st-720k" },
   { value: "ds-800k", label: "800K", size: 819200, singleSided: false, hfe: "hfe-st-800k" },
   { value: "ds-880k", label: "880K", size: 901120, singleSided: false, hfe: "hfe-st-880k" },
