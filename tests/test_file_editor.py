@@ -61,7 +61,7 @@ class FileEditorTests(unittest.TestCase):
         program = tokenise('10 PRINT "HELLO"\n20 GOTO 10')
         folder, service = self.service_with_file(program)
         try:
-            report = inspect_editable_file(service, SimpleNamespace(target_hardware="a1200-ffs", hfe_read_only=False, kind="ofs"), "GAME", None)
+            report = inspect_editable_file(service, SimpleNamespace(target_hardware="floppy", hfe_read_only=False, kind="gemdos"), "GAME", None)
         finally:
             folder.cleanup()
         self.assertEqual(report["view"], "basic")
@@ -99,7 +99,7 @@ class FileEditorTests(unittest.TestCase):
         }
         service.read_file.return_value = b'Run Intro\nCHAIN "ARCADIANS"\n'
         report = search_image_files(
-            service, SimpleNamespace(kind="ffs"), "arcadians", None, "",
+            service, SimpleNamespace(kind="gemdos"), "arcadians", None, "",
         )
         self.assertEqual(report["filesConsidered"], 1)
         self.assertEqual(report["results"][0]["path"], "Games/Startup-Sequence")
@@ -113,7 +113,7 @@ class FileEditorTests(unittest.TestCase):
         service.read_file.return_value = b"\x00\x01\x02\x03"
 
         report = search_image_files(
-            service, SimpleNamespace(kind="ofs"), "----r-e-", None,
+            service, SimpleNamespace(kind="gemdos"), "r----a", None,
         )
 
         self.assertEqual(report["results"][0]["metadataMatches"], ["protection"])
@@ -128,7 +128,7 @@ class FileEditorTests(unittest.TestCase):
         digest = sha256_bytes(content)
 
         report = search_image_files(
-            service, SimpleNamespace(kind="ofs"), digest[:12], None, None,
+            service, SimpleNamespace(kind="gemdos"), digest[:12], None, None,
         )
 
         self.assertTrue(report["results"][0]["hashMatch"])
@@ -143,7 +143,7 @@ class FileEditorTests(unittest.TestCase):
         service.read_file.return_value = content
 
         report = search_image_files(
-            service, SimpleNamespace(kind="ofs"), "game data", None, None,
+            service, SimpleNamespace(kind="gemdos"), "game data", None, None,
         )
 
         self.assertEqual(report["results"][0]["matches"][0]["offset"], 32)
@@ -162,7 +162,7 @@ class FileEditorTests(unittest.TestCase):
 
         with self.assertRaises(OperationCancelled):
             search_image_files(
-                service, SimpleNamespace(kind="ofs"), "missing", None, None,
+                service, SimpleNamespace(kind="gemdos"), "missing", None, None,
                 progress=cancel,
             )
 
@@ -177,7 +177,7 @@ class FileEditorTests(unittest.TestCase):
         }]
 
         report = search_image_files(
-            service, SimpleNamespace(kind="ofs"), "commodore", None, None,
+            service, SimpleNamespace(kind="gemdos"), "commodore", None, None,
             supplemental=supplemental,
         )
 
@@ -213,7 +213,7 @@ class FileEditorTests(unittest.TestCase):
         try:
             report = inspect_editable_file(
                 service,
-                SimpleNamespace(target_hardware="tos", hfe_read_only=False, kind="ffs"),
+                SimpleNamespace(target_hardware="tos", hfe_read_only=False, kind="gemdos"),
                 "Program", None,
             )
         finally:
@@ -227,7 +227,7 @@ class FileEditorTests(unittest.TestCase):
         script = b"FailAt 21\nStack 8192\nCD Games\nExecute Menu\n"
         folder, service = self.service_with_file(script)
         try:
-            report = inspect_editable_file(service, SimpleNamespace(hfe_read_only=False, kind="ofs"), "Startup-Sequence", None)
+            report = inspect_editable_file(service, SimpleNamespace(hfe_read_only=False, kind="gemdos"), "Startup-Sequence", None)
         finally:
             folder.cleanup()
         self.assertEqual(report["view"], "script")
@@ -241,7 +241,7 @@ class FileEditorTests(unittest.TestCase):
 
         folder, service = self.service_with_file(b"Assign MENU: SYS:\nRun Game\n")
         try:
-            other = inspect_editable_file(service, SimpleNamespace(hfe_read_only=False, kind="ofs"), "$.COMMANDS", None)
+            other = inspect_editable_file(service, SimpleNamespace(hfe_read_only=False, kind="gemdos"), "$.COMMANDS", None)
         finally:
             folder.cleanup()
         self.assertEqual(other["view"], "script")
@@ -251,13 +251,13 @@ class FileEditorTests(unittest.TestCase):
         try:
             report = inspect_editable_file(
                 service,
-                SimpleNamespace(target_hardware="a600", hfe_read_only=False, kind="ffs"),
+                SimpleNamespace(target_hardware="floppy", hfe_read_only=False, kind="gemdos"),
                 "GAME.MSA", None,
             )
         finally:
             folder.cleanup()
         self.assertEqual(report["view"], "container")
-        self.assertEqual(report["containerKind"], "dms")
+        self.assertEqual(report["containerKind"], "disk-or-archive")
         self.assertTrue(report["readOnly"])
         self.assertFalse(report["editable"])
 
@@ -291,7 +291,7 @@ class FileEditorTests(unittest.TestCase):
         # as text so it is not disassembled.
         data = bytes.fromhex("70414EB900FC00EE4E75") + b"HELLO"
         report = __import__("app.file_editor", fromlist=["disassemble_file_data"]).disassemble_file_data(
-            data, {"protection": 0}, SimpleNamespace(target_hardware="a1200-ffs"),
+            data, {"protection": 0}, SimpleNamespace(target_hardware="floppy"),
             "CODE", project={
                 "symbols": {"0": "start_here"},
                 "regions": [{"start": 10, "end": 15, "kind": "text", "name": "message", "width": 8}],
@@ -330,7 +330,7 @@ class FileEditorTests(unittest.TestCase):
         )
         try:
             report = disassemble_file(
-                service, SimpleNamespace(target_hardware="a1200-ffs"), "Code", None, None
+                service, SimpleNamespace(target_hardware="floppy"), "Code", None, None
             )
         finally:
             folder.cleanup()
@@ -353,7 +353,7 @@ class FileEditorTests(unittest.TestCase):
         )
         try:
             report = disassemble_file(
-                service, SimpleNamespace(target_hardware="a1200-ffs"), "Code", None, None
+                service, SimpleNamespace(target_hardware="floppy"), "Code", None, None
             )
         finally:
             folder.cleanup()
@@ -371,7 +371,7 @@ class FileEditorTests(unittest.TestCase):
         )
         try:
             report = disassemble_file(
-                service, SimpleNamespace(target_hardware="a1200-ffs"), "Code", None, None
+                service, SimpleNamespace(target_hardware="floppy"), "Code", None, None
             )
         finally:
             folder.cleanup()
@@ -386,7 +386,7 @@ class FileEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "Editor")
+            session = service.create_blank("ds-720k", "Editor")
             source = root / "Program"
             source.write_bytes(tokenise('10 PRINT "OLD"'))
             service.put(session, "Program", source)
@@ -412,11 +412,11 @@ class FileEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "EDITOR")
+            session = service.create_blank("ds-720k", "EDITOR")
             payload = bytes.fromhex("A90020EEFF60") + b"PAYLOAD\x00"
             source = root / "PROGRAM"
             source.write_bytes(tokenise('10 PRINT "OLD"') + payload)
-            service.put(session, "PROGRAM", source, "----r-e-")
+            service.put(session, "PROGRAM", source, "r----a")
             before = inspect_editable_file(service, session, "$.PROGRAM", None)
 
             self.assertTrue(before["editable"])
@@ -435,7 +435,7 @@ class FileEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "Editor")
+            session = service.create_blank("ds-720k", "Editor")
             source = root / "Program"
             source.write_bytes(tokenise('10 PRINT "OLD"'))
             service.put(session, "Program", source)
@@ -460,7 +460,7 @@ class FileEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "EDITOR")
+            session = service.create_blank("ds-720k", "EDITOR")
             source = root / "CODE"
             source.write_bytes(b"ABCDEF")
             service.put(session, "CODE", source)
@@ -478,7 +478,7 @@ class FileEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "Editor")
+            session = service.create_blank("ds-720k", "Editor")
             source = root / "Code"
             source.write_bytes(b"UNCHANGED")
             service.put(session, "Code", source)
@@ -486,7 +486,7 @@ class FileEditorTests(unittest.TestCase):
 
             update_file_properties(
                 service, session, "Code", None, before["sha256"],
-                protection="----r-e-", comment="Reviewed", writable=False,
+                protection="r----a", comment="Reviewed", writable=False,
             )
 
             self.assertEqual(service.read_file(session, "Code"), b"UNCHANGED")

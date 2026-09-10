@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 
+from .errors import DiskError
+
 from atarinut.file import (
     ATTRIBUTE_MASK,
     format_access_text,
@@ -67,11 +69,23 @@ def format_attributes(value: object) -> str:
 
 
 def attribute_value(value: object) -> int:
-    """Read an attribute byte from either the letters or a number."""
+    """Read an attribute byte from either the letters or a number.
+
+    Anything else is refused rather than silently read as zero, because zero
+    is itself meaningful: it is a file with no attribute bit set at all, and
+    quietly choosing it would destroy the metadata an edit exists to keep.
+    """
     letters = parse_attributes(value)
     if letters is not None:
         return letters
-    return int(parse_attribute_value(value)) & ATTRIBUTE_MASK
+    try:
+        return int(parse_attribute_value(value)) & ATTRIBUTE_MASK
+    except Exception as exc:
+        raise DiskError(
+            f"“{value}” is not an attribute value. Use the six letters the "
+            f"workbench prints, such as {ATTRIBUTE_LETTERS}, or the byte "
+            "itself written 0x21."
+        ) from exc
 
 
 def parse_attribute_record(data: bytes | str) -> dict | None:
