@@ -1,12 +1,12 @@
 """The single place Atari File Forge reaches into Atarinut's private API.
 
 The workbench needs bulk-copy behaviour that ``atarinut.disc.cli`` implements
-but does not export: preserving protection bits, comments and datestamps
-across a directory tree, ordering writes so the destination's block
-allocation stays compact, and walking a tree post-order so directories are
-removed after their contents. Re-deriving that from the public API would mean
-re-deriving GEMDOS allocation policy, which is exactly the sort of
-duplication this project avoids.
+but does not export: preserving attribute bytes and datestamps across a
+directory tree, ordering writes so the destination's clusters stay
+contiguous, and walking a tree post-order so directories are removed after
+their contents. Re-deriving that from the public API would mean re-deriving
+FAT allocation policy, which is exactly the sort of duplication this project
+avoids.
 
 Borrowing underscore-prefixed names from a dependency is a real risk, so it is
 confined here rather than scattered across the service modules:
