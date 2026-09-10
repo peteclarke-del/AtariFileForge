@@ -1625,11 +1625,19 @@ class DiskService(
         self._persist_session(session)
 
     def _mark_mutated(self, session: ImageSession) -> None:
-        """Record that this image has been edited since it was opened."""
+        """Record that this image has been edited since it was opened.
+
+        The volume's own description is re-read as well. A write can change
+        the label, the free cluster count or the boot sector's executable
+        word sum, and a report that still showed the values from before the
+        edit would be describing an image that no longer exists.
+        """
         session.dirty = True
         session.hfe_export_path = None
         session.scp_export_path = None
         session.content_kind_cache.clear()
+        if self.mountable(session):
+            self.refresh_gemdos_capabilities(session)
 
     def resolve(self, session: ImageSession) -> Path:
         """Return the working file the engine should be pointed at."""

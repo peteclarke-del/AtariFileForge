@@ -34,22 +34,20 @@ def _catalogue_search_terms(row: dict) -> dict[str, list[str]]:
     fields = {
         "disk title": ("diskTitle",),
         "file type": ("contentKind", "filetype", "type"),
-        "access": ("attr", "access", "attributes"),
-        "protection": ("protectionText", "protection"),
-        "comment": ("comment",),
+        "attributes": ("attributes", "attr"),
+        "datestamp": ("datestamp",),
     }
     for label, keys in fields.items():
         value = next((row.get(key) for key in keys if row.get(key) not in (None, "")), None)
         if value is None:
             continue
         values = {str(value)}
-        if label == "protection":
-            try:
-                numeric = int(str(value), 0) if not isinstance(value, int) else value
-            except (TypeError, ValueError):
-                numeric = None
-            if numeric is not None:
-                values.update({format_protection(numeric), f"&{numeric:X}", f"0x{numeric:X}"})
+        if label == "attributes":
+            # A person may search for the letters the pane prints or for the
+            # byte itself, so both spellings of the same value are indexed.
+            bits = row.get("attributeBits")
+            if isinstance(bits, int):
+                values.update({format_protection(bits), f"0x{bits:02X}", str(bits)})
         terms[label] = sorted(values)
     return terms
 
@@ -227,9 +225,7 @@ def search_image_files(
 
     files: list[dict] = []
     failed_reads = 0
-    if session.kind == "ofs":
-        files = service.list_ofs_catalogue_files(session, side)
-    elif session.kind in {"kickfs", "dms"}:
+    if session.kind in {"tosrom", "msa", "dim", "stx", "iso"}:
         files = [
             {**row, "path": str(row.get("path") or row.get("name") or "")}
             for row in service.list_directory(session, "", side)["entries"]
@@ -246,7 +242,7 @@ def search_image_files(
             }
             for row in service.list_rom_banks(session)
         ]
-    elif session.kind in {"ffs", "ofs", "hdf"}:
+    elif service.mountable(session):
         pending = [str(root or "")]
         visited = set()
         while pending and len(files) < MAX_IMAGE_SEARCH_FILES:

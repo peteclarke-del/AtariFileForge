@@ -66,6 +66,25 @@ class GemdosInstallMixin:
         return option
 
     @staticmethod
+    def _repair_ffs_loader_items(items: list[dict]) -> tuple[list[str], list[str]]:
+        """Report the changes an installed program needs. There are none.
+
+        The previous platform named its files through a device, so a program
+        copied from a floppy to a hard disk referred to a drive that was no
+        longer where it lived and had to be rewritten. TOS resolves a path at
+        run time against the drive the program was started from, and a
+        relative path spelled with a leading backslash means the current
+        drive either way, so a program installed onto a partition finds its
+        files without anything being patched.
+
+        The signature is kept because the audit below reports repairs and
+        warnings per directory, and an empty pair is the honest answer for
+        every one of them.
+        """
+        del items
+        return [], []
+
+    @staticmethod
     def _ffs_directory_items(mount, directory: str, file_item) -> list[dict]:
         pending = [directory]
         items: list[dict] = []
