@@ -1,15 +1,19 @@
 """Shared policy for the flux containers HxCFE can decode and re-encode.
 
 HFE and SCP are different files but the same workflow: decode the flux to raw
-sectors, identify the Atari filesystem inside, prove the sectors re-encode and
+sectors, identify the GEMDOS filesystem inside, prove the sectors re-encode and
 decode back byte-for-byte before permitting any edit, and prove it again before
 handing the user a saved image.
 
 That policy lived twice in ``disk_service``, once per container, and the two
 copies had already drifted: only the HFE save path restored an omitted tail
-sector, so saving an edited double-density SCP failed its own verification. Expressing
-the rules once here means a container cannot quietly miss a fix made for its
+sector, so saving an edited SCP failed its own verification. Expressing the
+rules once here means a container cannot quietly miss a fix made for its
 sibling, and lets the geometry rules be unit tested without an HxCFE binary.
+
+The geometries themselves are not defined here. ``floppy_geometry`` is the one
+table of shapes an ST reads, and this module only says which of them HxCFE
+can wrap as flux and what to do when a decode comes back a sector short.
 
 Nothing in this module runs a subprocess itself. ``FluxEngine`` is handed the
 caller's ``run_hxcfe`` so the disk service keeps ownership of process
@@ -23,43 +27,63 @@ from pathlib import Path
 from typing import Callable
 
 from .errors import DiskError
+from .floppy_geometry import (
+    GEOMETRIES,
+    SECTOR_SIZE,
+    canonical_sizes,
+    geometries_for_size,
+)
 
 
-SECTOR_SIZE = 512
+#: Every sector-image size the geometry table produces.
+FLOPPY_SIZES = canonical_sizes()
 
-# The raw sector sizes an Atari floppy geometry produces. A decode is only ever
-# padded up to one of these, and only ever by a single trailing sector.
-#
-# OFS and FFS are the same media: an Atari floppy is 80 cylinders of 11 sectors
-# per side at double density, and 22 at high density. Which filing system
-# formatted it is written in its boot block, not in its shape, so both kinds
-# share one set of sizes. The 5.25-inch drive halves the cylinder count.
-DOUBLE_DENSITY_SIZE = 80 * 2 * 11 * SECTOR_SIZE      # 901,120
-HIGH_DENSITY_SIZE = 80 * 2 * 22 * SECTOR_SIZE        # 1,802,240
-FIVE_INCH_SIZE = 40 * 2 * 11 * SECTOR_SIZE           # 450,560
-
-FLOPPY_SIZES = frozenset({FIVE_INCH_SIZE, DOUBLE_DENSITY_SIZE, HIGH_DENSITY_SIZE})
-
+#: The sizes that may be padded by one trailing sector, keyed by the kind of
+#: filesystem the decode identified. GEMDOS is the only browseable kind on a
+#: floppy, so there is one entry; the mapping shape is kept so the tail-sector
+#: repair stays keyed by what was found rather than assuming it.
 CANONICAL_SIZES: dict[str, frozenset[int]] = {
-    "ofs": FLOPPY_SIZES,
-    "ffs": FLOPPY_SIZES,
+    "gemdos": FLOPPY_SIZES,
 }
 
-# Filesystems the workbench can browse inside a flux container.
-BROWSEABLE_KINDS = frozenset({"ofs", "ffs"})
+#: Filesystems the workbench can browse inside a flux container.
+BROWSEABLE_KINDS = frozenset({"gemdos"})
+
+#: The suffix HxCFE's own ST loader is selected by. A decoded sector image is
+#: written under this name so the encode side of the round trip is read by
+#: the loader that understands the boot sector, not by the generic raw loader.
+SECTOR_IMAGE_SUFFIX = ".st"
+
+#: The suffix for anything larger than a floppy.
+HARD_DISK_SUFFIX = ".img"
 
 # HxCFE's raw sector reader, used to decode every container back to sectors.
 RAW_DECODER = "RAW_LOADER"
 
-# The geometries HxCFE can wrap as flux. Its ``-rawlist`` of blank layouts is
-# entirely PC and workstation formats and contains no Atari entry, so there is
-# no layout name to pass. None is needed: HxCFE's own ATARI_ADF loader reads a
-# raw Atari sector image directly and selects ATARI_DD_FLOPPYMODE or
-# ATARI_HD_FLOPPYMODE from its size. Naming a layout that does not exist makes
-# HxCFE refuse the input outright, so the encode passes no ``-uselayout``.
+# ---------------------------------------------------------------------------
+# Layout policy: no ``-uselayout``
+# ---------------------------------------------------------------------------
+# HxCFE chooses a loader by file extension, and its ``ATARI ST ST Loader``
+# settles the geometry of a ``.st`` image on its own, in three steps: it
+# reads the BIOS parameter block from the boot sector (sectors per track at
+# 0x18, sides at 0x1A, total sectors at 0x13) and believes it when the
+# sector count is plausible; failing that it matches the file size against
+# its own table of ST sizes; failing that it tries every combination of one
+# or two sides, up to 84 tracks and 8 to 11 sectors until one fits. It then
+# picks ATARIST_DD_FLOPPYMODE, or the HD mode above fourteen sectors.
 #
-# The 5.25-inch geometry is absent deliberately: HxCFE has nothing that reads
-# it back, so it is decoded but never re-encoded.
+# Every sector image the workbench hands it carries a valid boot sector, so
+# the first step always applies and the shape HxCFE wraps is the shape the
+# boot sector names. Passing ``-uselayout`` would override that with a layout
+# name that has to be kept in step with the geometry table by hand, and a
+# name HxCFE does not know makes it refuse the input outright. The encode
+# therefore passes no layout, and instead insists that the sector file is a
+# ``.st`` so the right loader is the one that sees it.
+#
+# The 40-track PC geometries are not listed on their own. The 180 KiB one
+# has no ST counterpart for HxCFE to read back, and the 360 KiB one shares
+# its size with the single-sided 80-track ST disk, which is the shape HxCFE
+# chooses for that size when the boot sector does not say otherwise.
 
 
 @dataclass(frozen=True)
@@ -100,31 +124,39 @@ FLUX_CONTAINERS: dict[str, FluxContainer] = {
 }
 
 
-def sector_image_suffix(kind: str, size: int, sides: int = 1) -> str:
+def sector_image_suffix(kind: str, size: int, sides: int | None = None) -> str:
     """Return the canonical sector-image extension for a decoded geometry.
 
-    Every Atari floppy sector image is an ``.adf`` whichever filing system
-    formatted it; ``.adz`` is that same file gzipped, so it is a compression
-    choice made at export rather than a geometry. Anything larger than a
-    floppy is a single-volume hard-disk image and takes ``.hdf``.
+    Every floppy an ST reads is written as ``.st`` whichever side count or
+    sector count it has; ``.msa`` and ``.dim`` are containers chosen at
+    export, not geometries. Anything larger than a floppy is a hard-disk
+    image and takes ``.img``.
 
-    ``sides`` is accepted because callers know it, but an Atari floppy is
-    always double sided and the shape alone settles the extension.
+    ``sides`` narrows the geometry check to the side count the container
+    reported. When no geometry of that side count fits but one of the other
+    does, the image is still a floppy and still ``.st``: the container's
+    side count is a claim to warn about, not a reason to call a floppy a
+    hard disk.
     """
-    del kind, sides
-    return ".adf" if size in FLOPPY_SIZES else ".hdf"
+    del kind
+    if geometries_for_size(size, sides) or geometries_for_size(size):
+        return SECTOR_IMAGE_SUFFIX
+    return HARD_DISK_SUFFIX
 
 
-#: The Atari floppy geometries HxCFE recognises and can re-encode.
-FLUX_ENCODABLE_SIZES = frozenset({DOUBLE_DENSITY_SIZE, HIGH_DENSITY_SIZE})
+#: The floppy geometries HxCFE's ST loader reads back, and so can be wrapped
+#: as flux and verified: the ST family and the high-density disk.
+FLUX_ENCODABLE_SIZES = frozenset(
+    item.size for item in GEOMETRIES.values() if not item.identifier.startswith("pc-")
+)
 
 
 def is_flux_encodable(kind: str, size: int) -> bool:
     """Whether these sectors can be wrapped as flux by HxCFE.
 
-    Only the DS/DD and high-density 3.5-inch geometries qualify. A hard-drive
-    image has no flux equivalent, and the 5.25-inch geometry has no reader in
-    HxCFE to check an encode against.
+    Only a GEMDOS floppy of a shape the ST loader reads qualifies. A hard
+    disk image has no flux equivalent, and the 40-track PC geometries share
+    their size with an ST shape HxCFE would choose instead.
     """
     return kind in BROWSEABLE_KINDS and size in FLUX_ENCODABLE_SIZES
 
@@ -137,29 +169,29 @@ def restore_omitted_tail_sector(
     """Restore one omitted trailing sector from an otherwise complete decode.
 
     HxCFE's raw writer can omit an unreadable final 512-byte sector while still
-    reporting every sector on the final track. A double-density decode then
-    arrives as 900,608 bytes instead of 901,120 and geometry detection can
-    select a linear hard-disk view instead of a floppy.
+    reporting every sector on the final track. A 720 KiB decode then arrives
+    as 736,768 bytes instead of 737,280 and geometry detection can select a
+    linear hard-disk view instead of a floppy.
 
     Padding is only ever safe at the physical end of a known geometry, so this
     refuses to act unless the file is exactly one sector short of a canonical
-    size for ``kind``. It never fills a gap in the middle of an image, and never
-    grows a file by more than a single sector.
+    size for ``kind`` and is not itself a canonical size. It never fills a gap
+    in the middle of an image, and never grows a file by more than a single
+    sector.
 
     Returns True when a sector was appended.
     """
     if not path.is_file():
         return False
-    canonical_sizes = CANONICAL_SIZES.get(kind, frozenset())
-    if not canonical_sizes:
+    canonical = CANONICAL_SIZES.get(kind, frozenset())
+    if not canonical:
         return False
     size = path.stat().st_size
-    target = expected_size if expected_size in canonical_sizes else None
+    if size in canonical:
+        return False
+    target = expected_size if expected_size in canonical else None
     if target is None:
-        target = next(
-            (value for value in canonical_sizes if size + SECTOR_SIZE == value),
-            None,
-        )
+        target = size + SECTOR_SIZE if size + SECTOR_SIZE in canonical else None
     if target is None or size + SECTOR_SIZE != target:
         return False
     with path.open("ab") as image:
@@ -204,13 +236,21 @@ class FluxEngine:
         ``reference`` is the container the sectors were decoded from. HxCFE
         uses it to preserve track timing that the sector view cannot express,
         so an edited image stays as close to the capture as possible.
+
+        The sector file must be a ``.st``: that is how HxCFE picks the loader
+        that reads the boot sector geometry, so no layout is passed.
         """
         if not is_flux_encodable(kind, sectors.stat().st_size):
             raise DiskError(
                 "This geometry has no flux equivalent HxCFE can write."
             )
-        # No -uselayout: HxCFE identifies an Atari sector image itself and
-        # chooses the matching floppy interface mode.
+        if sectors.suffix.casefold() != SECTOR_IMAGE_SUFFIX:
+            raise DiskError(
+                f"HxCFE selects its ST loader by the {SECTOR_IMAGE_SUFFIX} suffix; "
+                f"{sectors.name} would be read as a generic raw image."
+            )
+        # No -uselayout: HxCFE's ST loader reads the boot sector and chooses
+        # the matching floppy interface mode; see the policy note above.
         return self._run_hxcfe([
             f"-finput:{sectors}",
             f"-conv:{container.plugin}",
@@ -277,17 +317,17 @@ class FluxEngine:
 __all__ = [
     "BROWSEABLE_KINDS",
     "CANONICAL_SIZES",
-    "DOUBLE_DENSITY_SIZE",
-    "FIVE_INCH_SIZE",
     "FLOPPY_SIZES",
-    "HIGH_DENSITY_SIZE",
     "FLUX_CONTAINERS",
+    "FLUX_ENCODABLE_SIZES",
+    "HARD_DISK_SUFFIX",
     "HFE",
+    "RAW_DECODER",
     "SCP",
+    "SECTOR_IMAGE_SUFFIX",
     "SECTOR_SIZE",
     "FluxContainer",
     "FluxEngine",
-    "FLUX_ENCODABLE_SIZES",
     "is_flux_encodable",
     "restore_omitted_tail_sector",
     "sector_image_suffix",
