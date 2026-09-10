@@ -2653,8 +2653,6 @@ class DiskService(
                 create_directory=create_directory,
             )
 
-    #: Retained under its previous name so existing callers stay stable.
-    extract_image_to_ffs_directory = extract_image_to_directory
 
     def _extract_image_to_directory(
         self,

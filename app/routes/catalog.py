@@ -210,7 +210,7 @@ def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprin
                             directory = _available_ffs_directory_name(
                                 service, target, target_path, directory
                             )
-                        destination = service.extract_image_to_ffs_directory(source, target, target_path, directory, create_directory=create_dir)
+                        destination = service.extract_image_to_directory(source, target, target_path, directory, create_directory=create_dir)
                         metadata = analyse_directory(service, target, destination) if identify else None
                         if metadata:
                             metadata["title"] = str(item.get("title") or metadata["title"])

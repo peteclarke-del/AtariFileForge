@@ -5,7 +5,6 @@ import unittest
 from app.formats import (
     DIM_EXTENSIONS,
     GEMDOS_EXTENSIONS,
-    GEOMETRY_EXTENSIONS,
     HARD_DISK_EXTENSIONS,
     HFE_EXTENSIONS,
     IPF_EXTENSIONS,
@@ -33,7 +32,6 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(SCP_EXTENSIONS, {".scp"})
         self.assertEqual(IPF_EXTENSIONS, {".ipf"})
         self.assertEqual(ISO_EXTENSIONS, {".iso", ".cdr"})
-        self.assertEqual(GEOMETRY_EXTENSIONS, {".geo"})
 
     def test_hard_disk_images_come_under_every_name_they_are_distributed_as(self):
         self.assertEqual(
@@ -54,7 +52,7 @@ class FormatTests(unittest.TestCase):
                 self.assertNotIn(extension, GEMDOS_EXTENSIONS)
 
     def test_no_previous_platform_suffix_survives(self):
-        everything = GEMDOS_EXTENSIONS | ROM_EXTENSIONS | ISO_EXTENSIONS | GEOMETRY_EXTENSIONS
+        everything = GEMDOS_EXTENSIONS | ROM_EXTENSIONS | ISO_EXTENSIONS
         for extension in (".adf", ".adz", ".dms", ".hdf", ".hdz", ".rdsk", ".kick"):
             with self.subTest(extension=extension):
                 self.assertNotIn(extension, everything)
