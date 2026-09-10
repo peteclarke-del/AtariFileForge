@@ -15,10 +15,10 @@ def manifest(name: str, kind: str, records: list[dict]) -> dict:
 
 class ImageDiffTests(unittest.TestCase):
     def test_record_keys_include_side_and_bank_context(self) -> None:
-        self.assertEqual(record_key({"recordType": "file", "path": "Game"}), "side::file:game")
+        self.assertEqual(record_key({"recordType": "file", "path": "GAME.PRG"}), "side::file:game.prg")
         self.assertEqual(
-            record_key({"recordType": "file", "side": 2, "path": "Game"}),
-            "side:2:file:game",
+            record_key({"recordType": "file", "side": 2, "path": "GAME.PRG"}),
+            "side:2:file:game.prg",
         )
         self.assertEqual(
             record_key({"recordType": "rom-bank", "bank": 3, "path": "bank:3"}),
@@ -27,25 +27,25 @@ class ImageDiffTests(unittest.TestCase):
 
     def test_fingerprint_ignores_record_order_and_session_identity(self) -> None:
         records = [
-            {"recordType": "file", "path": "$.A", "sha256": "a", "size": 1},
-            {"recordType": "file", "path": "$.B", "sha256": "b", "size": 2},
+            {"recordType": "file", "path": "A.DAT", "sha256": "a", "size": 1},
+            {"recordType": "file", "path": "B.DAT", "sha256": "b", "size": 2},
         ]
-        first = manifest("first", "ffs", records)
-        second = manifest("second", "ffs", list(reversed(records)))
+        first = manifest("first", "gemdos", records)
+        second = manifest("second", "gemdos", list(reversed(records)))
         self.assertEqual(manifest_fingerprint(first), manifest_fingerprint(second))
 
     def test_compare_classifies_content_and_metadata_changes(self) -> None:
-        base = manifest("old", "ofs", [
-            {"recordType": "file", "path": "$.SAME", "sha256": "1", "size": 10, "load": "4096"},
-            {"recordType": "file", "path": "$.CONTENT", "sha256": "2", "size": 20},
-            {"recordType": "file", "path": "$.META", "sha256": "3", "size": 30, "execute": "4096"},
-            {"recordType": "file", "path": "$.REMOVED", "sha256": "4", "size": 40},
+        base = manifest("old", "gemdos", [
+            {"recordType": "file", "path": "SAME.DAT", "sha256": "1", "size": 10, "attributes": "------"},
+            {"recordType": "file", "path": "CONTENT.DAT", "sha256": "2", "size": 20},
+            {"recordType": "file", "path": "META.DAT", "sha256": "3", "size": 30, "datestamp": "1990-01-01T00:00:00"},
+            {"recordType": "file", "path": "REMOVED.DAT", "sha256": "4", "size": 40},
         ])
-        candidate = manifest("new", "ofs", [
-            {"recordType": "file", "path": "$.SAME", "sha256": "1", "size": 10, "load": "4096"},
-            {"recordType": "file", "path": "$.CONTENT", "sha256": "changed", "size": 20},
-            {"recordType": "file", "path": "$.META", "sha256": "3", "size": 30, "execute": "8192"},
-            {"recordType": "file", "path": "$.ADDED", "sha256": "5", "size": 50},
+        candidate = manifest("new", "gemdos", [
+            {"recordType": "file", "path": "SAME.DAT", "sha256": "1", "size": 10, "attributes": "------"},
+            {"recordType": "file", "path": "CONTENT.DAT", "sha256": "changed", "size": 20},
+            {"recordType": "file", "path": "META.DAT", "sha256": "3", "size": 30, "datestamp": "1992-06-05T12:00:00"},
+            {"recordType": "file", "path": "ADDED.DAT", "sha256": "5", "size": 50},
         ])
 
         report = compare_manifests(base, candidate)
@@ -55,15 +55,15 @@ class ImageDiffTests(unittest.TestCase):
             "modified": 1, "metadata": 1, "total": 4,
         })
         self.assertEqual(report["changes"]["modified"][0]["changedFields"], ["sha256"])
-        self.assertEqual(report["changes"]["metadata"][0]["changedFields"], ["execute"])
+        self.assertEqual(report["changes"]["metadata"][0]["changedFields"], ["datestamp"])
         self.assertTrue(report["sameFormat"])
 
     def test_compare_classifies_a_unique_same_content_file_as_renamed(self) -> None:
-        base = manifest("old", "ffs", [
-            {"recordType": "file", "path": "$.OLD", "sha256": "same", "size": 10, "load": "4096"},
+        base = manifest("old", "gemdos", [
+            {"recordType": "file", "path": "OLD.DAT", "sha256": "same", "size": 10, "attributes": "------"},
         ])
-        candidate = manifest("new", "ffs", [
-            {"recordType": "file", "path": "$.NEW", "sha256": "same", "size": 10, "load": "4096"},
+        candidate = manifest("new", "gemdos", [
+            {"recordType": "file", "path": "NEW.DAT", "sha256": "same", "size": 10, "attributes": "------"},
         ])
 
         report = compare_manifests(base, candidate)
@@ -74,13 +74,13 @@ class ImageDiffTests(unittest.TestCase):
         self.assertEqual(report["changes"]["renamed"][0]["changedFields"], ["path"])
 
     def test_compare_does_not_guess_between_duplicate_rename_candidates(self) -> None:
-        base = manifest("old", "ffs", [
-            {"recordType": "file", "path": "$.ONE", "sha256": "same", "size": 10},
-            {"recordType": "file", "path": "$.TWO", "sha256": "same", "size": 10},
+        base = manifest("old", "gemdos", [
+            {"recordType": "file", "path": "ONE.DAT", "sha256": "same", "size": 10},
+            {"recordType": "file", "path": "TWO.DAT", "sha256": "same", "size": 10},
         ])
-        candidate = manifest("new", "ffs", [
-            {"recordType": "file", "path": "$.THREE", "sha256": "same", "size": 10},
-            {"recordType": "file", "path": "$.FOUR", "sha256": "same", "size": 10},
+        candidate = manifest("new", "gemdos", [
+            {"recordType": "file", "path": "THREE.DAT", "sha256": "same", "size": 10},
+            {"recordType": "file", "path": "FOUR.DAT", "sha256": "same", "size": 10},
         ])
 
         report = compare_manifests(base, candidate)
@@ -90,22 +90,22 @@ class ImageDiffTests(unittest.TestCase):
         self.assertEqual(report["summary"]["removed"], 2)
 
     def test_directory_allocation_changes_are_derived_not_logical_changes(self) -> None:
-        base = manifest("old", "ffs", [
-            {"recordType": "directory", "path": "$.Games", "size": 2048, "fileCount": 1, "attributes": "WR/"},
+        base = manifest("old", "gemdos", [
+            {"recordType": "directory", "path": "GAMES", "size": 2048, "fileCount": 1, "attributes": "----d-"},
         ])
-        candidate = manifest("new", "ffs", [
-            {"recordType": "directory", "path": "$.Games", "size": 4096, "fileCount": 12, "attributes": "WR/"},
+        candidate = manifest("new", "gemdos", [
+            {"recordType": "directory", "path": "GAMES", "size": 4096, "fileCount": 12, "attributes": "----d-"},
         ])
         self.assertEqual(compare_manifests(base, candidate)["summary"]["total"], 0)
         self.assertEqual(manifest_fingerprint(base), manifest_fingerprint(candidate))
 
     def test_image_comparison_reports_each_catalogue_phase(self) -> None:
-        base = manifest("old", "ofs", [])
-        candidate = manifest("new", "ofs", [])
+        base = manifest("old", "gemdos", [])
+        candidate = manifest("new", "gemdos", [])
         updates = []
         sessions = [
-            SimpleNamespace(kind="ofs", name="old.adf"),
-            SimpleNamespace(kind="ofs", name="new.adf"),
+            SimpleNamespace(kind="gemdos", name="old.st"),
+            SimpleNamespace(kind="gemdos", name="new.st"),
         ]
 
         with patch("app.image_diff.build_manifest", side_effect=[base, candidate]) as builder:
@@ -118,16 +118,16 @@ class ImageDiffTests(unittest.TestCase):
         self.assertEqual(updates[-1], ("Image comparison complete", 3, 3))
 
     def test_image_comparison_joins_raw_component_ranges_to_logical_changes(self) -> None:
-        base = manifest("old", "ofs", [])
-        candidate = manifest("new", "ofs", [])
+        base = manifest("old", "gemdos", [])
+        candidate = manifest("new", "gemdos", [])
         with tempfile.TemporaryDirectory() as folder:
-            left = Path(folder) / "left.adf"
-            right = Path(folder) / "right.adf"
+            left = Path(folder) / "left.st"
+            right = Path(folder) / "right.st"
             left.write_bytes(b"CATALOGUE-A")
             right.write_bytes(b"CATALOGUE-B")
             sessions = [
-                SimpleNamespace(kind="ofs", name=left.name, path=left, descriptor_path=None),
-                SimpleNamespace(kind="ofs", name=right.name, path=right, descriptor_path=None),
+                SimpleNamespace(kind="gemdos", name=left.name, path=left),
+                SimpleNamespace(kind="gemdos", name=right.name, path=right),
             ]
             with patch("app.image_diff.build_manifest", side_effect=[base, candidate]):
                 report = compare_images(None, *sessions)

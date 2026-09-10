@@ -157,7 +157,7 @@ def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprin
                 installed.update(_catalogue_identities(entry["name"]))
         except DiskError:
             pass
-        for name in session.ffs_source_names.values():
+        for name in session.source_names.values():
             installed.update(_catalogue_identities(name))
         for row in rows:
             candidates = _catalogue_identities(row["title"])

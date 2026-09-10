@@ -1,102 +1,165 @@
-"""Converting a hard drive between its two shapes.
+"""A hard drive addressed through the partition table it declares.
 
-An Atari hard drive exists in one of two forms, and both are called ``.hdf``.
-One carries a Rigid Disk Block and describes its own geometry; the other is a
-bare hardfile that holds a single volume and nothing else, so the host has to
-be told the geometry separately. Software in the wild uses both, and these
-tests cover converting either way without losing the volume.
+An ACSI, SCSI or IDE drive prepared for TOS keeps its table in the root
+sector. AHDI writes up to four entries there, XGM chains a further table so a
+drive can carry more, ICD's driver adds eight lower in the same sector, and a
+drive prepared on a PC carries an ordinary MBR that TOS 4 and MiNT both mount.
+Opening one therefore means reading that table, choosing a partition, and
+mounting it as the ordinary GEMDOS volume it is.
+
+An IDE drive imaged through a byte-swapping adapter has every sector's byte
+pairs reversed. The engine reads through the swap and the flag surfaces in the
+table, which is what tells a person why the image looks wrong in a hex editor
+and right in the workbench.
 """
 
 from __future__ import annotations
 
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
-from atarinut.filesystem.blocks import BlockReader
-from atarinut.filesystem.rdb import read_rigid_disk
+from atarinut.filesystem.blocks import swap_bytes
 from app.disk_service import DiskService
-from app.hardfile_geometry import parse_geometry
+from app.errors import DiskError
 
 
-class HardDriveConversionTests(unittest.TestCase):
-    def test_a_bare_hardfile_can_be_given_a_rigid_disk_block(self) -> None:
+MIB = 1024 * 1024
+
+
+class PartitionedDriveTests(unittest.TestCase):
+    def test_a_new_drive_reports_the_ahdi_table_it_was_built_with(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            bare = service.create_blank("ffs-physical", "SYSTEM", "8MB")
-            self.assertEqual(bare.kind, "ffs")
+            drive = service.create_blank("hd", "TESTHDD", "32MB")
+            self.assertEqual(drive.kind, "hd")
 
-            offered = {row["format"] for row in service.export_formats(bare)}
-            self.assertIn("rdb", offered)
-            # It has no partition table yet, so there is nothing to strip.
-            self.assertNotIn("hardfile", offered)
+            table = service.partition_table(drive)
+            self.assertEqual(table["scheme"], "ahdi")
+            self.assertFalse(table["byteSwapped"])
+            self.assertTrue(table["bootable"])
+            self.assertEqual(table["sizeBytes"], 32 * MIB)
+            self.assertEqual(table["hdSize"], 32 * MIB // 512)
+            self.assertEqual(len(table["partitions"]), 4)
 
-            output, _name = service.export_image(bare, "rdb")
-
-            # The result is a drive that describes itself, and reopening it
-            # finds the partition table rather than a bare volume.
-            self.assertEqual(service.identify_kind(output, "hdf"), "hdf")
-            reader = BlockReader(output)
-            try:
-                disk = read_rigid_disk(reader)
-                self.assertEqual(len(disk.partitions), 1)
-                partition = disk.partitions[0]
-                self.assertTrue(partition.bootable)
-                self.assertEqual(partition.dos_type[:3], b"DOS")
-                # The volume's own bytes moved across untouched: its boot
-                # block now sits at the partition's first block.
-                self.assertEqual(
-                    reader.read_block(partition.start_block)[:4],
-                    bare.path.read_bytes()[:4],
+            rows = service.list_partitions(drive)
+            self.assertEqual([row["device"] for row in rows], ["C:", "D:", "E:", "F:"])
+            self.assertEqual([row["id"] for row in rows], ["GEM"] * 4)
+            # A partition reached through a table is FAT16 whatever its
+            # cluster count, because that is what the driver's own parameter
+            # block declares and what TOS obeys.
+            self.assertEqual([row["format"] for row in rows], ["FAT16"] * 4)
+            self.assertEqual([row["gemdos"] for row in rows], [True] * 4)
+            self.assertTrue(rows[0]["bootable"])
+            self.assertFalse(any(row["bootable"] for row in rows[1:]))
+            # Every partition sits inside the drive and after the one before.
+            self.assertGreaterEqual(rows[0]["startSector"], 1)
+            for earlier, later in zip(rows, rows[1:]):
+                self.assertLessEqual(
+                    earlier["startSector"] + earlier["sizeSectors"],
+                    later["startSector"],
                 )
-            finally:
-                reader.close()
-
-    def test_a_partitioned_drive_exports_one_partition_as_a_hardfile(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            service = DiskService(Path(folder) / "work")
-            drive = service.create_blank("ffs-hard", "WORKBENCH", "20MB")
-            self.assertEqual(drive.kind, "hdf")
 
             offered = {row["format"] for row in service.export_formats(drive)}
-            self.assertIn("hardfile", offered)
-            # It already has a partition table, so there is none to add.
-            self.assertNotIn("rdb", offered)
+            self.assertEqual(offered, {"native"})
 
-            output, _name = service.export_image(drive, "hardfile")
-            with zipfile.ZipFile(output) as archive:
-                names = archive.namelist()
-                data_name = next(name for name in names if name.endswith(".hdf"))
-                geo_name = next(name for name in names if name.endswith(".geo"))
-                payload = archive.read(data_name)
-                geometry = parse_geometry(archive.read(geo_name).decode("latin-1"))
+    def test_selecting_a_partition_mounts_it_as_a_gemdos_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = DiskService(root / "work")
+            drive = service.create_blank("hd", "TESTHDD", "32MB")
 
-            # Both files travel together under the directory the firmware
-            # expects, and share a base name so the pair stays matched.
-            self.assertTrue(all(name.startswith("Hardfile0/") for name in names))
-            self.assertEqual(Path(data_name).stem, Path(geo_name).stem)
+            # A drive that has just been opened falls back to the first
+            # partition, which is what TOS does when it boots from C:.
+            self.assertEqual(service.selected_partition(drive), 0)
+            self.assertEqual(service.partition_label(drive), "C:")
 
-            # The volume came out whole, and the geometry multiplies back to
-            # exactly its size, which is what an emulator checks before it
-            # will accept the pair.
-            self.assertEqual(payload[:3], b"DOS")
-            self.assertEqual(
-                geometry["surfaces"]
-                * geometry["blocks_per_track"]
-                * geometry["cylinders"]
-                * geometry["block_size"],
-                len(payload),
-            )
+            self.assertEqual(service.select_partition(drive, 1), 1)
+            self.assertEqual(service.selected_partition(drive), 1)
+            self.assertEqual(service.partition_label(drive), "D:")
 
-    def test_a_floppy_is_offered_neither_conversion(self) -> None:
-        """Neither shape applies to a disk that is not a hard drive."""
+            payload = b"Atari File Forge partition fixture\n"
+            source = root / "TEST.DAT"
+            source.write_bytes(payload)
+            service.put(drive, "TEST.DAT", source)
+            with service.partition_mount(drive, writable=False) as mount:
+                self.assertEqual(mount.format, "FAT16")
+                self.assertEqual(mount.read_bytes("TEST.DAT"), payload)
+
+            # The file went into D: alone; C: is a separate filesystem.
+            service.select_partition(drive, 0)
+            with service.gemdos_mount(drive, writable=False) as mount:
+                self.assertFalse(mount.exists("TEST.DAT"))
+
+            with self.assertRaisesRegex(DiskError, "4 partition"):
+                service.select_partition(drive, 9)
+
+            # Clearing the selection puts the pane back on the table itself,
+            # which is not a volume and cannot be written into.
+            self.assertIsNone(service.select_partition(drive, None))
+            self.assertFalse(service.mountable(drive))
+            with self.assertRaisesRegex(DiskError, "Choose a partition"):
+                with service.gemdos_mount(drive):
+                    pass
+
+    def test_an_mbr_drive_is_read_through_the_same_table(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            floppy = service.create_blank("ffs-intl", "GAMES")
+            drive = service.create_blank(
+                "hd", "MBRDISK", "40MB", options={"scheme": "mbr", "partitions": 2}
+            )
+
+            table = service.partition_table(drive)
+            self.assertEqual(table["scheme"], "mbr")
+            self.assertEqual(len(table["partitions"]), 2)
+            rows = service.list_partitions(drive)
+            # 0x04 is the small FAT16 type code TOS 4 and MiNT mount.
+            self.assertEqual([row["typeCode"] for row in rows], [0x04, 0x04])
+            self.assertEqual([row["gemdos"] for row in rows], [True, True])
+
+            service.select_partition(drive, 1)
+            with service.partition_mount(drive, writable=False) as mount:
+                self.assertEqual(mount.format, "FAT16")
+                self.assertEqual(mount.title, "MBRDISK1")
+
+    def test_a_byte_swapped_image_is_read_through_the_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = DiskService(root / "work")
+            drive = service.create_blank("hd", "SWAPPED", "16MB")
+            payload = b"written before the adapter reversed every byte pair\n"
+            source = root / "DATA.BIN"
+            source.write_bytes(payload)
+            service.put(drive, "DATA.BIN", source)
+
+            drive.path.write_bytes(swap_bytes(drive.path.read_bytes()))
+            reopened = service.create_from_path(drive.path)
+            self.assertEqual(reopened.kind, "hd")
+
+            table = service.partition_table(reopened)
+            self.assertTrue(table["byteSwapped"])
+            self.assertTrue(all(row["byteSwapped"] for row in table["partitions"]))
+            self.assertEqual(table["scheme"], "ahdi")
+
+            service.select_partition(reopened, 0)
+            with service.partition_mount(reopened, writable=False) as mount:
+                self.assertEqual(mount.read_bytes("DATA.BIN"), payload)
+
+    def test_a_floppy_has_no_partition_table(self) -> None:
+        """Neither reading a table nor choosing from one applies to a floppy."""
+        with tempfile.TemporaryDirectory() as folder:
+            service = DiskService(Path(folder) / "work")
+            floppy = service.create_blank("ds-720k", "GAMES")
+            self.assertEqual(floppy.kind, "gemdos")
+
+            with self.assertRaisesRegex(DiskError, "not a partitioned hard disk"):
+                service.partition_table(floppy)
+            with self.assertRaisesRegex(DiskError, "not a partitioned hard disk"):
+                service.select_partition(floppy, 0)
+            self.assertEqual(service.partition_label(floppy), "")
+
             offered = {row["format"] for row in service.export_formats(floppy)}
-            self.assertEqual(offered & {"rdb", "hardfile"}, set())
-            self.assertIn("adz", offered)
+            self.assertEqual(offered & {"msa", "dim"}, {"msa", "dim"})
 
 
 if __name__ == "__main__":

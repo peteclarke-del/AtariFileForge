@@ -178,8 +178,7 @@ def compare_images(service, base_session, candidate_session, progress=None) -> d
     comparison = compare_manifests(base, candidate)
     components = []
     pairs = [("image", getattr(base_session, "path", None), getattr(candidate_session, "path", None))]
-    if getattr(base_session, "descriptor_path", None) and getattr(candidate_session, "descriptor_path", None):
-        pairs.append(("descriptor", base_session.descriptor_path, candidate_session.descriptor_path))
+
     for component, base_path, candidate_path in pairs:
         if base_path is None or candidate_path is None:
             continue

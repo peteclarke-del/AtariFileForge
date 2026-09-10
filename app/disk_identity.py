@@ -407,7 +407,7 @@ def analyse_directory(
         "matches": [],
         "launchCandidates": candidates,
     }
-    source_name = getattr(session, "ffs_source_names", {}).get(path)
+    source_name = getattr(session, "source_names", {}).get(path)
     if source_name:
         enrich_from_distribution_filename(metadata, source_name)
     elif getattr(session, "distribution_name", None):

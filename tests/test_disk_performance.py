@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.disk_service import DiskService
-from app.ffs_items import delete_ffs_items
+from app.gemdos_items import delete_gemdos_items
 
 
 class DiskPerformanceTests(unittest.TestCase):
@@ -24,10 +24,10 @@ class DiskPerformanceTests(unittest.TestCase):
 
     def test_local_checkpoint_copy_preserves_sparse_zero_ranges(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.hda"
-            target = Path(directory) / "checkpoint.hda"
+            source = Path(directory) / "source.img"
+            target = Path(directory) / "checkpoint.img"
             with source.open("wb") as output:
-                output.write(b"FFS")
+                output.write(b"GEM")
                 output.seek(32 * 1024 * 1024 - 1)
                 output.write(b"\0")
 
@@ -57,141 +57,150 @@ class DiskPerformanceTests(unittest.TestCase):
             self.assertEqual(local_copy.call_count, 1)
             self.assertEqual(session.path.read_bytes(), source.read_bytes())
 
-    def test_known_ffs_local_open_skips_the_all_filesystem_probe(self):
+    def test_known_gemdos_local_open_skips_the_all_filesystem_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = DiskService(root / "source-work").create_blank(
-                "ffs-intl", "SOURCE"
+                "ds-720k", "SOURCE"
             ).path
             service = DiskService(root / "open-work")
 
             with patch.object(
                 service,
                 "_run_json",
-                side_effect=AssertionError("known FFS media used the generic probe"),
+                side_effect=AssertionError("known GEMDOS media used the generic probe"),
             ):
                 opened = service.create_from_path(source)
 
-            self.assertEqual(opened.kind, "ffs")
+            self.assertEqual(opened.kind, "gemdos")
             self.assertEqual(opened.path.stat().st_size, source.stat().st_size)
 
     def test_sparse_optimisation_does_not_look_like_an_image_edit(self):
         with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "scsi0.hda"
-            image.write_bytes(b"DOS\x03" + bytes(8 * 1024 * 1024))
+            image = Path(directory) / "drive.img"
+            image.write_bytes(b"\x60\x1c" + bytes(8 * 1024 * 1024))
             timestamp = 1_700_000_000_123_456_789
             os.utime(image, ns=(timestamp, timestamp))
 
             DiskService._optimise_sparse_file(image)
 
             self.assertEqual(image.stat().st_mtime_ns, timestamp)
-            self.assertEqual(image.read_bytes()[:4], b"DOS\x03")
+            self.assertEqual(image.read_bytes()[:2], b"\x60\x1c")
 
-    def test_directory_tree_copy_avoids_the_cli_for_an_ffs_target(self):
+    def test_a_whole_disk_is_expanded_into_a_volume_without_the_engine_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            source = service.create_blank("adf", "SOURCE")
-            target = service.create_blank("ffs-intl", "TARGET")
-            for name in ("ONE", "TWO"):
+            source = service.create_blank("ds-720k", "SOURCE")
+            target = service.create_blank("volume", "TARGET", capacity="8MB")
+            for name in ("ONE.DAT", "TWO.DAT"):
                 host = root / name.lower()
                 host.write_bytes(name.encode("ascii"))
                 service.put(source, name, host)
-            rows = service.list_ofs_catalogue_files(source)
+            self.assertEqual(len(service.list_volume_files(source)), 2)
 
             with patch.object(service, "_run", wraps=service._run) as run:
-                service._copy_rows_to_ffs(
-                    source, None, rows, target, "SOFTWARE"
+                destination = service.extract_image_to_directory(
+                    source, target, "", "SOFTWARE"
                 )
 
             self.assertEqual(run.call_count, 0)
+            self.assertEqual(destination, "SOFTWARE")
             self.assertEqual(
                 {
                     row["name"]
                     for row in service.list_directory(target, "SOFTWARE")["entries"]
                 },
-                {"ONE", "TWO"},
+                {"ONE.DAT", "TWO.DAT"},
             )
 
-    def test_ffs_browse_returns_capacity_without_the_cli(self):
+    def test_a_gemdos_browse_returns_capacity_without_the_engine_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            session = service.create_blank("ffs", "BROWSE")
-            service.make_directory(session, "$.Games")
+            session = service.create_blank("ds-720k", "BROWSE")
+            service.make_directory(session, "GAMES")
 
             with patch.object(service, "_run", wraps=service._run) as run:
-                listing = service.browse_directory(session, "$", None)
+                listing = service.browse_directory(session, "", None)
 
             self.assertEqual(run.call_count, 0)
-            self.assertEqual([row["name"] for row in listing["entries"]], ["Games"])
+            self.assertEqual([row["name"] for row in listing["entries"]], ["GAMES"])
             self.assertTrue(listing["capacity"]["available"])
             self.assertGreater(listing["capacity"]["free"], 0)
 
-    def test_multiple_ofs_files_change_access_in_one_mount(self):
+    def test_multiple_files_change_access_in_one_mount(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "ACCESS")
+            session = service.create_blank("ds-720k", "ACCESS")
             first = root / "one.bin"
             second = root / "two.bin"
             first.write_bytes(b"one")
             second.write_bytes(b"two")
-            service.put(session, "ONE", first)
-            service.put(session, "TWO", second)
+            service.put(session, "ONE.BIN", first)
+            service.put(session, "TWO.BIN", second)
 
-            updated = service.set_access(session, ["ONE", "TWO"],
-                False,
-            )
+            updated = service.set_access(session, ["ONE.BIN", "TWO.BIN"], False)
 
-            self.assertEqual(updated, ["ONE", "TWO"])
+            self.assertEqual(updated, ["ONE.BIN", "TWO.BIN"])
             entries = service.list_directory(session, "", None)["entries"]
-            # A protected entry shows neither the write nor the delete flag.
-            self.assertTrue(all("w" not in row["attr"] for row in entries), entries)
-            self.assertTrue(all("d" not in row["attr"] for row in entries), entries)
+            # A locked entry carries the read-only bit, which is the one bit
+            # GEMDOS has for refusing a change or a delete.
+            self.assertTrue(all(row["attr"].startswith("r") for row in entries), entries)
+            # Locking says nothing about whether a file is hidden or has been
+            # written since the last backup, so those bits are left alone.
+            self.assertTrue(all(row["attr"].endswith("a") for row in entries), entries)
 
-            service.set_access(session, ["ONE", "TWO"], True)
+            service.set_access(session, ["ONE.BIN", "TWO.BIN"], True)
             entries = service.list_directory(session, "", None)["entries"]
-            self.assertTrue(all("w" in row["attr"] for row in entries), entries)
-            self.assertTrue(all("d" in row["attr"] for row in entries), entries)
+            self.assertTrue(all(row["attr"].startswith("-") for row in entries), entries)
+            self.assertTrue(all(row["attr"].endswith("a") for row in entries), entries)
 
-    def test_multiple_ofs_files_delete_in_one_command(self):
+    def test_multiple_files_delete_in_one_engine_command(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "DELETE")
-            for name in ("ONE", "TWO", "KEEP"):
-                host = root / f"{name.lower()}.bin"
+            session = service.create_blank("ds-720k", "DELETE")
+            for name in ("ONE.BIN", "TWO.BIN", "KEEP.BIN"):
+                host = root / name.lower()
                 host.write_bytes(name.encode("ascii"))
                 service.put(session, name, host)
 
-            service.mutate(session, ["rm", "--force", "{image}:ONE", "{image}:TWO"],
+            service.mutate(
+                session, ["rm", "--force", "{image}:ONE.BIN", "{image}:TWO.BIN"]
             )
 
-            names = {row["name"] for row in service.list_directory(session, "", None)["entries"]}
-            self.assertEqual(names, {"KEEP"})
+            names = {
+                row["name"]
+                for row in service.list_directory(session, "", None)["entries"]
+            }
+            self.assertEqual(names, {"KEEP.BIN"})
 
-    def test_multiple_ffs_items_delete_in_one_mount(self):
+    def test_multiple_items_delete_in_one_mount(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            session = service.create_blank("ffs", "DELETE")
-            for name in ("ONE", "TWO", "KEEP"):
-                host = root / f"{name.lower()}.bin"
+            session = service.create_blank("ds-720k", "DELETE")
+            for name in ("ONE.BIN", "TWO.BIN", "KEEP.BIN"):
+                host = root / name.lower()
                 host.write_bytes(name.encode("ascii"))
                 service.put(session, name, host)
 
-            result = delete_ffs_items(service, session, ["ONE", "TWO"])
+            result = delete_gemdos_items(service, session, ["ONE.BIN", "TWO.BIN"])
 
             self.assertEqual(len(result["deletedItems"]), 2)
-            names = {row["name"] for row in service.list_directory(session, "", None)["entries"]}
-            self.assertEqual(names, {"KEEP"})
+            names = {
+                row["name"]
+                for row in service.list_directory(session, "", None)["entries"]
+            }
+            self.assertEqual(names, {"KEEP.BIN"})
 
-    def test_host_folder_import_preserves_an_ffs_tree_in_one_batch(self):
+    def test_host_folder_import_preserves_a_directory_tree_in_one_batch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            session = service.create_blank("ffs", "FOLDERS")
+            session = service.create_blank("ds-720k", "FOLDERS")
             one = root / "one.bin"
             two = root / "two.bin"
             one.write_bytes(b"one")
@@ -199,56 +208,64 @@ class DiskPerformanceTests(unittest.TestCase):
 
             result = service.put_host_tree(
                 session,
-                "$",
+                "",
                 [
                     {
-                        "targetPath": "Pack/One",
+                        "targetPath": "PACK/ONE.BIN",
                         "hostPath": one,
-                        "metadata": {"protection": "----r-e-", "comment": "Imported"},
+                        "metadata": {"attributes": "r-----"},
                     },
-                    {"targetPath": "Pack/Sub/Two", "hostPath": two},
+                    {"targetPath": "PACK/SUB/TWO.BIN", "hostPath": two},
                 ],
                 preserve_directories=True,
             )
 
             self.assertEqual(result["conflicts"], [])
             self.assertEqual(
-                {row["name"] for row in service.list_directory(session, "Pack", None)["entries"]},
-                {"One", "Sub"},
+                {
+                    row["name"]
+                    for row in service.list_directory(session, "PACK", None)["entries"]
+                },
+                {"ONE.BIN", "SUB"},
             )
             self.assertEqual(
-                [row["name"] for row in service.list_directory(session, "Pack/Sub", None)["entries"]],
-                ["Two"],
+                [
+                    row["name"]
+                    for row in service.list_directory(session, "PACK/SUB", None)["entries"]
+                ],
+                ["TWO.BIN"],
             )
             imported = next(
-                row for row in service.list_directory(session, "Pack", None)["entries"]
-                if row["name"] == "One"
+                row
+                for row in service.list_directory(session, "PACK", None)["entries"]
+                if row["name"] == "ONE.BIN"
             )
-            self.assertEqual(imported["protection"], 0x05)
-            self.assertEqual(imported["comment"], "Imported")
+            self.assertEqual(imported["attributeBits"], 0x01)
+            self.assertEqual(imported["attributes"], "r-----")
+            self.assertEqual(imported["attr"], imported["attributes"])
 
     def test_host_folder_import_reports_existing_files_before_writing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = DiskService(root / "work")
-            session = service.create_blank("adf", "FOLDERS")
+            session = service.create_blank("ds-720k", "FOLDERS")
             old = root / "old.bin"
             new = root / "new.bin"
             old.write_bytes(b"old")
             new.write_bytes(b"new")
-            service.put(session, "SAME", old)
+            service.put(session, "SAME.BIN", old)
 
             result = service.put_host_tree(
                 session,
                 "",
-                [{"targetPath": "SAME", "hostPath": new}],
+                [{"targetPath": "SAME.BIN", "hostPath": new}],
                 preserve_directories=False,
             )
 
-            self.assertEqual(result["conflicts"], ["SAME"])
-            self.assertEqual(service.read_file(session, "SAME"), b"old")
+            self.assertEqual(result["conflicts"], ["SAME.BIN"])
+            self.assertEqual(service.read_file(session, "SAME.BIN"), b"old")
 
-    def test_an_empty_drawer_is_safe_to_reuse(self):
+    def test_an_empty_directory_is_safe_to_reuse(self):
         empty_mount = types.SimpleNamespace(
             exists=lambda _path: True,
             stat=lambda _path: types.SimpleNamespace(is_dir=True),
@@ -257,7 +274,7 @@ class DiskPerformanceTests(unittest.TestCase):
         populated_mount = types.SimpleNamespace(
             exists=lambda _path: True,
             stat=lambda _path: types.SimpleNamespace(is_dir=True),
-            iter_entries=lambda _path: iter([types.SimpleNamespace(name="Startup-Sequence")]),
+            iter_entries=lambda _path: iter([types.SimpleNamespace(name="DESKTOP.INF")]),
         )
         file_mount = types.SimpleNamespace(
             exists=lambda _path: True,
@@ -270,19 +287,21 @@ class DiskPerformanceTests(unittest.TestCase):
             iter_entries=lambda _path: iter(()),
         )
 
-        self.assertTrue(DiskService._is_empty_directory(empty_mount, "Empty"))
-        self.assertFalse(DiskService._is_empty_directory(populated_mount, "Software"))
-        self.assertFalse(DiskService._is_empty_directory(file_mount, "NotADrawer"))
-        self.assertFalse(DiskService._is_empty_directory(missing_mount, "Missing"))
+        self.assertTrue(DiskService._is_empty_directory(empty_mount, "EMPTY"))
+        self.assertFalse(DiskService._is_empty_directory(populated_mount, "SOFTWARE"))
+        self.assertFalse(DiskService._is_empty_directory(file_mount, "NOTADIR.TXT"))
+        self.assertFalse(DiskService._is_empty_directory(missing_mount, "MISSING"))
 
-    def test_a_whole_volume_is_collected_under_one_destination_drawer(self):
+    def test_a_whole_volume_is_collected_under_one_destination_directory(self):
         entries = {
             "": [
-                types.SimpleNamespace(name="Startup-Sequence", path="Startup-Sequence", is_dir=False),
-                types.SimpleNamespace(name="Games", path="Games", is_dir=True),
+                types.SimpleNamespace(name="DESKTOP.INF", path="DESKTOP.INF", is_dir=False),
+                types.SimpleNamespace(name="GAMES", path="GAMES", is_dir=True),
             ],
-            "Games": [
-                types.SimpleNamespace(name="Adventure", path="Games/Adventure", is_dir=False),
+            "GAMES": [
+                types.SimpleNamespace(
+                    name="ADVENTUR.PRG", path="GAMES\\ADVENTUR.PRG", is_dir=False
+                ),
             ],
         }
         mount = types.SimpleNamespace(iter_entries=lambda path: iter(entries.get(path, [])))
@@ -290,27 +309,31 @@ class DiskPerformanceTests(unittest.TestCase):
         def file_item(_mount, source, destination):
             return {"kind": "file", "dst": destination, "src": source}
 
-        items = DiskService._collect_ofs_catalogue_items(mount, "Disks/Disk0026", file_item)
+        items = DiskService._collect_volume_items(mount, "DISKS\\DISK0026", file_item)
 
-        self.assertIn({"kind": "mkdir", "dst": "Disks/Disk0026/Games", "order": 0}, items)
+        self.assertIn(
+            {"kind": "mkdir", "dst": "DISKS\\DISK0026\\GAMES", "order": 0}, items
+        )
         files = [item for item in items if item["kind"] == "file"]
         self.assertEqual(
             [(item["sourceName"], item["dst"]) for item in files],
             [
-                ("Games/Adventure", "Disks/Disk0026/Games/Adventure"),
-                ("Startup-Sequence", "Disks/Disk0026/Startup-Sequence"),
+                ("DESKTOP.INF", "DISKS\\DISK0026\\DESKTOP.INF"),
+                ("GAMES\\ADVENTUR.PRG", "DISKS\\DISK0026\\GAMES\\ADVENTUR.PRG"),
             ],
         )
 
     def test_collected_names_are_carried_across_intact(self):
-        """A full stop is a legal Atari name character, so it is not split."""
+        """The full stop before a GEMDOS extension is part of the name."""
         entries = {
             "": [
-                types.SimpleNamespace(name="Disk.info", path="Disk.info", is_dir=False),
-                types.SimpleNamespace(name="My Drawer", path="My Drawer", is_dir=True),
+                types.SimpleNamespace(name="DESKTOP.INF", path="DESKTOP.INF", is_dir=False),
+                types.SimpleNamespace(name="MYFILES", path="MYFILES", is_dir=True),
             ],
-            "My Drawer": [
-                types.SimpleNamespace(name="Art.iff", path="My Drawer/Art.iff", is_dir=False),
+            "MYFILES": [
+                types.SimpleNamespace(
+                    name="ART.NEO", path="MYFILES\\ART.NEO", is_dir=False
+                ),
             ],
         }
         mount = types.SimpleNamespace(iter_entries=lambda path: iter(entries.get(path, [])))
@@ -318,25 +341,46 @@ class DiskPerformanceTests(unittest.TestCase):
         def file_item(_mount, source, destination):
             return {"kind": "file", "dst": destination, "src": source}
 
-        items = DiskService._collect_ofs_catalogue_items(mount, "Disk0034", file_item)
+        items = DiskService._collect_volume_items(mount, "DISK0034", file_item)
 
-        self.assertIn({"kind": "mkdir", "dst": "Disk0034/My Drawer", "order": 0}, items)
+        self.assertIn({"kind": "mkdir", "dst": "DISK0034\\MYFILES", "order": 0}, items)
         files = [item for item in items if item["kind"] == "file"]
         self.assertEqual(
             sorted(item["dst"] for item in files),
-            ["Disk0034/Disk.info", "Disk0034/My Drawer/Art.iff"],
+            ["DISK0034\\DESKTOP.INF", "DISK0034\\MYFILES\\ART.NEO"],
         )
 
-    def test_an_extracted_startup_script_is_pointed_at_its_new_drawer(self):
-        boot = b'Assign C: SYS:C\nCD :\nExecute :Haven\n'
+    def test_an_extracted_desktop_record_is_carried_across_unchanged(self):
+        """Nothing is rewritten on the way in, because nothing needs to be.
 
-        relocated = DiskService._relocate_ofs_boot_script(boot, "Games/Disks2/Disk0055")
-
-        self.assertEqual(
-            relocated,
-            b"Assign C: Games/Disks2/Disk0055/C\nCD Games/Disks2/Disk0055\n"
-            b"Execute Games/Disks2/Disk0055/Haven\n",
+        TOS loads a GEMDOS program through its own relocation table and
+        resolves a path at run time from the drive the program was started
+        from, so a disk expanded into a folder on a hard disk finds its files
+        without a single byte being patched.
+        """
+        record = (
+            b"#a000000\r\n"
+            b"#b000000\r\n"
+            b"#c7770007000600070055200506000600\r\n"
+            b'#K 4F 53 4C 00 46 55 4D 00 47 08 0B 00 @\r\n'
+            b'#G 03 FF *.APP@ @\r\n'
+            b'#F 03 04 *.*@\r\n'
         )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = DiskService(root / "work")
+            source = service.create_blank("ds-720k", "SOURCE")
+            target = service.create_blank("volume", "TARGET", capacity="8MB")
+            host = root / "desktop.inf"
+            host.write_bytes(record)
+            service.put(source, "DESKTOP.INF", host)
+
+            service.extract_image_to_directory(source, target, "", "DISK0055")
+
+            self.assertEqual(
+                service.read_file(target, "DISK0055\\DESKTOP.INF"), record
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

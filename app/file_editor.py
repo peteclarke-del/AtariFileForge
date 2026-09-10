@@ -12,7 +12,7 @@ from .checksum import sha256_bytes, sha256_path
 from .content_kind import (
     analyse_content,
     format_basic_listing as _format_basic_listing,
-    is_container_file as is_dms_container,
+    is_container_file,
 )
 from .disk_service import DiskError, DiskService, ImageSession
 from .hex_service import MAX_HEX_READ, _decode_changes, _search_pattern
@@ -155,13 +155,13 @@ def inspect_file_data(
     size = len(data) if size is None else int(size)
     digest = digest or sha256_bytes(data)
     truncated = size > len(data)
-    if is_dms_container(data):
+    if is_container_file(data):
         return {
             "path": path,
             "size": size,
             "sha256": digest,
             "view": "container",
-            "containerKind": "dms",
+            "containerKind": "disk-or-archive",
             "text": "",
             "editable": False,
             "tokenisedBasic": False,

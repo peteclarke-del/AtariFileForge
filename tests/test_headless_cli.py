@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from app import cli
 from app.disk_service import DiskError
 from app.headless import (
+    BLANK_FORMATS,
     RECIPE_FORMAT,
     RECIPE_VERSION,
     create_recipe,
@@ -33,15 +34,9 @@ class CopyService:
         destination.write_bytes(source.read_bytes())
 
 
-class FailingPairCopyService(CopyService):
-    def __init__(self):
-        self.copies = 0
-
+class FailingCopyService(CopyService):
     def _copy_local_file(self, source, destination):
-        self.copies += 1
-        if self.copies == 2:
-            raise OSError("descriptor copy failed")
-        super()._copy_local_file(source, destination)
+        raise OSError("image copy failed")
 
 
 class HeadlessCliTests(unittest.TestCase):
@@ -51,11 +46,11 @@ class HeadlessCliTests(unittest.TestCase):
         with patch("app.cli.DiskService") as service_type:
             service = service_type.return_value
             service.create_blank.return_value = SimpleNamespace()
-            service.summary.return_value = {"kind": "ofs", "name": "blank.adf"}
+            service.summary.return_value = {"kind": "gemdos", "name": "blank.st"}
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 code = cli.main([
-                    "create", "--format", "adf", "--title", "TEST",
-                    "--output", "test.adf", "--dry-run",
+                    "create", "--format", "ds-720k", "--title", "TEST",
+                    "--output", "test.st", "--dry-run",
                 ])
         result = json.loads(stdout.getvalue())
         self.assertEqual(code, cli.EXIT_OK)
@@ -63,12 +58,26 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertEqual(result["version"], 1)
         self.assertEqual(result["status"], "planned")
         self.assertTrue(result["dryRun"])
-        self.assertEqual(result["result"]["format"], "adf")
+        self.assertEqual(result["result"]["format"], "ds-720k")
         service.create_blank.assert_called_once()
+
+    def test_create_only_offers_the_blank_formats_the_disk_service_builds(self):
+        self.assertIn("ds-720k", BLANK_FORMATS)
+        self.assertIn("hd", BLANK_FORMATS)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main([
+                    "create", "--format", "floppy-disk", "--title", "TEST",
+                    "--output", "test.st",
+                ])
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(raised.exception.code, cli.EXIT_USAGE)
+        self.assertEqual(result["status"], "usage-error")
 
     def test_output_cannot_replace_source_even_with_force(self):
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "disk.adf"
+            source = Path(temporary) / "disk.st"
             source.write_bytes(b"image")
             stdout = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
@@ -82,7 +91,7 @@ class HeadlessCliTests(unittest.TestCase):
 
     def test_report_output_cannot_replace_image_even_with_force(self):
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "disk.adf"
+            source = Path(temporary) / "disk.st"
             source.write_bytes(b"image")
             stdout = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
@@ -97,12 +106,12 @@ class HeadlessCliTests(unittest.TestCase):
     def test_preflight_command_returns_shared_compatibility_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            image = root / "disk.adf"
+            image = root / "disk.st"
             image.write_bytes(b"image")
             changes = root / "changes.json"
             changes.write_text(json.dumps([{"name": "LONG-FILENAME"}]), encoding="utf-8")
             session = SimpleNamespace(
-                kind="ofs", name=image.name, hardware_profile={}, path=image,
+                kind="gemdos", name=image.name, hardware_profile={}, path=image,
             )
             opened = Mock()
             opened.__enter__ = Mock(return_value=(Mock(), session))
@@ -112,14 +121,16 @@ class HeadlessCliTests(unittest.TestCase):
                 with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
                     code = cli.main([
                         "preflight", str(image), "--changes", str(changes),
-                        "--source-kind", "ffs", "--target-kind", "ofs",
+                        "--source-kind", "host", "--target-kind", "gemdos",
                     ])
             result = json.loads(stdout.getvalue())
             report = result["result"]
             self.assertEqual(code, cli.EXIT_OK)
             self.assertEqual(report["format"], "atari-file-forge-compatibility-report")
             self.assertEqual(report["version"], 1)
-            self.assertEqual(report["items"][0]["targetName"], "LONG-FILENAME")
+            # GEMDOS holds eight characters and an extension, so the long host
+            # name is reported as the 8.3 name the volume will really carry.
+            self.assertEqual(report["items"][0]["targetName"], "LONG-FIL")
 
     def test_usage_error_is_json_and_uses_documented_exit_code(self):
         stdout = io.StringIO()
@@ -142,8 +153,8 @@ class HeadlessCliTests(unittest.TestCase):
             document = create_recipe(
                 "Import one file",
                 {"payload": identity},
-                [{"action": "import-file", "source": "payload", "destination": "$.FILE"}],
-                {"path": "result.adf"},
+                [{"action": "import-file", "source": "payload", "destination": "FILE.DAT"}],
+                {"path": "result.st"},
             )
             recipe_path.write_text(json.dumps(document), encoding="utf-8")
 
@@ -152,6 +163,22 @@ class HeadlessCliTests(unittest.TestCase):
             self.assertEqual(loaded["format"], RECIPE_FORMAT)
             self.assertEqual(loaded["version"], RECIPE_VERSION)
             self.assertEqual(verify_identity(source, loaded["sources"]["payload"]), identity)
+
+    def test_recipe_accepts_the_container_conversion_action(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            recipe_path = Path(temporary) / "convert.json"
+            recipe_path.write_text(json.dumps({
+                "format": RECIPE_FORMAT,
+                "version": RECIPE_VERSION,
+                "name": "Rebuild the disk a container describes",
+                "sources": {"image": {"size": 1, "sha256": "a" * 64}},
+                "actions": [{"action": "convert-container", "format": "st"}],
+                "output": {"path": "result.st", "files": []},
+            }), encoding="utf-8")
+
+            loaded = load_recipe(recipe_path)
+
+            self.assertEqual(loaded["actions"][0]["action"], "convert-container")
 
     def test_recipe_identity_rejects_changed_source(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -173,9 +200,9 @@ class HeadlessCliTests(unittest.TestCase):
                 "actions": [{
                     "action": "import-file",
                     "source": "unchecked",
-                    "destination": "$.FILE",
+                    "destination": "FILE.DAT",
                 }],
-                "output": {"path": "result.adf", "files": []},
+                "output": {"path": "result.st", "files": []},
             }), encoding="utf-8")
             with self.assertRaisesRegex(DiskError, "unverified source alias"):
                 load_recipe(recipe_path)
@@ -191,7 +218,7 @@ class HeadlessCliTests(unittest.TestCase):
                     "image": {"size": 1, "sha256": "a" * 64},
                 },
                 "actions": [{"action": "apply-patch", "source": "unchecked"}],
-                "output": {"path": "result.adf", "files": []},
+                "output": {"path": "result.st", "files": []},
             }), encoding="utf-8")
             with self.assertRaisesRegex(DiskError, "unverified source alias"):
                 load_recipe(recipe_path)
@@ -204,43 +231,40 @@ class HeadlessCliTests(unittest.TestCase):
                 [{"size": 11, "sha256": "b" * 64}],
             )
 
-    def test_save_image_writes_primary_and_matching_descriptor(self):
+    def test_save_image_writes_the_single_atari_image_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            primary = root / "working.hda"
-            descriptor = root / "working.geo"
-            primary.write_bytes(b"HDA")
-            descriptor.write_bytes(b"GEO")
-            session = SimpleNamespace(path=primary, descriptor_path=descriptor)
-            output = root / "out" / "scsi0.hda"
+            primary = root / "working.st"
+            primary.write_bytes(b"ST")
+            session = SimpleNamespace(path=primary)
+            output = root / "out" / "games.st"
 
             files = save_image(CopyService(), session, output)
 
-            self.assertEqual(output.read_bytes(), b"HDA")
-            self.assertEqual(output.with_suffix(".geo").read_bytes(), b"GEO")
-            self.assertEqual([Path(row["path"]).suffix for row in files], [".hda", ".geo"])
+            self.assertEqual(output.read_bytes(), b"ST")
+            self.assertEqual([Path(row["path"]).suffix for row in files], [".st"])
+            # An Atari image is one file: nothing is written beside it.
+            self.assertEqual([item.name for item in output.parent.iterdir()], ["games.st"])
 
-    def test_failed_pair_staging_leaves_no_partial_output(self):
+    def test_failed_staging_leaves_no_partial_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            primary = root / "working.hda"
-            descriptor = root / "working.geo"
-            primary.write_bytes(b"HDA")
-            descriptor.write_bytes(b"GEO")
-            session = SimpleNamespace(path=primary, descriptor_path=descriptor)
-            output = root / "out" / "scsi0.hda"
-            with self.assertRaisesRegex(OSError, "descriptor copy failed"):
-                save_image(FailingPairCopyService(), session, output)
+            primary = root / "working.st"
+            primary.write_bytes(b"ST")
+            session = SimpleNamespace(path=primary)
+            output = root / "out" / "games.st"
+            with self.assertRaisesRegex(OSError, "image copy failed"):
+                save_image(FailingCopyService(), session, output)
             self.assertFalse(output.exists())
-            self.assertFalse(output.with_suffix(".geo").exists())
+            self.assertEqual(list(output.parent.iterdir()), [])
 
     def test_failed_recipe_verification_does_not_publish_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            primary = root / "working.adf"
+            primary = root / "working.st"
             primary.write_bytes(b"image")
-            session = SimpleNamespace(path=primary, descriptor_path=None)
-            output = root / "out" / "result.adf"
+            session = SimpleNamespace(path=primary)
+            output = root / "out" / "result.st"
             with self.assertRaisesRegex(cli.IdentityError, "does not match"):
                 save_image(
                     CopyService(), session, output,
@@ -255,7 +279,7 @@ class HeadlessCliTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
             code = cli.main([
-                "create", "--format", "adf", "--title", "TEST",
+                "create", "--format", "ds-720k", "--title", "TEST",
                 "--output", "same.file", "--recipe-out", "same.file",
             ])
         result = json.loads(stdout.getvalue())
@@ -263,9 +287,9 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertIn("must be different", result["result"]["error"])
 
     def test_recipe_records_image_interpretation_context(self):
-        args = SimpleNamespace(target_hardware="hardfile", force_kind="rom")
+        args = SimpleNamespace(target_hardware="hd", force_kind="rom")
         self.assertEqual(cli._recorded_open_context(args), {
-            "targetHardware": "hardfile",
+            "targetHardware": "hd",
             "forceKind": "rom",
         })
 
