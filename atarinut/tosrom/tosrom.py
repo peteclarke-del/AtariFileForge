@@ -981,25 +981,34 @@ class TOSMount:
         raise DataError("A TOS ROM's identity is fixed by its header.")
 
     def exists(self, path: str | None) -> bool:
-        if not path or path in {"", ":", "$", "/"}:
+        if not path or path in {"", ":", "/", "\\"}:
             return True
-        return self.rom.segment(str(path).strip("/:$")) is not None
+        return self.rom.segment(str(path).strip("/:\\")) is not None
 
     def stat(self, path: str | None):
         from ..filesystem.gemdos import Stat
 
-        name = str(path or "").strip("/:$")
+        from ..file import FA_DIRECTORY, FA_READONLY, FA_SYSTEM
+
+        name = str(path or "").strip("/:\\")
         if not name:
-            return Stat(self.rom.title, "", True, 0, 1, 0, 1)
+            return Stat(
+                self.rom.title, "", True, 0, 1, 0,
+                FA_READONLY | FA_SYSTEM | FA_DIRECTORY, self.rom.date,
+            )
         segment = self.rom.segment(name)
         if segment is None:
             raise DataError(f"Path not found: {name}")
-        return Stat(segment.name, segment.name, False, segment.length, segment.blocks, 0, -3)
+        return Stat(
+            segment.name, segment.name, False, segment.length, segment.blocks, segment.start,
+            FA_READONLY | FA_SYSTEM, self.rom.date,
+        )
 
     def iter_entries(self, path: str | None = None):
+        from ..file import FA_READONLY, FA_SYSTEM
         from ..filesystem.gemdos import Entry
 
-        if path and str(path).strip("/:$"):
+        if path and str(path).strip("/:\\"):
             raise DataError("A TOS ROM has one flat segment list.")
         for segment in self.rom.segments:
             yield Entry(
@@ -1008,36 +1017,40 @@ class TOSMount:
                 is_dir=False,
                 length=segment.length,
                 block=segment.start,
-                secondary_type=-3,
+                attributes=FA_READONLY | FA_SYSTEM,
+                datestamp=self.rom.date,
             )
 
     def read_bytes(self, path: str) -> bytes:
-        return self.rom.read_segment(str(path).strip("/:$"))
+        return self.rom.read_segment(str(path).strip("/:\\"))
 
     def atari_meta(self, path: str):
-        """Present a segment's provenance through the catalogue interface.
+        """Present a segment through the catalogue interface.
 
-        A ROM segment has no protection bits, but the two things the workbench
-        shows in their place fit well: whether the range is proven from the
-        ROM's own structures, and the evidence for it as the comment.
+        Every segment is read-only, because a ROM is. The attribute byte says
+        exactly that and nothing more: a segment is not a file and has no
+        attributes of its own to report.
+
+        What is worth knowing about a segment is where it sits and whether the
+        range was proven from the ROM's own structures rather than assumed.
+        That travels in the extra mapping, which is where the workbench reads
+        it, rather than being forced into a metadata field GEMDOS does not
+        have.
         """
-        from ..file import Access, AtariMeta
+        from ..file import FA_READONLY, FA_SYSTEM, AtariMeta
 
-        segment = self.rom.segment(str(path).strip("/:$"))
+        segment = self.rom.segment(str(path).strip("/:\\"))
         if segment is None:
             raise DataError(f"Path not found: {path}")
-        protection = int(Access.W | Access.D)
-        if segment.proven:
-            protection |= int(Access.E)
         return AtariMeta(
-            protection=protection,
-            comment=segment.evidence,
-            datestamp=None,
-            filetype=None,
+            attributes=FA_READONLY | FA_SYSTEM,
+            datestamp=self.rom.date,
             extra={
                 "offset": segment.start,
                 "address": self.rom.base + segment.start,
+                "length": segment.length,
                 "proven": segment.proven,
+                "evidence": segment.evidence,
                 "version": self.rom.version,
             },
         )
