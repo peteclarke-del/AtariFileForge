@@ -1,15 +1,22 @@
 window.AtariPaneView = (() => {
   function create({ esc, humanSize }) {
+    // The badge on a pane header names the container the bytes arrived in,
+    // or the kind of thing inside it when the container is not the point.
+    const CONTAINER_BADGES = Object.freeze({
+      st: "ST", msa: "MSA", dim: "DIM", stx: "STX", hfe: "HFE", scp: "SCP", ipf: "IPF",
+      ahdi: "HD", hd: "HD", vol: "VOL", iso: "CD", cd: "CD", rom: "ROM", tos: "TOS",
+    });
     const paneFormat = image => {
-      if (image.containerFormat === "hfe") return "HFE";
-      if (image.containerFormat === "scp") return "SCP";
-      if (image.kind === "hdf") return "HDF";
-      if (image.kind === "dms") return "DMS";
-      if (image.kind === "iso") return "CD";
-      if (image.kind === "rom") return "ROM";
-      if (image.kind === "kickfs") return "RFS";
-      if (image.kind === "ofs") return image.name.toLowerCase().endsWith(".adz") ? "ADZ" : "ADF";
-      return "FFS";
+      const container = String(image.containerFormat || "").toLowerCase();
+      if (CONTAINER_BADGES[container]) return CONTAINER_BADGES[container];
+      const kind = String(image.kind || "").toLowerCase();
+      if (kind === "hd" || kind === "ahdi") return "HD";
+      if (kind === "vol" || kind === "partition") return "VOL";
+      if (kind === "iso" || kind === "cd") return "CD";
+      if (kind === "rom" || kind === "tos") return /\.tos$|^tos/i.test(String(image.name || "")) ? "TOS" : "ROM";
+      const extension = String(image.name || "").toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
+      if (CONTAINER_BADGES[extension]) return CONTAINER_BADGES[extension];
+      return "ST";
     };
 
     const capacityMarkup = capacity => {
@@ -25,31 +32,32 @@ window.AtariPaneView = (() => {
       return `<span class="capacity ${level}" role="progressbar" aria-label="${esc(details)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${usedPercent.toFixed(1)}" title="${esc(details)}" style="--capacity-used:${usedPercent}%"><i></i></span>`;
     };
 
-    const crumbs = (path, ofs = false) => {
-      if (ofs) {
+    // GEMDOS separates path components with a backslash, and a drive letter
+    // names the volume root, so the bar reads "C:\ › GAMES › ELITE". A full
+    // stop is an ordinary character in an 8.3 name, so "OS-V3.5" is one
+    // crumb. The flat form is kept for a pane that shows grouped results
+    // rather than a folder tree.
+    const crumbs = (path, flat = false, drive = "") => {
+      if (flat) {
         if (path === "") return '<span class="crumb current">Catalogues</span>';
         return `<button class="crumb" data-path="">Catalogues</button><span>›</span><span class="crumb current">${esc(path)}</span>`;
       }
-      // Split on the separator GEMDOS actually uses. A full stop is an
-      // ordinary character in an Atari filename, so splitting on one turned
-      // a drawer named "OS-Version3.5" into two crumbs, neither of which was
-      // a real path, and neither of which navigated anywhere.
-      const parts = path.replace(/^[$:]/, "").split("/").filter(Boolean);
-      // GEMDOS writes a volume root as a bare colon, and a bar with nothing
-      // in it gives no way back to the top.
-      const root = `<button class="crumb${parts.length ? "" : " current"}" data-path="">:</button>`;
+      const parts = String(path ?? "").replace(/^[A-Za-z]:/, "").replace(/^[$:]/, "").split(/[\\/]/).filter(Boolean);
+      const letter = String(drive || "").trim().toUpperCase().replace(/:$/, "");
+      const rootLabel = letter ? `${letter}:\\` : "\\";
+      const root = `<button class="crumb${parts.length ? "" : " current"}" data-path="">${esc(rootLabel)}</button>`;
       return root + parts.map((part, index) => {
-        const current = parts.slice(0, index + 1).join("/");
+        const current = parts.slice(0, index + 1).join("\\");
         const klass = index === parts.length - 1 ? "crumb current" : "crumb";
         return `<span>›</span><button class="${klass}" data-path="${esc(current)}">${esc(part)}</button>`;
       }).join("");
     };
 
     const archiveCrumbs = pane => {
-      const parts = String(pane.archiveMember || "").split("/").filter(Boolean);
+      const parts = String(pane.archiveMember || "").split(/[\\/]/).filter(Boolean);
       let member = "";
       const children = parts.map((part, index) => {
-        member = member ? `${member}/${part}` : part;
+        member = member ? `${member}\\${part}` : part;
         const current = index === parts.length - 1;
         return `${current ? '<span class="crumb current">' : `<button class="crumb" data-archive-member="${esc(member)}">`}› ${esc(part)}${current ? "</span>" : "</button>"}`;
       }).join("");
@@ -67,7 +75,7 @@ window.AtariPaneView = (() => {
       return {
         available: false,
         label: image.hasDescriptor
-          ? "Export as… · a Hardfile HDA and GEO pair cannot be converted"
+          ? "Export as… · an AHDI drive image with its own geometry descriptor cannot be converted"
           : "Export as… · no compatible format for this media",
       };
     };
