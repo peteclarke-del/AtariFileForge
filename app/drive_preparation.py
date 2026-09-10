@@ -406,18 +406,30 @@ def _fields(record: str) -> list[str]:
     return [part for part in record.split("@")]
 
 
+#: A record's leading numbers differ between the two spellings of the file:
+#: ``NEWDESK.INF`` writes three before the path and ``DESKTOP.INF`` two, and a
+#: desktop icon writes four and a drive-letter field that may be a space. What
+#: does not differ is that the path is the last thing before the first ``@``
+#: and that a GEMDOS name can never contain a space, so that is what is read.
+_NAMES_A_FILE = re.compile(r"^(?:[A-Za-z]:|.*[\\*?.])")
+
+
 def record_path(record: str) -> str:
     r"""The path or mask an install record names, upper case and unpadded.
 
-    An install record's first ``@``-terminated field is the program, after a
-    fixed run of numbers. ``#G 03 FF 000 C:\GAMES\X\X.PRG@ @ @`` installs that
-    program; ``#G 03 FF 000 *.PRG@ @ @`` associates an extension instead.
+    ``#G 03 FF 000 C:\GAMES\X\X.PRG@ @ @`` installs that program;
+    ``#G 03 FF 000 *.PRG@ @ @`` associates an extension instead. A record whose
+    last field before the ``@`` is one of the leading numbers, which is what a
+    ``#N`` or ``#D`` record has, names nothing and is reported as naming
+    nothing.
     """
-    if record_letter(record) not in set(APPLICATION_RECORDS.values()) | {"N", "D", "X"}:
+    if record_letter(record) not in set(APPLICATION_RECORDS.values()) | {"X"}:
         return ""
-    head = _fields(record)[0]
-    parts = head.split(None, 4)
-    return parts[-1].strip().upper() if len(parts) > 1 else ""
+    head = record.split("@", 1)[0].split()
+    if len(head) < 3:
+        return ""
+    candidate = head[-1].strip().upper()
+    return candidate if _NAMES_A_FILE.match(candidate) else ""
 
 
 def is_installed_application(record: str) -> bool:

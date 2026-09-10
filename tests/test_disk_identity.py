@@ -74,8 +74,17 @@ class DesktopRecordTests(unittest.TestCase):
         )
         self.assertEqual(desktop_installed_programs(text), ["CHUCK.PRG", "FIX.TOS"])
 
+    def test_the_older_two_number_spelling_is_read_as_well(self) -> None:
+        """TOS 1.x writes DESKTOP.INF with one fewer number before the path."""
+        self.assertEqual(
+            desktop_installed_programs("#G 03 FF   C:\\GAMES\\CHUCK\\CHUCK.PRG@ @ \r\n"),
+            ["CHUCK.PRG"],
+        )
+
     def test_a_configuration_with_no_installed_application_names_nothing(self) -> None:
         self.assertEqual(desktop_installed_programs("#a000000\r\n#D FF 01 000 @ *.*@ @ "), [])
+        # The leading numbers of a record must never be read as a path.
+        self.assertEqual(desktop_installed_programs("#G 03 FF 000 @ @ @ "), [])
 
 
 class LaunchEvidenceTests(unittest.TestCase):
