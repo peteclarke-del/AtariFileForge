@@ -1,15 +1,20 @@
 """Managed emulator selection and command construction.
 
 The workbench can hand an image to an emulator so a change can be watched
-running rather than only inspected. FS-UAE is the one supported emulator: it
-covers every machine from an A500 to an A4000 and the CD32, it takes floppies
-and hard drives alike, and it is driven entirely from the command line, which
-is what makes a test run repeatable and scriptable on every platform this
-application runs on.
+running rather than only inspected. Hatari is the one supported emulator: it
+covers every machine from a 520ST to a Falcon030, it takes floppies, hard
+drives and host folders alike, and it is driven entirely from the command
+line, which is what makes a test run repeatable and scriptable on every
+platform this application runs on.
 
-No Kickstart ROM is shipped or downloaded. Each emulator needs one that the
-user supplies, and a profile that cannot find its ROM reports that plainly
-instead of starting and failing at a black screen.
+Firmware is looked for in two places. A real TOS ROM the operator supplies is
+preferred, because it is what the software was written against. When none is
+found the bundled EmuTOS boots the machine instead: it is GPL, it is committed
+under ``firmware/emutos/``, and it means a profile is never stuck at a black
+screen just because a ROM that cannot be redistributed is absent.
+
+Every command is an argv list. Nothing that came from a profile or a filename
+is ever passed through a shell.
 """
 
 from __future__ import annotations
@@ -35,122 +40,322 @@ class ManagedEmulator:
         return Path(self.executable).is_file() or shutil.which(self.executable) is not None
 
 
-FSUAE_ROOT = Path(os.environ.get("ATARI_FSUAE_ROOT", "/usr/bin"))
+@dataclass(frozen=True)
+class Firmware:
+    """One ROM the emulator can boot, and why it was the one chosen."""
 
-#: The names FS-UAE is installed under. The Debian package provides fs-uae; a
-#: Snap exposes it as fsuae.fs-uae, and a Flatpak through its own wrapper. An
-#: installation that works from a terminal should work here, so all of them are
-#: looked for rather than only the Debian spelling.
-FSUAE_EXECUTABLE_NAMES = ("fs-uae", "fsuae.fs-uae", "fsuae", "fs-uae-launcher")
+    path: Path
+    kind: str  # "tos" or "emutos"
+    label: str
+    reason: str
 
 
-def _fsuae_executable() -> str:
-    """Locate FS-UAE, or return the conventional path so the error names it.
+HATARI_ROOT = Path(os.environ.get("ATARI_HATARI_ROOT", "/usr/bin"))
 
-    ``ATARI_FSUAE_EXECUTABLE`` names one exact binary and wins outright, which
+#: The names Hatari is installed under. The Debian package provides hatari; a
+#: Snap exposes it as hatari.hatari, and a Flatpak through its wrapper script.
+#: An installation that works from a terminal should work here, so all of them
+#: are looked for rather than only the Debian spelling.
+HATARI_EXECUTABLE_NAMES = ("hatari", "hatari.hatari", "org.tuxfamily.hatari")
+
+
+def _hatari_executable() -> str:
+    """Locate Hatari, or return the conventional path so the error names it.
+
+    ``ATARI_HATARI_EXECUTABLE`` names one exact binary and wins outright, which
     is what a build or a test needs. Otherwise the configured root is tried
     first, then PATH, under each name a packaging format uses.
     """
-    override = os.environ.get("ATARI_FSUAE_EXECUTABLE", "").strip()
+    override = os.environ.get("ATARI_HATARI_EXECUTABLE", "").strip()
     if override:
         return override
-    for name in FSUAE_EXECUTABLE_NAMES:
-        candidate = FSUAE_ROOT / name
+    for name in HATARI_EXECUTABLE_NAMES:
+        candidate = HATARI_ROOT / name
         if candidate.is_file():
             return str(candidate)
-    for name in FSUAE_EXECUTABLE_NAMES:
+    for name in HATARI_EXECUTABLE_NAMES:
         found = shutil.which(name)
         if found:
             return found
-    return str(FSUAE_ROOT / "fs-uae")
+    return str(HATARI_ROOT / "hatari")
 
-#: Where a user's own Kickstart ROMs are looked for. Nothing is copied out.
-KICKSTART_DIR = Path(
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+#: Where an operator's own TOS ROMs are looked for first. Nothing is copied
+#: out of it and nothing is ever written to it.
+TOS_DIR = Path(
     os.environ.get(
-        "ATARI_FILE_FORGE_KICKSTART_DIR",
-        Path.home() / ".config" / "atari-file-forge" / "kickstarts",
+        "ATARI_FILE_FORGE_TOS_DIR",
+        Path.home() / ".config" / "atari-file-forge" / "tos",
     )
 )
 
-ALL_MACHINES = ("a500", "a500plus", "a600", "a1200", "a2000", "a3000", "a4000", "cd32")
+#: The git-ignored directory beside the source where ROMs may also be kept.
+REPOSITORY_TOS_DIR = REPOSITORY_ROOT / "firmware" / "tos"
+
+#: The bundled EmuTOS images. These are committed, because EmuTOS is GPL.
+EMUTOS_DIR = REPOSITORY_ROOT / "firmware" / "emutos"
+
+#: The Hatari debugger script run by ``--parse`` when a debug session starts.
+DEBUGGER_SCRIPT = REPOSITORY_ROOT / "app" / "hatari-debugger.txt"
+
+ALL_MACHINES = ("st", "megast", "ste", "megaste", "tt030", "falcon030")
 
 EMULATORS = {
-    "fs-uae": ManagedEmulator(
-        "fs-uae", "FS-UAE",
-        _fsuae_executable(), "fs-uae --console-debugger", ALL_MACHINES,
+    "hatari": ManagedEmulator(
+        "hatari", "Hatari",
+        _hatari_executable(), "hatari --debug", ALL_MACHINES,
     ),
 }
 
-#: Retained under its previous name so existing profiles keep resolving.
-EMULATORS["fs-uae-pistorm"] = EMULATORS["fs-uae"]
-
-#: FS-UAE's atari_model values, by workbench machine and fitted accelerator.
-FSUAE_MODELS = {
-    "a500": "A500", "a500plus": "A500+", "a600": "A600", "a1200": "A1200",
-    "a2000": "A500+", "a3000": "A4000/040", "a4000": "A4000/040", "cd32": "CD32",
+#: Hatari's ``--machine`` value for each workbench machine.
+HATARI_MACHINES = {
+    "st": "st", "megast": "megast", "ste": "ste", "megaste": "megaste",
+    "tt030": "tt", "falcon030": "falcon",
 }
 
-#: The Kickstart each machine expects, in the order the workbench looks.
-KICKSTART_NAMES = {
-    "a500": ("kick13.rom", "kick34005.A500", "kick.rom"),
-    "a500plus": ("kick204.rom", "kick37175.A500", "kick.rom"),
-    "a600": ("kick205.rom", "kick37350.A600", "kick31.rom", "kick.rom"),
-    "a1200": ("kick31.rom", "kick40068.A1200", "kick30.rom", "kick.rom"),
-    "a2000": ("kick13.rom", "kick34005.A500", "kick.rom"),
-    "a3000": ("kick31.rom", "kick40068.A4000", "kick204.rom", "kick.rom"),
-    "a4000": ("kick31.rom", "kick40068.A4000", "kick30.rom", "kick.rom"),
-    "cd32": ("kick40060.CD32", "kick31.rom"),
+#: The TOS releases each machine shipped with, newest first. A newer release
+#: is the better default because it carries the fixes, and any of them is a
+#: ROM the machine really booted.
+TOS_NAMES = {
+    "st": ("tos104", "tos102", "tos100"),
+    "megast": ("tos104", "tos102"),
+    "ste": ("tos162", "tos106"),
+    "megaste": ("tos206", "tos205"),
+    "tt030": ("tos306",),
+    "falcon030": ("tos404", "tos402", "tos400"),
 }
 
-#: Media FS-UAE can attach directly.
-FLOPPY_SUFFIXES = {".adf", ".adz", ".dms", ".ipf", ".hfe", ".dsk"}
-DRIVE_SUFFIXES = {".hdf", ".hda", ".hdz", ".img", ".raw", ".rdsk"}
+#: The TOS release each firmware add-on asks for, by file stem.
+TOS_ADDONS = {
+    "tos-100": ("tos100",), "tos-102": ("tos102",), "tos-104": ("tos104",),
+    "tos-106": ("tos106",), "tos-162": ("tos162",), "tos-205": ("tos205",),
+    "tos-206": ("tos206",), "tos-306": ("tos306",),
+    "tos-4xx": ("tos404", "tos402", "tos400"),
+}
 
+#: The language variants tried first. A UK ROM is a PAL machine with an
+#: English desktop, a US ROM is the NTSC one; any other language is accepted
+#: after those, because a German TOS 1.04 is still TOS 1.04.
+TOS_LANGUAGES = ("uk", "us")
 
-#: DF0: to DF3:. The hardware has four, and FS-UAE exposes exactly those.
-MAXIMUM_FLOPPY_DRIVES = 4
+#: The EmuTOS build each machine takes. The 192 KiB build knows only the ST
+#: and Mega ST hardware, the 256 KiB build adds the STE, and the 512 KiB build
+#: is the one with TT and Falcon support.
+EMUTOS_SIZES = {
+    "st": "192", "megast": "192", "ste": "256", "megaste": "256",
+    "tt030": "512", "falcon030": "512",
+}
 
-#: FS-UAE attaches one CD drive, which is what a real machine with a CD-ROM
-#: had and all an TOS release install needs.
+#: Media Hatari can attach directly.
+FLOPPY_SUFFIXES = {".st", ".msa", ".stx", ".dim", ".ipf", ".hfe", ".zip"}
+DRIVE_SUFFIXES = {".img", ".hd", ".ahd", ".acsi", ".ide", ".raw", ".bin", ".vhd"}
+
+#: A: and B:. The machine has one internal drive and one floppy port, and
+#: Hatari exposes exactly those two.
+MAXIMUM_FLOPPY_DRIVES = 2
+
+#: The most CD drives any managed machine attaches. Only the SCSI machines can
+#: take one at all; see :func:`cd_drives_for`.
 MAXIMUM_CD_DRIVES = 1
 
+#: Hatari's ``--memsize`` takes 0 for 512 KiB, 1 to 14 for whole MiB, and any
+#: larger number as KiB; that last form is how 2.5 MiB is written.
+MEMSIZE_VALUES = {
+    "512K": "0", "1M": "1", "2M": "2", "2.5M": "2560", "4M": "4", "8M": "8", "14M": "14",
+}
+MEMORY_ADDONS = {
+    "ram-512k": "512K", "ram-1m": "1M", "ram-2m": "2M", "ram-2.5m": "2.5M",
+    "ram-4m": "4M", "ram-14m": "14M",
+}
+DEFAULT_MEMORY = {
+    "st": "512K", "megast": "1M", "ste": "1M", "megaste": "1M", "tt030": "2M", "falcon030": "4M",
+}
 
-def kickstart_for(machine: str) -> Path | None:
-    """Return the user-supplied Kickstart this machine would boot from."""
-    for name in KICKSTART_NAMES.get(machine, ()):
-        candidate = KICKSTART_DIR / name
+#: Processor and clock as Hatari's ``--cpulevel`` (0 for a 68000, 3 for a
+#: 68030) and ``--cpuclock`` in MHz.
+PROCESSORS = {
+    "st": ("0", "8"), "megast": ("0", "8"), "ste": ("0", "8"), "megaste": ("0", "16"),
+    "tt030": ("3", "32"), "falcon030": ("3", "16"),
+}
+
+DEFAULT_MONITOR = {
+    "st": "rgb", "megast": "rgb", "ste": "rgb", "megaste": "rgb", "tt030": "vga", "falcon030": "vga",
+}
+MONITOR_ADDONS = {
+    "monitor-mono": "mono", "monitor-colour": "rgb", "monitor-vga": "vga", "tv-modulator": "tv",
+}
+
+ACSI_ADDONS = {"acsi-megafile", "acsi-third-party", "acsi2stm", "ultrasatan", "cosmosex"}
+IDE_ADDONS = {"ide-internal", "ide-adapter", "cf-adapter"}
+SCSI_ADDONS = {"scsi-internal"}
+
+#: Frames per second of the emulated machine, for turning a run length in
+#: seconds into Hatari's ``--run-vbls`` count.
+VBLS_PER_SECOND = 50
+
+#: How long a bounded, non-interactive run lasts, in seconds.
+BOUNDED_SECONDS = 8
+BOUNDED_DEBUG_SECONDS = 15
+
+
+def tos_directories() -> list[Path]:
+    """Where TOS ROMs are looked for, in order: the operator's directory, then the repository's."""
+    return [TOS_DIR, REPOSITORY_TOS_DIR]
+
+
+def _tos_candidates(stems: tuple[str, ...]) -> list[Path]:
+    """Every ROM file matching one of ``stems``, best first.
+
+    Within one release the UK ROM is preferred, then the US one, then any
+    other language in name order. Alternative dumps such as ``tos104-b.img``
+    match as well, after the plain-language files.
+    """
+    found: list[Path] = []
+    for stem in stems:
+        for directory in tos_directories():
+            if not directory.is_dir():
+                continue
+            matches = sorted(
+                path for path in directory.glob(f"{stem}*.img") if path.is_file()
+            )
+            for language in TOS_LANGUAGES:
+                found.extend(path for path in matches if path.name == f"{stem}{language}.img")
+            found.extend(
+                path for path in matches
+                if path.name not in {f"{stem}{language}.img" for language in TOS_LANGUAGES}
+            )
+    return found
+
+
+def _requested_tos(addons: set[str]) -> tuple[str, ...] | None:
+    for addon, stems in TOS_ADDONS.items():
+        if addon in addons:
+            return stems
+    return None
+
+
+def tos_for(machine: str, addons=()) -> Path | None:
+    """The operator-supplied TOS ROM this machine would boot, or None."""
+    addons = set(addons or ())
+    if "tos-emutos" in addons:
+        return None
+    stems = _requested_tos(addons) or TOS_NAMES.get(machine, ())
+    candidates = _tos_candidates(tuple(stems))
+    return candidates[0] if candidates else None
+
+
+def emutos_for(machine: str, size: str | None = None) -> Path | None:
+    """The bundled EmuTOS image for this machine, or the explicitly requested size."""
+    size = size or EMUTOS_SIZES.get(machine, "512")
+    if size in {"1024", "1024k"}:
+        candidate = EMUTOS_DIR / "etos1024k.img"
+        return candidate if candidate.is_file() else None
+    for language in TOS_LANGUAGES:
+        candidate = EMUTOS_DIR / f"etos{size}{language}.img"
         if candidate.is_file():
             return candidate
-    # No fallback to "whatever ROM is there". The directory legitimately holds
-    # ROMs for several machines, and an extended or cartridge ROM among them is
-    # not a Kickstart at all, so the first name alphabetically was as likely to
-    # be wrong as right. A machine with no matching ROM has none, and saying so
-    # is what lets the caller name the file that is missing.
     return None
+
+
+def _emutos_size_request(profile: dict) -> str | None:
+    """An explicit EmuTOS size from the profile: ``emulatorFirmware: "emutos-1024k"``."""
+    requested = str(profile.get("emulatorFirmware") or "").strip().lower()
+    if requested.startswith("emutos-"):
+        size = requested.removeprefix("emutos-").removesuffix("k")
+        if size in {"192", "256", "512", "1024"}:
+            return size
+    return None
+
+
+def firmware_for(machine: str, addons=(), *, emutos_size: str | None = None) -> Firmware | None:
+    """Choose the ROM this machine boots, and say why.
+
+    The order is: the TOS the profile asks for, or failing that any TOS the
+    machine shipped with, from the operator's ROM directory and then the
+    repository's; then the bundled EmuTOS in the size that fits. Only a
+    missing EmuTOS returns None, and that means the checkout is incomplete.
+    """
+    addons = set(addons or ())
+    forced = "tos-emutos" in addons or emutos_size is not None
+    if not forced:
+        requested = _requested_tos(addons)
+        chosen = tos_for(machine, addons)
+        if chosen is not None:
+            release = chosen.name[3:6]
+            label = f"TOS {release[0]}.{release[1:]}"
+            return Firmware(
+                chosen, "tos", label,
+                f"{chosen.name} was found in {chosen.parent}"
+                + (" as the profile requested." if requested else
+                   f", which is a ROM the {machine.upper()} shipped with."),
+            )
+    emutos = emutos_for(machine, emutos_size)
+    if emutos is None:
+        return None
+    size = emutos_size or EMUTOS_SIZES.get(machine, "512")
+    if forced:
+        why = (
+            "the profile asks for EmuTOS."
+            if "tos-emutos" in addons
+            else f"the profile asks for the {size} KiB EmuTOS image."
+        )
+    elif _requested_tos(addons):
+        why = (
+            f"the TOS the profile asks for was not found in {TOS_DIR} or {REPOSITORY_TOS_DIR}, "
+            "so the bundled EmuTOS boots the machine instead."
+        )
+    else:
+        why = (
+            f"no TOS ROM for the {machine.upper()} was found in {TOS_DIR} or {REPOSITORY_TOS_DIR}, "
+            "so the bundled EmuTOS boots the machine instead."
+        )
+    return Firmware(emutos, "emutos", f"EmuTOS {size} KiB", f"{emutos.name} was chosen because {why}")
+
+
+def cd_drives_for(machine: str) -> int:
+    """How many CD drives this machine can attach: one on a SCSI machine, none elsewhere.
+
+    Hatari has no CD-ROM emulation of its own. What it has is SCSI disk
+    emulation on the TT030 and the Falcon, so a CD image is attached there as
+    a second SCSI device, which a CD filing-system driver on the drive can
+    read. The ST-class machines have nowhere to put one.
+    """
+    return MAXIMUM_CD_DRIVES if machine in {"tt030", "falcon030"} else 0
+
+
+def control_socket_path(work_dir: str | Path) -> Path:
+    """Where a route creates the socket Hatari connects to for remote control.
+
+    Hatari *connects* to ``--control-socket``; it does not create it. The
+    controlling process listens on this path first, then starts the emulator
+    with ``control_socket=`` and writes the ``hatari-shortcut``,
+    ``hatari-option`` and ``hatari-debug`` lines Hatari's own hconsole sends.
+    """
+    return Path(work_dir) / "hatari-control.sock"
 
 
 def profile_machine(session) -> str:
     profile = getattr(session, "hardware_profile", {}) or {}
-    machine = str(profile.get("machine") or "").strip().lower()
+    machine = str(profile.get("machine") or "").strip().lower().replace(" ", "")
     aliases = {
-        "atari 500": "a500", "atari500": "a500",
-        "atari 500+": "a500plus", "atari500plus": "a500plus",
-        "atari 600": "a600", "a600": "a600",
-        "atari 1200": "a1200", "atari1200": "a1200",
-        "atari 2000": "a2000", "atari 3000": "a3000", "atari 4000": "a4000",
-        "tos": "a4000", "cd 32": "cd32",
+        "atarist": "st", "520st": "st", "1040st": "st", "stf": "st", "stfm": "st",
+        "atarimegast": "megast", "mega": "megast", "mega-st": "megast",
+        "atariste": "ste", "520ste": "ste", "1040ste": "ste",
+        "atarimegaste": "megaste", "mega-ste": "megaste",
+        "ataritt": "tt030", "tt": "tt030", "tt-030": "tt030",
+        "atarifalcon": "falcon030", "falcon": "falcon030", "falcon-030": "falcon030",
     }
     if machine in ALL_MACHINES:
         return machine
     if machine in aliases:
         return aliases[machine]
-    target = str(getattr(session, "target_hardware", "") or "")
-    return {
-        "a500-ofs": "a500",
-        "a1200-ffs": "a1200",
-        "tos": "a4000",
-        "hardfile": "a1200",
-    }.get(target, "a500")
+    target = str(getattr(session, "target_hardware", "") or "").lower()
+    for name in ("falcon030", "tt030", "megaste", "megast", "ste"):
+        if name in target:
+            return name
+    return "st"
 
 
 def configured_emulator(session) -> ManagedEmulator:
@@ -158,32 +363,39 @@ def configured_emulator(session) -> ManagedEmulator:
     machine = profile_machine(session)
     selected = str(profile.get("emulator") or "auto").strip().lower()
     if selected == "auto" or selected not in EMULATORS:
-        selected = "fs-uae"
+        selected = "hatari"
     emulator = EMULATORS[selected]
     if machine not in emulator.platforms:
-        return EMULATORS["fs-uae"]
+        return EMULATORS["hatari"]
     return emulator
 
 
 def emulator_status(session) -> dict:
     emulator = configured_emulator(session)
     machine = profile_machine(session)
+    profile = getattr(session, "hardware_profile", {}) or {}
+    addons = profile_addons(session)
+    firmware = firmware_for(machine, addons, emutos_size=_emutos_size_request(profile))
     available = emulator.available
     firmware_message = ""
-    kickstart = kickstart_for(machine)
-    if available and kickstart is None:
+    if firmware is None:
         available = False
         firmware_message = (
-            f" No Kickstart ROM for {machine} was found in {KICKSTART_DIR}. "
-            "Kickstart is not redistributable, so it is not shipped: supply your own "
-            "and put it there."
+            f" No ROM for the {machine.upper()} was found: neither a TOS in {TOS_DIR} "
+            f"or {REPOSITORY_TOS_DIR}, nor the bundled EmuTOS in {EMUTOS_DIR}. "
+            "The firmware/emutos directory is part of the repository; restore it."
         )
+    elif available:
+        firmware_message = f" {firmware.label}: {firmware.reason}"
     return {
         "id": emulator.identifier,
         "label": emulator.label,
         "available": available,
         "machine": machine,
-        "kickstart": str(kickstart) if kickstart else "",
+        "firmware": str(firmware.path) if firmware else "",
+        "firmwareKind": firmware.kind if firmware else "",
+        "firmwareLabel": firmware.label if firmware else "",
+        "firmwareReason": firmware.reason if firmware else firmware_message.strip(),
         "debugger": emulator.debugger,
         "configuredBy": "managed workbench profile",
         "message": (
@@ -205,19 +417,24 @@ def emulator_command(
     native: bool = False,
     floppies: list[str | Path] | None = None,
     cdroms: list[str | Path] | None = None,
+    control_socket: str | Path | None = None,
 ) -> tuple[list[str], str]:
     """Build the command line that boots one image, optionally with discs.
 
-    ``floppies`` exists for installing a title onto a drive: the machine boots
-    from the hard drive and the title's disc is already in DF0:, which is what
-    every Atari installer expects to find. A multi-disc set fills DF1: and
-    upwards so a disc swap is a menu choice rather than a restart, up to the
-    four drives the hardware has.
+    ``media_path`` is what the machine boots: a floppy image goes in A:, a
+    hard-drive image is attached to the interface the profile declares, and a
+    directory is shared as a GEMDOS drive C:.
 
-    ``cdroms`` is the same idea for the releases published on CD. TOS 3.5
-    and 3.9 are installed by a script on the disc, which the machine reaches
-    through a CD drive rather than a floppy drive, so the image is attached as
-    one instead of being counted against the four floppy drives.
+    ``floppies`` exists for installing a title onto a drive: the machine boots
+    from the hard drive with the title's disc already in A:, which is what
+    every installer expects to find. A second disc fills B:, and that is all
+    the drives the hardware has.
+
+    ``cdroms`` attaches a CD image on the SCSI machines; see
+    :func:`cd_drives_for` for what that means on Hatari.
+
+    ``control_socket`` names a socket the caller is already listening on, for
+    Hatari's remote-control protocol; see :func:`control_socket_path`.
     """
     emulator = configured_emulator(session)
     if not emulator.available:
@@ -226,72 +443,129 @@ def emulator_command(
     addons = profile_addons(session)
     media = Path(media_path)
     suffix = media.suffix.lower()
-    boot = str(profile.get("emulatorBoot") or "auto")
     machine = profile_machine(session)
-    kickstart = kickstart_for(machine)
-
-    if emulator.identifier in {"fs-uae", "fs-uae-pistorm"}:
-        if kickstart is None:
-            raise ValueError(
-                f"No Kickstart ROM for the {machine.upper()} was found in {KICKSTART_DIR}."
-            )
-        if suffix not in FLOPPY_SUFFIXES | DRIVE_SUFFIXES:
-            raise ValueError(
-                "FS-UAE can start from a floppy image (ADF, ADZ, DMS, IPF, HFE) or a "
-                "hard-drive image (HDF, HDA, RAW). Export one of those first."
-            )
-        arguments = _desktop_command(
-            emulator.executable, debug=debug, interactive=interactive, native=native
+    firmware = firmware_for(machine, addons, emutos_size=_emutos_size_request(profile))
+    if firmware is None:
+        raise ValueError(
+            f"No ROM for the {machine.upper()} was found, and the bundled EmuTOS is missing from {EMUTOS_DIR}."
         )
-        arguments += [
-            f"--atari_model={_fsuae_model(machine, addons)}",
-            f"--kickstart_file={kickstart}",
-        ]
-        chip = "2048" if "chip-2048" in addons else "1024" if "chip-1024" in addons else "512"
-        arguments.append(f"--chip_memory={chip}")
-        if "fast-ram" in addons:
-            arguments.append("--fast_memory=8192")
-        if "slow-ram" in addons:
-            arguments.append("--slow_memory=512")
-        attached = [Path(item) for item in (floppies or [])]
-        if suffix in DRIVE_SUFFIXES:
-            arguments.append(f"--hard_drive_0={media}")
-        else:
-            attached.insert(0, media)
-        if len(attached) > MAXIMUM_FLOPPY_DRIVES:
-            raise ValueError(
-                f"An Atari has {MAXIMUM_FLOPPY_DRIVES} floppy drives; "
-                f"{len(attached)} discs were attached."
-            )
-        for index, disc in enumerate(attached):
-            arguments.append(f"--floppy_drive_{index}={disc}")
-            arguments.append(f"--floppy_image_{index}={disc}")
-        compact_discs = [Path(item) for item in (cdroms or [])]
-        if len(compact_discs) > MAXIMUM_CD_DRIVES:
-            raise ValueError(
-                f"FS-UAE attaches {MAXIMUM_CD_DRIVES} CD drive; "
-                f"{len(compact_discs)} discs were attached."
-            )
-        for index, disc in enumerate(compact_discs):
-            arguments.append(f"--cdrom_drive_{index}={disc}")
-        if boot in {"auto", "boot"}:
-            arguments.append("--automatic_input_grab=0")
-        if debug:
-            arguments.append("--console_debugger=1")
-        return arguments, str(FSUAE_ROOT)
+    is_folder = media.is_dir()
+    if not is_folder and suffix not in FLOPPY_SUFFIXES | DRIVE_SUFFIXES:
+        raise ValueError(
+            "Hatari can start from a floppy image (ST, MSA, STX, DIM, IPF, HFE, ZIP), a "
+            "hard-drive image (IMG, HD, AHD, ACSI, IDE, RAW, BIN, VHD) or a folder. Export one of those first."
+        )
 
-    raise ValueError(
-        f"{emulator.label} is not a managed emulator in this build. "
-        "Choose FS-UAE in the hardware profile."
+    arguments = _desktop_command(
+        emulator.executable, debug=debug, interactive=interactive, native=native
     )
+    arguments += ["--machine", HATARI_MACHINES[machine], "--tos", str(firmware.path)]
+    arguments += ["--memsize", _memsize(machine, addons, profile)]
+    if "tt-ram" in addons and machine in {"tt030", "falcon030"}:
+        # TT RAM sits above the 24-bit address space, so it needs the full
+        # 32-bit addressing the 68030 has and Hatari otherwise leaves off.
+        arguments += ["--ttram", "16", "--addr24", "false"]
+    level, clock = PROCESSORS[machine]
+    if "acc-68030-pak" in addons and machine in {"st", "megast", "ste", "megaste"}:
+        level = "3"
+    arguments += ["--cpulevel", level, "--cpuclock", clock]
+    if "fpu-68882" in addons:
+        arguments += ["--fpu", "68882"]
+    elif "fpu-68881" in addons:
+        arguments += ["--fpu", "68881"]
+    if machine == "megast" or (machine == "st" and "blitter" in addons):
+        # The STE and later always have one; Hatari's switch is for the ST.
+        arguments += ["--blitter", "true"]
+    if machine == "falcon030":
+        arguments += ["--dsp", "emu"]
+    arguments += ["--monitor", _monitor(machine, addons)]
+
+    attached = [Path(item) for item in (floppies or [])]
+    if not is_folder and suffix in FLOPPY_SUFFIXES:
+        attached.insert(0, media)
+    if len(attached) > MAXIMUM_FLOPPY_DRIVES:
+        raise ValueError(
+            f"An Atari has {MAXIMUM_FLOPPY_DRIVES} floppy drives, A: and B:; "
+            f"{len(attached)} discs were attached."
+        )
+    if "drive-a-ss" in addons:
+        arguments += ["--drive-a-heads", "1"]
+    if "drive-b-external" not in addons and len(attached) < 2:
+        arguments += ["--drive-b", "false"]
+    for option, disc in zip(("--disk-a", "--disk-b"), attached):
+        arguments += [option, str(disc)]
+
+    if is_folder:
+        arguments += ["--harddrive", str(media), "--gemdos-drive", "c"]
+    elif suffix in DRIVE_SUFFIXES:
+        arguments += _hard_drive_arguments(machine, addons, media)
+
+    compact_discs = [Path(item) for item in (cdroms or [])]
+    if compact_discs:
+        allowed = cd_drives_for(machine)
+        if len(compact_discs) > allowed:
+            raise ValueError(
+                f"The {machine.upper()} attaches {allowed} CD drive"
+                f"{'' if allowed == 1 else 's'} under Hatari; {len(compact_discs)} discs were attached."
+                + ("" if allowed else " A CD needs the SCSI port of a TT030 or Falcon030.")
+            )
+        for index, disc in enumerate(compact_discs, start=1):
+            arguments += ["--scsi", f"{index}={disc}"]
+
+    arguments += ["--fast-boot", "true", "--confirm-quit", "false", "--statusbar", "false"]
+    if not (native and interactive):
+        # The container has no sound device, and a bounded run has no listener.
+        arguments += ["--sound", "off"]
+    arguments += ["--log-level", "info" if debug else "warn"]
+    cwd = str(media.parent)
+    arguments += ["--screenshot-dir", cwd]
+    if not interactive:
+        seconds = BOUNDED_DEBUG_SECONDS if debug else BOUNDED_SECONDS
+        # Hatari leaves on its own a little before the timeout wrapper would
+        # have to end it, so a normal bounded run exits 0 rather than 124.
+        arguments += ["--run-vbls", str((seconds - 1) * VBLS_PER_SECOND)]
+    if control_socket is not None:
+        arguments += ["--control-socket", str(control_socket)]
+    if debug:
+        arguments += ["--debug", "--parse", str(DEBUGGER_SCRIPT)]
+    return arguments, cwd
 
 
-def _command_environment(arguments: list[str], values: dict[str, str]) -> list[str]:
-    assignments = [f"{key}={value}" for key, value in values.items()]
-    if "env" in arguments:
-        position = arguments.index("env") + 1
-        return [*arguments[:position], *assignments, *arguments[position:]]
-    return ["env", *assignments, *arguments]
+def _memsize(machine: str, addons: set[str], profile: dict) -> str:
+    size = DEFAULT_MEMORY[machine]
+    for addon, value in MEMORY_ADDONS.items():
+        if addon in addons:
+            size = value
+    requested = str(profile.get("emulatorRam") or "auto").strip().upper()
+    if requested in MEMSIZE_VALUES:
+        size = requested
+    return MEMSIZE_VALUES[size]
+
+
+def _monitor(machine: str, addons: set[str]) -> str:
+    for addon, monitor in MONITOR_ADDONS.items():
+        if addon in addons:
+            return monitor
+    return DEFAULT_MONITOR[machine]
+
+
+def _hard_drive_arguments(machine: str, addons: set[str], media: Path) -> list[str]:
+    """Attach a drive image to the interface the profile declares.
+
+    With no storage add-on the machine's own interface is used: the ACSI port
+    on the ST family, SCSI on the TT030 and IDE on the Falcon.
+    """
+    if addons & IDE_ADDONS:
+        return ["--ide-master", str(media)]
+    if addons & SCSI_ADDONS and machine in {"megaste", "tt030", "falcon030"}:
+        return ["--scsi", f"0={media}"]
+    if addons & ACSI_ADDONS and machine != "falcon030":
+        return ["--acsi", f"0={media}"]
+    if machine == "falcon030":
+        return ["--ide-master", str(media)]
+    if machine == "tt030":
+        return ["--scsi", f"0={media}"]
+    return ["--acsi", f"0={media}"]
 
 
 def _desktop_command(
@@ -304,13 +578,13 @@ def _desktop_command(
     """Run in the shared browser display or a bounded private X server."""
     if native and interactive:
         return [executable]
-    environment = ["env", "ALSA_CONFIG_PATH=/app/alsa-null.conf", "ALSOFT_DRIVERS=null"]
+    environment = ["env", "SDL_AUDIODRIVER=dummy"]
     if interactive:
         return [
             "timeout", "--signal=TERM", "--kill-after=2", "900",
             *environment, "DISPLAY=:99", executable,
         ]
-    duration = "15" if debug else "8"
+    duration = str(BOUNDED_DEBUG_SECONDS if debug else BOUNDED_SECONDS)
     return [
         "timeout", "--signal=TERM", "--kill-after=2", duration,
         *environment,
@@ -318,43 +592,32 @@ def _desktop_command(
     ]
 
 
-def _fsuae_model(machine: str, addons: set[str]) -> str:
-    """Choose FS-UAE's machine model, upgraded by any fitted accelerator.
-
-    A PiStorm is a CPU replacement rather than a turbo board, so it is modelled
-    as the fastest 68k FS-UAE offers for that machine. That is an
-    approximation and it is the honest one available: FS-UAE emulates 68k
-    cores, not a Raspberry Pi running Musashi, so the profile's own
-    "Validation only" marking is what tells the difference.
-    """
-    model = FSUAE_MODELS.get(machine, "A500")
-    accelerated = {"acc-68040", "acc-68060", "pistorm32"} & addons
-    if machine in {"a1200", "a4000"}:
-        if accelerated:
-            return "A4000/040"
-        if "acc-68030" in addons and machine == "a1200":
-            return "A1200/020"
-    if "pistorm" in addons and machine in {"a500", "a500plus", "a600", "a2000"}:
-        # The 68000-socket board turns a stock machine into something closer to
-        # an accelerated 68020 than to its original CPU.
-        return "A1200/020"
-    return model
-
-
 __all__ = [
     "ALL_MACHINES",
+    "DEBUGGER_SCRIPT",
     "DRIVE_SUFFIXES",
-    "MAXIMUM_CD_DRIVES",
     "EMULATORS",
+    "EMUTOS_DIR",
+    "EMUTOS_SIZES",
     "FLOPPY_SUFFIXES",
-    "FSUAE_MODELS",
-    "FSUAE_ROOT",
-    "KICKSTART_DIR",
-    "KICKSTART_NAMES",
+    "Firmware",
+    "HATARI_MACHINES",
+    "HATARI_ROOT",
+    "MAXIMUM_CD_DRIVES",
+    "MAXIMUM_FLOPPY_DRIVES",
     "ManagedEmulator",
+    "REPOSITORY_TOS_DIR",
+    "TOS_ADDONS",
+    "TOS_DIR",
+    "TOS_NAMES",
+    "cd_drives_for",
     "configured_emulator",
+    "control_socket_path",
     "emulator_command",
     "emulator_status",
-    "kickstart_for",
+    "emutos_for",
+    "firmware_for",
     "profile_machine",
+    "tos_directories",
+    "tos_for",
 ]

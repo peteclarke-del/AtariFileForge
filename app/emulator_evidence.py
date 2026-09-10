@@ -18,7 +18,13 @@ class EmulatorEvidenceError(RuntimeError):
 def private_display_arguments(
     arguments: list[str], display: str, duration: int = 20,
 ) -> list[str]:
-    """Replace xvfb-run with one explicitly owned display for evidence capture."""
+    """Replace xvfb-run with one explicitly owned display for evidence capture.
+
+    The bounded command also asks Hatari to leave after a fixed number of
+    frames. That is right for a pass-or-fail run and wrong here, where two
+    frames must be captured while the machine is still on screen, so the
+    frame limit is removed and the ``timeout`` wrapper is the only bound.
+    """
     result = list(arguments)
     try:
         wrapper = result.index("xvfb-run")
@@ -27,6 +33,9 @@ def private_display_arguments(
             "The configured emulator command does not use the managed headless display."
         ) from exc
     del result[wrapper:wrapper + (2 if result[wrapper + 1:wrapper + 2] == ["-a"] else 1)]
+    while "--run-vbls" in result:
+        limit = result.index("--run-vbls")
+        del result[limit:limit + 2]
     try:
         environment = result.index("env") + 1
     except ValueError as exc:
@@ -109,14 +118,15 @@ def capture_emulator_evidence(
             emulator = subprocess.Popen(
                 command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            # FastFileSystem initialises the virtual SD card and scans the full HDF before
-            # drawing its first menu. Give slower ARM hosts a bounded settling
-            # period instead of capturing the boot prompt as menu evidence.
+            # TOS runs its memory test, the hard-disk driver in the root
+            # sector scans every partition and the AUTO folder runs before the
+            # desktop is drawn. Give slower ARM hosts a bounded settling period
+            # instead of capturing the boot screen as desktop evidence.
             time.sleep(8)
             if emulator.poll() is not None:
                 stdout, stderr = emulator.communicate()
                 raise EmulatorEvidenceError(
-                    "The emulator exited before a menu screen could be captured: "
+                    "The emulator exited before the desktop could be captured: "
                     + (stderr or stdout or f"return code {emulator.returncode}")[-2000:]
                 )
             _capture(display, before)
@@ -142,7 +152,7 @@ def capture_emulator_evidence(
                 })
             changed = _changed_pixels(before, after)
             return {
-                "schema": "atari-file-forge/emulator-display-evidence/v1",
+                "schema": "atari-file-forge/hatari-display-evidence/v1",
                 "display": "1280x960x24",
                 "bounded": True,
                 "deterministicMedia": True,

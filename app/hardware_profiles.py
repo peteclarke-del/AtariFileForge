@@ -1,3 +1,12 @@
+"""The Atari hardware catalogue behind a workbench hardware profile.
+
+A profile names one base machine and the additions fitted to it. Each add-on
+says which machines can take it, what it needs and what it excludes, and
+whether the managed emulator can reproduce it (``emulator="hatari"``) or it
+only informs compatibility checks (``emulator="profile"``, shown as
+"Validation only" in the interface).
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -11,95 +20,107 @@ def _addon(identifier, label, group, machines, description, *, emulator="profile
     }
 
 
-ALL_MACHINES = ["a500", "a500plus", "a600", "a1200", "a2000", "a3000", "a4000", "cd32"]
-BIG_BOX = ["a2000", "a3000", "a4000"]
-WEDGE = ["a500", "a500plus", "a600", "a1200"]
+ALL_MACHINES = ["st", "megast", "ste", "megaste", "tt030", "falcon030"]
+#: The machines with an ACSI port on the back: everything but the Falcon.
+ACSI_MACHINES = ["st", "megast", "ste", "megaste", "tt030"]
+#: The 68000 machines; a 68030 in one of these is an accelerator board.
+ST_CLASS = ["st", "megast", "ste", "megaste"]
+#: The 68030 machines, whose processor has a coprocessor socket beside it.
+THIRTY_TWO_BIT = ["tt030", "falcon030"]
 
 ADDONS = [
-    # ---- Kickstart firmware ----
-    _addon("kick13", "Kickstart 1.3 (34.5)", "firmware", ["a500", "a500plus", "a2000"], "256 KiB Kickstart 1.3 ROM; the original Workbench 1.3 environment.", emulator="fs-uae", conflicts=["kick204", "kick305", "kick31"]),
-    _addon("kick204", "Kickstart 2.04 (37.175)", "firmware", ["a500", "a500plus", "a600", "a2000", "a3000"], "512 KiB Kickstart 2.04 ROM with the TOS 2.x Workbench.", emulator="fs-uae", conflicts=["kick13", "kick305", "kick31"]),
-    _addon("kick305", "Kickstart 3.0 (39.106)", "firmware", ["a1200", "a4000"], "512 KiB AGA Kickstart 3.0 ROM.", emulator="fs-uae", conflicts=["kick13", "kick204", "kick31"]),
-    _addon("kick31", "Kickstart 3.1 (40.68)", "firmware", ["a500", "a500plus", "a600", "a1200", "a2000", "a3000", "a4000", "cd32"], "512 KiB Kickstart 3.1 ROM, the usual target for modern software.", emulator="fs-uae", conflicts=["kick13", "kick204", "kick305"]),
-    _addon("kickstart-remap", "MapROM / Kickstart remap", "firmware", ["a1200", "a3000", "a4000"], "Copies Kickstart into fast RAM for a measurable speed gain.", requires=["fast-ram"]),
+    # ---- TOS firmware. Each release is offered to the machines it shipped in;
+    # EmuTOS boots every one of them. ----
+    _addon("tos-100", "TOS 1.00", "firmware", ["st"], "The first ROM TOS from 1985, fitted to early 520ST and 1040ST machines.", emulator="hatari"),
+    _addon("tos-102", "TOS 1.02", "firmware", ["st", "megast"], "The 1987 Mega ST release, with blitter support and the ST desktop.", emulator="hatari"),
+    _addon("tos-104", "TOS 1.04 (Rainbow TOS)", "firmware", ["st", "megast"], "The 1989 release most ST software was written against, with the faster GEMDOS.", emulator="hatari"),
+    _addon("tos-106", "TOS 1.06", "firmware", ["ste"], "The first STE ROM, fitted to early 520STE and 1040STE machines.", emulator="hatari"),
+    _addon("tos-162", "TOS 1.62", "firmware", ["ste"], "The corrected STE ROM that most 1040STE machines shipped with.", emulator="hatari"),
+    _addon("tos-205", "TOS 2.05", "firmware", ["megaste"], "The first Mega STE ROM, with the NEWDESK desktop and cache support.", emulator="hatari"),
+    _addon("tos-206", "TOS 2.06", "firmware", ["ste", "megaste"], "The final 256 KiB ROM, sold as an upgrade for the STE and fitted to late Mega STE machines.", emulator="hatari"),
+    _addon("tos-306", "TOS 3.06", "firmware", ["tt030"], "The 512 KiB TT ROM with TT RAM, SCSI and the TT video modes.", emulator="hatari"),
+    _addon("tos-4xx", "TOS 4.0x", "firmware", ["falcon030"], "The Falcon ROM (4.00, 4.02 or 4.04) with VIDEL, DSP and IDE support.", emulator="hatari"),
+    _addon("tos-emutos", "EmuTOS", "firmware", ALL_MACHINES, "The free GPL operating system bundled with this application, in the ROM size that fits the machine.", emulator="hatari"),
 
-    # ---- Main and expansion memory ----
-    _addon("chip-512", "512 KiB trapdoor Chip RAM", "main-memory", ["a500"], "A501 style trapdoor expansion taking the machine to 1 MiB Chip RAM.", emulator="fs-uae", conflicts=["chip-1024"]),
-    _addon("chip-1024", "1 MiB Chip RAM", "main-memory", ["a500plus", "a600", "a1200", "a2000"], "Full 1 MiB of Chip RAM through Agnus/Alice.", emulator="fs-uae", conflicts=["chip-512"]),
-    _addon("chip-2048", "2 MiB Chip RAM", "main-memory", ["a1200", "a3000", "a4000", "cd32"], "AGA machines with the full 2 MiB Chip RAM complement.", emulator="fs-uae"),
-    _addon("fast-ram", "Fast RAM expansion", "expansion-memory", ALL_MACHINES, "Autoconfig 32-bit Fast RAM. Required by most hard-disk installs and WHDLoad slaves.", emulator="fs-uae"),
-    _addon("slow-ram", "512 KiB Slow (ranger) RAM", "expansion-memory", ["a500", "a500plus", "a2000"], "A501 trapdoor RAM mapped at $C00000.", emulator="fs-uae", conflicts=["fast-ram"]),
+    # ---- ST RAM ----
+    _addon("ram-512k", "512 KiB ST RAM", "main-memory", ["st", "ste"], "The memory a 520ST or 520STE shipped with.", emulator="hatari"),
+    _addon("ram-1m", "1 MiB ST RAM", "main-memory", ["st", "megast", "ste", "megaste", "falcon030"], "The memory a 1040ST, 1040STE, Mega 1 or basic Falcon shipped with.", emulator="hatari"),
+    _addon("ram-2m", "2 MiB ST RAM", "main-memory", ["megast", "megaste", "tt030"], "A Mega 2 or the standard TT030 fitting.", emulator="hatari"),
+    _addon("ram-2.5m", "2.5 MiB ST RAM", "main-memory", ["st", "ste"], "The common 1040 upgrade that pairs the original 1 MiB with a 2 MiB SIMM bank.", emulator="hatari"),
+    _addon("ram-4m", "4 MiB ST RAM", "main-memory", ["megast", "ste", "megaste", "tt030", "falcon030"], "The full complement of ST RAM the 68000 memory controller can address.", emulator="hatari"),
+    _addon("ram-14m", "14 MiB ST RAM", "main-memory", ["falcon030"], "The largest Falcon memory board, needed by most Falcon multimedia software.", emulator="hatari"),
+    _addon("tt-ram", "TT RAM (Fast RAM)", "expansion-memory", THIRTY_TWO_BIT, "16 MiB of 32-bit memory above the ST RAM, reached only by the 68030 and only with 32-bit addressing.", emulator="hatari"),
 
-    # ---- Floppy interfaces ----
-    _addon("df0-internal", "Internal DS/DD floppy (DF0:)", "disk", ALL_MACHINES, "The standard 880 KiB DS/DD Atari drive, fitted to every model.", emulator="fs-uae", conflicts=["df0-hd"]),
-    _addon("df0-hd", "High-density floppy (DF0:)", "disk", ["a3000", "a4000"], "1.76 MiB high-density drive fitted to later big-box machines.", emulator="fs-uae", conflicts=["df0-internal"]),
-    _addon("df1-external", "External drive (DF1:)", "disk", ALL_MACHINES, "Second 880 KiB drive on the external floppy port.", emulator="fs-uae"),
-    _addon("gotek", "Gotek / FlashFloppy", "disk", ALL_MACHINES, "Solid-state floppy emulator reading ADF and HFE images from USB."),
-    _addon("catweasel", "Catweasel controller", "disk", BIG_BOX, "Flux-level floppy controller used for preservation captures."),
+    # ---- Floppy drives ----
+    _addon("drive-a-ss", "Single-sided internal drive (A:)", "disk", ["st"], "The 360 KiB single-sided drive fitted to early 520ST machines, which cannot read a double-sided disk.", emulator="hatari", conflicts=["drive-a-ds", "hd-floppy"]),
+    _addon("drive-a-ds", "Double-sided internal drive (A:)", "disk", ALL_MACHINES, "The standard 720 KiB double-sided drive.", emulator="hatari", conflicts=["drive-a-ss"]),
+    _addon("drive-b-external", "External drive (B:)", "disk", ALL_MACHINES, "A second drive on the floppy port, so a two-disk program needs no swapping.", emulator="hatari"),
+    _addon("hd-floppy", "High-density drive (1.44 MiB)", "disk", ["megaste", "tt030", "falcon030"], "The Ajax controller drive fitted to later machines, reading 1.44 MiB disks as well as 720 KiB ones.", emulator="hatari", conflicts=["drive-a-ss"]),
+    _addon("gotek", "Gotek with FlashFloppy", "disk", ALL_MACHINES, "A solid-state floppy replacement reading ST and HFE images from a USB stick."),
 
     # ---- Mass storage ----
-    _addon("a590", "A590 SCSI / XT sidecar", "storage", ["a500", "a500plus"], "Commodore A590 hard-drive sidecar with autoboot ROM and RAM sockets.", emulator="fs-uae"),
-    _addon("a2091", "A2091 SCSI controller", "storage", ["a2000"], "Zorro II SCSI controller with autoboot ROM.", emulator="fs-uae"),
-    _addon("a4091", "A4091 SCSI-2 controller", "storage", ["a3000", "a4000"], "Zorro III SCSI-2 controller.", emulator="fs-uae"),
-    _addon("scsi-internal", "Internal SCSI (scsi.device)", "storage", ["a3000"], "On-board WD33C93 SCSI controller.", emulator="fs-uae"),
-    _addon("ide-internal", "Internal IDE (gayle/ide.device)", "storage", ["a600", "a1200", "a4000"], "On-board 2.5 inch IDE interface.", emulator="fs-uae"),
-    _addon("cf-adapter", "CompactFlash adapter", "storage", ["a600", "a1200"], "CF card presented to the IDE bus as a hard drive.", emulator="fs-uae"),
-    _addon("pcmcia-sram", "PCMCIA SRAM / CF card", "storage", ["a600", "a1200"], "Credit-card slot storage; the usual route for moving files onto a stock machine."),
+    _addon("acsi-megafile", "Atari ACSI hard drive (SH204, SH205, Megafile)", "storage", ACSI_MACHINES, "Atari's own external hard drive on the ACSI port, from the 20 MiB SH204 to the Megafile 60.", emulator="hatari"),
+    _addon("acsi-third-party", "Third-party ACSI enclosure", "storage", ACSI_MACHINES, "An ICD, Supra or Vortex enclosure bridging the ACSI port to a SCSI or MFM drive.", emulator="hatari"),
+    _addon("acsi2stm", "ACSI2STM", "storage", ACSI_MACHINES, "A modern microcontroller board on the ACSI port presenting SD cards as hard drives.", emulator="hatari"),
+    _addon("ultrasatan", "UltraSatan", "storage", ACSI_MACHINES, "A modern ACSI device holding two SD cards, each seen as one hard drive.", emulator="hatari"),
+    _addon("cosmosex", "CosmosEx", "storage", ACSI_MACHINES, "A Raspberry Pi based ACSI device offering hard drives, floppy images and network access.", emulator="hatari"),
+    _addon("ide-internal", "Internal IDE (Falcon)", "storage", ["falcon030"], "The Falcon's own 2.5 inch IDE interface.", emulator="hatari"),
+    _addon("ide-adapter", "IDE adapter board", "storage", ST_CLASS, "An internal IDE board for an ST, STE or Mega, wired to the processor bus.", emulator="hatari"),
+    _addon("scsi-internal", "Internal SCSI port", "storage", ["megaste", "tt030", "falcon030"], "The SCSI port built into the Mega STE, the TT030 and the Falcon.", emulator="hatari"),
+    _addon("cf-adapter", "CompactFlash adapter", "storage", ST_CLASS + ["falcon030"], "A CompactFlash card on an IDE interface, seen by the machine as a hard drive.", emulator="hatari", requires=["ide-adapter|ide-internal"]),
 
-    # ---- Accelerators ----
-    _addon("acc-68020", "68020 accelerator", "accelerator", ["a500", "a500plus", "a600", "a1200", "a2000"], "68020 turbo board with optional 32-bit Fast RAM; Blizzard 1220 class on an A1200.", emulator="fs-uae", conflicts=["acc-68030", "acc-68040", "acc-68060", "pistorm", "pistorm32"]),
-    _addon("acc-68030", "68030 accelerator", "accelerator", WEDGE + BIG_BOX, "Blizzard/GVP class 68030 with MMU and FPU socket.", emulator="fs-uae", conflicts=["acc-68020", "acc-68040", "acc-68060", "pistorm", "pistorm32"]),
-    _addon("acc-68040", "68040 accelerator", "accelerator", ["a1200", "a3000", "a4000"], "68040 accelerator; the standard TOS 3.5/3.9 target.", emulator="fs-uae", conflicts=["acc-68020", "acc-68030", "acc-68060", "pistorm", "pistorm32"]),
-    _addon("acc-68060", "68060 accelerator", "accelerator", ["a1200", "a3000", "a4000"], "68060 accelerator, usually with 64-128 MiB of Fast RAM.", emulator="fs-uae", conflicts=["acc-68020", "acc-68030", "acc-68040", "pistorm", "pistorm32"]),
-    # The two PiStorm boards fit different sockets and are not interchangeable.
-    # The original replaces a socketed 68000; the 32-bit board goes in the
-    # A1200's CPU slot, which is the only place it fits.
-    _addon("pistorm", "PiStorm · 68000 socket", "accelerator", ["a500", "a500plus", "a600", "a2000"], "Raspberry Pi CPU replacement in the 68000 socket, providing emulated 68k, RAM and virtual SCSI.", conflicts=["acc-68020", "acc-68030", "acc-68040", "acc-68060", "pistorm32"]),
-    _addon("pistorm32", "PiStorm32 · A1200 CPU slot", "accelerator", ["a1200"], "Raspberry Pi CPU replacement in the A1200's 32-bit CPU slot, with emulated 68k, RAM, virtual SCSI and optional RTG.", conflicts=["acc-68020", "acc-68030", "acc-68040", "acc-68060", "pistorm"]),
-    # A PiStorm emulates the FPU, so a physical 68882 only applies to a real
-    # 68k accelerator that has the socket.
-    _addon("fpu-68882", "68882 FPU", "accelerator-option", ALL_MACHINES, "Floating-point coprocessor used by rendering and TOS maths libraries.", emulator="fs-uae", requires=["acc-68020|acc-68030|acc-68040|acc-68060"]),
-    _addon("pistorm-rtg", "PiStorm RTG output", "accelerator-option", ["a500", "a500plus", "a600", "a1200", "a2000"], "The PiStorm's own HDMI retargetable display, driven through Picasso96.", requires=["pistorm|pistorm32"]),
+    # ---- Hard-disk driver software ----
+    _addon("driver-emutos-builtin", "EmuTOS built-in driver", "driver", ALL_MACHINES, "EmuTOS reads ACSI, SCSI and IDE drives itself, so no driver need be installed on the drive.", requires=["tos-emutos"]),
+    _addon("driver-ahdi", "Atari AHDI", "driver", ALL_MACHINES, "Atari's own hard-disk driver, installed on the root sector of the drive."),
+    _addon("driver-hddriver", "HDDRIVER", "driver", ALL_MACHINES, "Uwe Seimet's driver, the usual choice for large partitions and modern interfaces."),
+    _addon("driver-pp", "PP driver (PPDRIVER)", "driver", ALL_MACHINES, "Peter Putnik's free driver for ACSI, SCSI and IDE drives."),
+    _addon("driver-icd", "ICD Pro driver", "driver", ALL_MACHINES, "The driver supplied with ICD host adapters, which also drives most other ACSI hardware."),
+
+    # ---- Processor ----
+    _addon("acc-68030-pak", "68030 accelerator (PAK68/3 class)", "accelerator", ST_CLASS, "A 68030 board in the 68000 socket, which only TOS 2.06 and EmuTOS can run.", emulator="hatari"),
+    _addon("blitter", "Blitter chip", "accelerator-option", ["st"], "The graphics coprocessor built into the Mega ST and STE, fitted to a plain ST as an upgrade.", emulator="hatari"),
+    _addon("fpu-68881", "68881 FPU", "accelerator-option", ST_CLASS, "A floating-point coprocessor on the accelerator board.", emulator="hatari", requires=["acc-68030-pak"], conflicts=["fpu-68882"]),
+    _addon("fpu-68882", "68882 FPU", "accelerator-option", THIRTY_TWO_BIT, "A floating-point coprocessor in the socket beside the TT030 or Falcon 68030.", emulator="hatari", conflicts=["fpu-68881"]),
 
     # ---- Display ----
-    _addon("gfx-picasso", "Picasso II RTG", "graphics", BIG_BOX + ["a1200"], "Retargetable graphics card driven through Picasso96.", emulator="fs-uae"),
-    _addon("gfx-cybervision", "CyberVision 64", "graphics", BIG_BOX, "Zorro III RTG card driven through CyberGraphX.", emulator="fs-uae"),
-    _addon("flicker-fixer", "Flicker fixer / scan doubler", "graphics", ALL_MACHINES, "De-interlaces the native display for a VGA monitor.", emulator="fs-uae"),
+    _addon("monitor-mono", "SM124 monochrome monitor", "graphics", ALL_MACHINES, "The 640 by 400 high-resolution monitor, needed by most productivity software.", emulator="hatari"),
+    _addon("monitor-colour", "SC1224 colour monitor", "graphics", ALL_MACHINES, "The RGB monitor for low and medium resolution, which is what games expect.", emulator="hatari"),
+    _addon("monitor-vga", "VGA monitor", "graphics", THIRTY_TWO_BIT, "A PC monitor on the TT030 or Falcon, giving the machine its higher video modes.", emulator="hatari"),
+    _addon("tv-modulator", "Television through the RF modulator", "graphics", ["st", "ste"], "A television on the STF or STE modulator, in colour but with a soft picture.", emulator="hatari"),
 
-    # ---- Networking and ports ----
-    _addon("net-a2065", "A2065 Ethernet", "network", BIG_BOX, "Zorro II Ethernet card using SANA-II drivers.", emulator="fs-uae"),
-    _addon("net-pcmcia", "PCMCIA Ethernet", "network", ["a600", "a1200"], "Credit-card Ethernet adapter.", emulator="fs-uae"),
-    _addon("parallel-sampler", "Parallel-port sampler", "ports", ALL_MACHINES, "8-bit audio sampler on the parallel port."),
-    _addon("midi", "Serial MIDI interface", "ports", ALL_MACHINES, "MIDI in/out/thru on the serial port."),
+    # ---- Ports and peripherals ----
+    _addon("midi", "MIDI ports", "ports", ALL_MACHINES, "The built-in MIDI In and Out ports used by sequencers."),
+    _addon("cartridge-port", "Cartridge port", "ports", ALL_MACHINES, "The 128 KiB ROM cartridge slot on the left-hand side."),
+    _addon("printer", "Printer on the parallel port", "ports", ALL_MACHINES, "A Centronics printer, which GEM programs reach through the printer port."),
+    _addon("modem-rs232", "Modem on the RS-232 port", "ports", ALL_MACHINES, "A serial modem or null-modem link on the RS-232 port."),
 
     # ---- Software loaders ----
-    _addon("whdload", "WHDLoad", "loader", ALL_MACHINES, "Installs floppy-only software to a hard disk with per-title patch slaves.", requires=["fast-ram"]),
-    _addon("classicwb", "ClassicWB environment", "loader", ALL_MACHINES, "Pre-built Workbench install used as a base for hard-disk images.", requires=["whdload"]),
+    _addon("auto-folder", "AUTO folder programs", "loader", ALL_MACHINES, "Programs in the AUTO folder of the boot drive, run by TOS before the desktop appears."),
+    _addon("desktop-inf", "DESKTOP.INF / NEWDESK.INF", "loader", ALL_MACHINES, "A saved desktop layout that opens windows and installs applications at boot."),
+    _addon("gemdos-hd-folder", "GEMDOS hard-drive folder", "loader", ALL_MACHINES, "A folder on the host computer that Hatari presents to the machine as drive C:.", emulator="hatari"),
 ]
 
 GROUPS = {
-    "firmware": {"label": "Kickstart firmware", "max": 2},
-    "main-memory": {"label": "Chip RAM", "max": 1},
-    "expansion-memory": {"label": "Fast and Slow RAM", "max": 2},
-    "disk": {"label": "Floppy interface", "max": 3},
+    "firmware": {"label": "TOS firmware", "max": 1},
+    "main-memory": {"label": "ST RAM", "max": 1},
+    "expansion-memory": {"label": "TT RAM", "max": 1},
+    "disk": {"label": "Floppy drives", "max": 3},
     "storage": {"label": "Mass storage", "max": 3},
+    "driver": {"label": "Hard-disk driver", "max": 1},
     "accelerator": {"label": "Processor", "max": 1},
     "accelerator-option": {"label": "Processor options", "max": 2},
-    "graphics": {"label": "Display", "max": 2},
-    "network": {"label": "Networking", "max": 1},
+    "graphics": {"label": "Display", "max": 1},
     "ports": {"label": "Ports and peripherals", "max": 4},
-    "loader": {"label": "Software loaders", "max": 2},
+    "loader": {"label": "Software loaders", "max": 3},
 }
 
 MACHINES = [
-    {"id": "a500", "label": "Atari 500 (OCS)", "baseRam": "512K", "processor": "68000"},
-    {"id": "a500plus", "label": "Atari 500+ (ECS)", "baseRam": "1M", "processor": "68000"},
-    {"id": "a600", "label": "Atari 600 (ECS)", "baseRam": "1M", "processor": "68000"},
-    {"id": "a1200", "label": "Atari 1200 (AGA)", "baseRam": "2M", "processor": "68EC020"},
-    {"id": "a2000", "label": "Atari 2000 (ECS)", "baseRam": "1M", "processor": "68000"},
-    {"id": "a3000", "label": "Atari 3000 (ECS)", "baseRam": "2M", "processor": "68030"},
-    {"id": "a4000", "label": "Atari 4000 (AGA)", "baseRam": "2M", "processor": "68040"},
-    {"id": "cd32", "label": "Atari CD32 (AGA)", "baseRam": "2M", "processor": "68EC020"},
+    {"id": "st", "label": "Atari 520ST / 1040ST", "baseRam": "512K", "processor": "68000 8 MHz"},
+    {"id": "megast", "label": "Atari Mega ST 1 / 2 / 4", "baseRam": "1M", "processor": "68000 8 MHz"},
+    {"id": "ste", "label": "Atari 520STE / 1040STE", "baseRam": "1M", "processor": "68000 8 MHz"},
+    {"id": "megaste", "label": "Atari Mega STE", "baseRam": "1M", "processor": "68000 16 MHz"},
+    {"id": "tt030", "label": "Atari TT030", "baseRam": "2M", "processor": "68030 32 MHz"},
+    {"id": "falcon030", "label": "Atari Falcon030", "baseRam": "4M", "processor": "68030 16 MHz"},
 ]
 
 
@@ -108,7 +129,7 @@ def hardware_catalogue() -> dict:
 
 
 def normalise_hardware_profile(data: dict) -> dict:
-    machine = str(data.get("machine") or "a500").strip().lower()
+    machine = str(data.get("machine") or "st").strip().lower()
     machine_ids = {row["id"] for row in MACHINES}
     if machine not in machine_ids:
         raise ValueError("Choose a supported base machine.")
@@ -149,8 +170,6 @@ def normalise_hardware_profile(data: dict) -> dict:
 def profile_addons(session) -> set[str]:
     profile = getattr(session, "hardware_profile", {}) or {}
     addons = {str(value) for value in profile.get("addons", []) if isinstance(value, str)}
-    if profile.get("accelerated") and not any(
-        value.startswith("acc-") or value.startswith("pistorm") for value in addons
-    ):
-        addons.add("acc-68030")
+    if profile.get("accelerated") and not any(value.startswith("acc-") for value in addons):
+        addons.add("acc-68030-pak")
     return addons

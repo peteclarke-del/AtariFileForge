@@ -3,7 +3,8 @@ services:
     build: .
     image: atari-file-forge:latest
     container_name: atari-file-forge
-    # The container still listens on 8666 and 8668. Only the host side moves,
+    # The container still listens on 8666 for the application and 8668 for the
+    # noVNC view of the managed Hatari display. Only the host side moves,
     # because 8666 and 8668 are commonly already taken -- the sibling Acorn
     # File Forge uses exactly those, and the two are meant to run side by side.
     # Override with ATARI_FILE_FORGE_PORT and ATARI_FILE_FORGE_VNC_PORT.
