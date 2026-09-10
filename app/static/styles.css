@@ -259,11 +259,9 @@ dialog.hex-editor-modal-host > .hex-editor-overlay { border-radius: 15px; }
 .pane-head .disk-transfer-handle:active { cursor: grabbing; }
 .format-icon { flex: 0 0 auto; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 9px; background: var(--yellow); border: 1px solid var(--format-icon-border); color: var(--format-icon-text); font: 700 10px DM Mono, monospace; box-shadow: 2px 2px 0 var(--format-icon-shadow); text-transform: uppercase; }
 .format-icon.rom { background: var(--blue); color: var(--rom-format-text); }
-.format-icon.tosrom { background: var(--blue); color: var(--rom-format-text); }
+.format-icon.tosrom { background: var(--tosrom-format); color: var(--tosrom-format-text); }
 .format-icon.dim { background: var(--msa-format); color: var(--msa-format-text); }
-.format-icon.hfe { background: var(--teal); color: var(--on-accent); }
-.format-icon.scp { background: var(--teal); color: var(--on-accent); }
-.format-icon.ipf { background: var(--teal); color: var(--on-accent); }
+.format-icon.hfe, .format-icon.scp, .format-icon.ipf { background: var(--flux-format); color: var(--flux-format-text); }
 .format-icon.iso { background: var(--muted); color: var(--on-accent); }
 .format-icon.vol { background: var(--gemdos-format); color: var(--gemdos-format-text); }
 .format-icon.gemdos { background: var(--gemdos-format); color: var(--gemdos-format-text); }
