@@ -42,25 +42,17 @@ IMAGE_EXTENSIONS = (
 def open_image_upload(
     service,
     image,
-    descriptor=None,
     *,
     target_hardware: str = "auto",
     rom_options: dict | None = None,
     force_kind: str | None = None,
 ):
     """Open one upload-like stream through the canonical archive-aware path."""
-    with open_disk_image_upload(image, IMAGE_EXTENSIONS) as (
-        image_item,
-        archived_descriptor,
-    ):
-        companion = descriptor or archived_descriptor
-        descriptor_stream = None
-        if companion is not None and companion.filename:
-            descriptor_stream = (companion.filename, companion.stream)
+    with open_disk_image_upload(image, IMAGE_EXTENSIONS) as image_item:
         session = service.create_from_stream(
             image_item.filename,
             image_item.stream,
-            descriptor_stream,
+            None,
             target_hardware,
             rom_options,
             force_kind,
@@ -75,7 +67,6 @@ def open_image_upload(
 def open_image_path(
     service,
     image_path: Path,
-    descriptor_path: Path | None = None,
     *,
     target_hardware: str = "auto",
     rom_options: dict | None = None,
@@ -88,11 +79,10 @@ def open_image_path(
     same validation and private-session boundary as browser uploads.
     """
     image_path = Path(image_path)
-    descriptor_path = Path(descriptor_path) if descriptor_path else None
     if image_path.suffix.casefold() != ".zip":
         session = service.create_from_path(
             image_path,
-            descriptor_path,
+            None,
             target_hardware,
             rom_options,
             force_kind,
@@ -105,17 +95,9 @@ def open_image_path(
     with ExitStack() as stack:
         image_stream = stack.enter_context(image_path.open("rb"))
         image = FileStorage(stream=image_stream, filename=image_path.name)
-        descriptor = None
-        if descriptor_path is not None:
-            descriptor_stream = stack.enter_context(descriptor_path.open("rb"))
-            descriptor = FileStorage(
-                stream=descriptor_stream,
-                filename=descriptor_path.name,
-            )
         return open_image_upload(
             service,
             image,
-            descriptor,
             target_hardware=target_hardware,
             rom_options=rom_options,
             force_kind=force_kind,
