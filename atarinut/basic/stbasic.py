@@ -57,10 +57,6 @@ KEYWORDS: frozenset[str] = frozenset(STATEMENTS + FUNCTIONS + OPERATORS)
 #: and ``A!`` a single-precision number.
 TYPE_SUFFIXES = "$%!"
 
-#: Words that introduce a line-number destination, so the scanner can colour
-#: the number that follows as a destination rather than as arithmetic.
-DESTINATION_KEYWORDS = frozenset({"GOTO", "GOSUB", "THEN", "ELSE", "RESTORE", "RUN", "RESUME", "LIST", "DELETE"})
-
 #: A line number at the start of a line. ``match`` anchors it, so no ``^``
 #: is needed and none is wanted: the scanner applies it line by line.
 _LINE_START = re.compile(r"(\s*)(\d+)")
@@ -195,7 +191,6 @@ def score(source: str) -> int:
 
 __all__ = [
     "COMPOUND_KEYWORDS",
-    "DESTINATION_KEYWORDS",
     "FUNCTIONS",
     "KEYWORDS",
     "OPERATORS",

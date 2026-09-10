@@ -179,6 +179,9 @@ GFA_BASIC_3 = Dialect(
     compound=("EXIT IF", "ELSE IF", "END SELECT", "END IF", "DO WHILE", "DO UNTIL",
               "LOOP WHILE", "LOOP UNTIL", "ON ERROR", "ON MENU", "OPEN OUT"),
     suffixes="$%&!#|",
+    # GFA opens a comment line with ' and a trailing comment with !. A bare !
+    # can only be a comment, because a! is read as one typed name.
+    comment_marks="'!",
 )
 
 GFA_BASIC_2 = Dialect(
@@ -193,6 +196,7 @@ GFA_BASIC_2 = Dialect(
     keywords=frozenset(GFA_BASIC_3.keywords - GFA_3_KEYWORDS),
     compound=("ELSE IF", "END IF", "ON ERROR"),
     suffixes="$%!#",
+    comment_marks="'!",
 )
 
 STOS_BASIC = Dialect(
