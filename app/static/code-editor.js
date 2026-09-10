@@ -1054,7 +1054,7 @@ window.AtariCodeEditor = (() => {
     return issues;
   }
 
-  function diagnostics(text, language, dialect = "GFA BASIC 3.0") {
+  function diagnostics(text, language, dialect = "GFA BASIC 3") {
     const issues = [];
     const add = (severity, line, message, offset = 0) => issues.push({ severity, line, message, offset });
     const lines = String(text).split("\n");
@@ -1737,7 +1737,7 @@ window.AtariCodeEditor = (() => {
     root.addEventListener("code-editor-destroy", hide, { once: true });
   }
 
-  function enhance({ textarea, root, language = "text", dialect = "GFA BASIC 3.0", inlineAssemblyLanguage = "68000", validateBasic = null, packBasic = null, initialHistory = [], targetProfile = {} }) {
+  function enhance({ textarea, root, language = "text", dialect = "GFA BASIC 3", inlineAssemblyLanguage = "68000", validateBasic = null, packBasic = null, initialHistory = [], targetProfile = {} }) {
     if (!textarea || !root || textarea.closest(".code-editor-surface")) return null;
     const surface = document.createElement("div");
     surface.className = "code-editor-surface";
