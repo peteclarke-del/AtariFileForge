@@ -411,6 +411,38 @@ function paneFormatClass(pane) {
   return kind;
 }
 
+//: The one line that describes a partition table: which scheme it uses, how
+//: many partitions it declares, and whether the drive was written with its
+//: words the other way round, which some ACSI adapters do.
+const PARTITION_SCHEMES = Object.freeze({
+  ahdi: "AHDI partition table",
+  xgm: "AHDI partition table with an XGM extension",
+  icd: "ICD partition table",
+  mbr: "MBR partition table",
+});
+
+//: What the pane footer says while a drive is showing its partition table:
+//: the invitation, plus the size the drive declares when the table records
+//: one, because a table that disagrees with the file it lives in is the
+//: first thing worth knowing about a drive that will not mount.
+function paneTableDescription(pane) {
+  const declared = Number(pane.partitionTable?.hdSize || 0);
+  return declared > 0
+    ? `Select a partition to browse the volume it mounts · the table declares ${humanSize(declared)}`
+    : "Select a partition to browse the volume it mounts";
+}
+
+function partitionTableLabel(table) {
+  if (!table) return "Partition table";
+  const scheme = PARTITION_SCHEMES[String(table.scheme || "").toLowerCase()] || "Partition table";
+  const count = Array.isArray(table.partitions) ? table.partitions.length : null;
+  return [
+    scheme,
+    count == null ? "" : `${count} partition${count === 1 ? "" : "s"}`,
+    table.byteSwapped ? "byte-swapped" : "",
+  ].filter(Boolean).join(" · ");
+}
+
 function paneDragHandle(index) {
   return `<button class="pane-drag-handle" type="button" title="Move pane ${index + 1}" aria-label="Move pane ${index + 1}"><b>⠿</b><small>${index + 1}</small></button>`;
 }
@@ -473,6 +505,18 @@ async function openHexEditor(index, initialOffset = 0, { host: requestedHost = n
   });
   if (panes[index] === pane) await onClose?.();
   if (panes[index] === pane) await refreshCurrentView(index);
+}
+
+//: How the drive declares its partitions: which table it carries, whether
+//: its words are byte-swapped, and how large the drive says it is. It is
+//: read alongside the partition listing so the pane can say what shape the
+//: drive is in rather than only what is on it.
+async function fetchPartitionTable(imageId) {
+  try {
+    return (await api(`/api/images/${imageId}/partition-table`)).partitionTable;
+  } catch (_error) {
+    return null;
+  }
 }
 
 async function fetchCapacity(imageId, partition = null) {
@@ -744,7 +788,7 @@ function renderPane(index, preserveScroll = false) {
   const location = isArchive
     ? `${pane.archiveName} · \\${pane.archiveMember || ""}`
     : isPartitionIndex
-    ? "AHDI partition table"
+    ? partitionTableLabel(pane.partitionTable)
     : isContainer
       ? `${CONTAINER_LABELS[pane.image.kind] || "Floppy container"} · ${pane.image.readOnly ? "read-only" : "convert to browse"}`
       : isRom
@@ -1544,7 +1588,8 @@ async function returnToPartitions(index) {
     if (panes[index] !== pane || pane.requestToken !== requestToken || pane.partition !== null) return;
     pane.entries = data.partitions;
     pane.capacity = await fetchCapacity(pane.image.id);
-    pane.description = "Select a partition to browse the volume it mounts";
+    pane.partitionTable = await fetchPartitionTable(pane.image.id);
+    pane.description = paneTableDescription(pane);
   } catch (error) {
     if (panes[index] === pane && pane.requestToken === requestToken) toast(error.message, true);
   } finally {
@@ -1571,8 +1616,9 @@ async function refreshCurrentView(index) {
       if (panes[index] !== pane || pane.requestToken !== requestToken) return;
       pane.entries = data.partitions;
       pane.capacity = await fetchCapacity(pane.image.id);
+      pane.partitionTable = await fetchPartitionTable(pane.image.id);
       setSelection(pane, selected, selectionAnchor);
-      pane.description = "Select a partition to browse the volume it mounts";
+      pane.description = paneTableDescription(pane);
       toast("Partition table refreshed");
     } catch (error) {
       if (panes[index] === pane && pane.requestToken === requestToken) toast(error.message, true);
@@ -2064,14 +2110,16 @@ async function acceptImage(index, image) {
   const requestToken = ++pane.requestToken;
   renderPane(index);
   if (image.kind === "hd") {
-    const [data, capacity] = await Promise.all([
+    const [data, capacity, partitionTable] = await Promise.all([
       api(`/api/images/${image.id}/partitions`),
       fetchCapacity(image.id),
+      fetchPartitionTable(image.id),
     ]);
     if (panes[index] !== pane || pane.requestToken !== requestToken) return;
     pane.entries = data.partitions;
     pane.capacity = capacity;
-    pane.description = "Select a partition to browse the volume it mounts";
+    pane.partitionTable = partitionTable;
+    pane.description = paneTableDescription(pane);
     pane.loading = false;
     if (preserveDriveRoot) {
       const available = new Set(pane.entries.map(entry => String(entry.partition)));
@@ -2567,6 +2615,14 @@ function createEmptyFile(index) {
   });
 }
 
+//: What a datetime-local field wants: ISO text without a zone, whether the
+//: listing gave the stamp as text or as the date and time words a GEMDOS
+//: directory entry actually holds.
+function datestampForInput(value) {
+  const text = value && typeof value === "object" ? formatDatestamp(value) : String(value || "");
+  return text.slice(0, 19).replace(" ", "T");
+}
+
 async function editFileMetadata(index, entry) {
   const pane = panes[index];
   if (!pane?.image || !entry) return;
@@ -2577,8 +2633,9 @@ async function editFileMetadata(index, entry) {
   const flags = attributeFlags(entry.attributes ?? entry.attr ?? 0);
   const has = letter => Boolean(flags[letter]);
   const flag = (letter, label, hint) => `<label class="check"><input type="checkbox" name="bit-${letter}" ${has(letter) ? "checked" : ""}> ${label}<small>${hint}</small></label>`;
-  // The stamp arrives as ISO text and the browser wants it without a zone.
-  const stamp = String(entry.datestamp || "").slice(0, 19).replace(" ", "T");
+  // The stamp arrives as ISO text, or as the two GEMDOS words themselves,
+  // and the browser wants it without a zone.
+  const stamp = datestampForInput(entry.datestamp);
   return showModal(`
     <h2>Attributes and datestamp</h2>
     <p>Editing <code>${esc(path)}</code>. These are the fields a GEMDOS directory entry holds; the file's own bytes are not touched.</p>
@@ -6051,7 +6108,7 @@ function editorProperties(root, pane, path, report) {
     shade.setAttribute("aria-labelledby", "editor-properties-title");
     const flags = attributeFlags(metadata.attributes ?? metadata.attr ?? 0);
     const flag = (letter, label, hint) => `<label class="check"><input type="checkbox" name="bit-${letter}" ${flags[letter] ? "checked" : ""}> ${label}<small>${hint}</small></label>`;
-    const stamp = String(metadata.datestamp || "").slice(0, 19).replace(" ", "T");
+    const stamp = datestampForInput(metadata.datestamp);
     shade.innerHTML = `<form class="editor-choice-card editor-properties-card"><h2 id="editor-properties-title">File properties</h2><p>Update the directory entry without changing the file bytes.</p>
       <div class="field-grid two">${flag("r", "Read-only", "r · $01")}${flag("h", "Hidden", "h · $02")}${flag("s", "System", "s · $04")}${flag("v", "Volume label", "v · $08")}${flag("d", "Directory", "d · $10")}${flag("a", "Archive", "a · $20")}</div>
       <div class="field"><label>Datestamp</label><input name="datestamp" type="datetime-local" step="2" value="${esc(stamp)}"><small>TOS records the time to the nearest two seconds.</small></div>
