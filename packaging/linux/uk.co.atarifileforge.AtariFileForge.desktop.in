@@ -7,6 +7,6 @@ TryExec=@TRY_EXEC@
 Icon=atari-file-forge
 Terminal=false
 Categories=Utility;FileTools;
-MimeType=application/x-atari-ofs;application/x-atari-hdf;application/x-atari-ffs;application/x-atari-dms;application/x-atari-rom;application/x-atari-hfe;
+MimeType=application/x-atari-st;application/x-atari-msa;application/x-atari-dim;application/x-atari-stx;application/x-atari-hd;application/x-atari-rom;application/x-atari-hfe;application/x-atari-scp;
 StartupNotify=true
 StartupWMClass=uk.co.atarifileforge.AtariFileForge

@@ -10,8 +10,10 @@
   <project_license>MIT</project_license>
   <description>
     <p>
-      Atari File Forge browses, edits, validates and converts Atari,
-      Atari 600, Atari 4000 and TOS disk, dms, ROM and hard-drive images.
+      Atari File Forge browses, edits, validates and converts the floppy,
+      hard-disk and ROM images of the Atari ST, Mega ST, STE, Mega STE, TT030
+      and Falcon030: ST, MSA, DIM and STX floppies, AHDI-partitioned ACSI, SCSI
+      and IDE drives, and TOS and cartridge ROMs.
     </p>
     <p>
       The Linux application uses the same filesystem and editor implementation
@@ -21,15 +23,14 @@
     <p>
       A bundled architecture-native HxCFloppyEmulator command-line converter
       opens, creates and verifies supported HFE floppy images and decodes SCP
-      flux captures without requiring
-      a separate host installation.
+      flux captures without requiring a separate host installation.
     </p>
     <p>
-      Open OFS and FFS images can be converted between containers. Any of them
-      exports as its canonical sector image, and OFS images together with FFS
-      S, M and L floppies also export as HFE or SCP. Every flux export is
-      decoded again and compared byte for byte with the working sectors before
-      the file is released.
+      Open floppy images can be converted between containers. Any of them
+      exports as a plain ST sector image or as MSA, and standard geometries
+      also export as HFE or SCP. Every flux export is decoded again and
+      compared byte for byte with the working sectors before the file is
+      released.
     </p>
     <p>
       With the official Greaseweazle tools installed, the native edition writes

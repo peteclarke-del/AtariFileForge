@@ -1,4 +1,4 @@
-.TH ATARI-FILE-FORGE 1 "August 2026" "Atari File Forge" "User Commands"
+.TH ATARI-FILE-FORGE 1 "September 2026" "Atari File Forge" "User Commands"
 .SH NAME
 atari-file-forge \- open and maintain Atari media images
 .SH SYNOPSIS
@@ -6,30 +6,33 @@ atari-file-forge \- open and maintain Atari media images
 .RI [ image ...]
 .SH DESCRIPTION
 Atari File Forge is a GTK desktop application for browsing, editing,
-validating and converting Atari, Atari 600, Atari 4000 and TOS disk,
-dms, ROM and hard-drive images.
+validating and converting the floppy, hard-disk and ROM images of the Atari
+ST, Mega ST, STE, Mega STE, TT030 and Falcon030.
 .PP
 Files named on the command line are opened through the same private-copy and
-format-validation path as the GTK file chooser. A matching Hardfile HDA and GEO
-pair is treated as one image.
+format-validation path as the GTK file chooser. Floppies arrive as ST sector
+images, MSA or DIM containers, Pasti STX captures, or HFE, SCP and IPF flux.
+Hard disks arrive as raw ACSI, SCSI or IDE images carrying an AHDI partition
+table, or as a single bare GEMDOS volume.
 .PP
 HFE floppy images and SCP flux captures are decoded and encoded with the bundled
 HxCFloppyEmulator command-line converter, hxcfe. Clean sector-based HFE v1
 images are editable and are decoded again for byte-exact verification before
-download. Advanced or damaged HFE and SCP images open read-only.
+download. Advanced or damaged HFE and SCP images, and every STX image, open
+read-only.
 .PP
-Any open OFS or FFS image can be converted to another container with the
-Export control in the pane header, or File, Export as. Every such image can be
-written back as its canonical sector image; OFS images of any size, and FFS S,
-M and L floppies, can also be wrapped as HFE or SCP. Flux exports are decoded
+Any open floppy image can be converted to another container with the Export
+control in the pane header, or File, Export as. Every such image can be
+written back as a plain ST sector image or as MSA; standard 9, 10 and 11
+sector geometries can also be wrapped as HFE or SCP. Flux exports are decoded
 again and compared byte for byte with the working sectors before the file is
 released. The control is disabled for media with no compatible target, such as
-a Hardfile HDA and GEO pair.
+a partitioned hard disk.
 .PP
 With the official Greaseweazle tools installed, the native edition can write an
 open floppy image to a connected drive and capture a physical disk back into a
-new working image. Captures may be taken as decoded OFS or FFS sectors, or as
-HFE or SCP flux for disks of unknown condition. A capture is only opened once
+new working image. Captures may be taken as decoded sectors, or as HFE or SCP
+flux for disks of unknown condition. A capture is only opened once
 Greaseweazle exits cleanly and leaves a usable image, and a failed capture
 removes its partial file.
 .SH ENVIRONMENT
@@ -38,9 +41,10 @@ removes its partial file.
 Set to auto, 0 or 1. The default auto mode enables the compatibility fallback
 only when Ubuntu reports its restricted unprivileged-user-namespace policy.
 .TP
-.B ATARI_FSUAE_ROOT, ATARI_FILE_FORGE_KICKSTART_DIR, ATARI_FILE_FORGE_CAPSIMAGE
-Override the FS-UAE installation, the directory searched for Kickstart ROMs
-you supply, and the SPS decoder library used to read IPF captures.
+.B ATARI_HATARI_ROOT, ATARI_FILE_FORGE_TOS_DIR, ATARI_FILE_FORGE_CAPSIMAGE
+Override the Hatari installation, the directory searched for TOS ROMs you
+supply (EmuTOS is bundled and needs no configuration), and the SPS decoder
+library used to read IPF captures.
 .SH FILES
 .TP
 .I ~/.local/share/atari-file-forge/work

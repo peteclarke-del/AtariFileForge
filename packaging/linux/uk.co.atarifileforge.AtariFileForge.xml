@@ -1,26 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/x-atari-ofs">
-    <comment>Atarin OFS disk image</comment>
-    <glob pattern="*.adf"/><glob pattern="*.adz"/>
+  <mime-type type="application/x-atari-st">
+    <comment>Atari ST floppy sector image</comment>
+    <glob pattern="*.st"/>
   </mime-type>
-  <mime-type type="application/x-atari-hdf">
-    <comment>FastFileSystem HDF disk bank</comment>
-    <glob pattern="*.hdf"/>
+  <mime-type type="application/x-atari-msa">
+    <comment>Magic Shadow Archiver floppy image</comment>
+    <glob pattern="*.msa"/>
   </mime-type>
-  <mime-type type="application/x-atari-ffs">
-    <comment>Atarin FFS or GEMDOS image</comment>
-    <glob pattern="*.adf"/><glob pattern="*.adz"/><glob pattern="*.dsk"/>
-    <glob pattern="*.adf"/><glob pattern="*.hda"/><glob pattern="*.geo"/>
-    <glob pattern="*.hda"/><glob pattern="*.hdz"/><glob pattern="*.hd4"/>
+  <mime-type type="application/x-atari-dim">
+    <comment>FastCopy Pro floppy image</comment>
+    <glob pattern="*.dim"/>
   </mime-type>
-  <mime-type type="application/x-atari-dms">
-    <comment>Unified Emulator Format DMS archive</comment>
-    <glob pattern="*.dms"/>
+  <mime-type type="application/x-atari-stx">
+    <comment>Pasti protected floppy image</comment>
+    <glob pattern="*.stx"/>
+  </mime-type>
+  <mime-type type="application/x-atari-hd">
+    <comment>Atari ACSI, SCSI or IDE hard-disk image</comment>
+    <glob pattern="*.ahd"/><glob pattern="*.acsi"/><glob pattern="*.ide"/>
+    <glob pattern="*.hd"/>
   </mime-type>
   <mime-type type="application/x-atari-rom">
-    <comment>Atari ROM image</comment>
-    <glob pattern="*.rom"/>
+    <comment>Atari TOS or cartridge ROM image</comment>
+    <glob pattern="*.tos"/><glob pattern="*.rom"/>
   </mime-type>
   <mime-type type="application/x-atari-hfe">
     <comment>HxC floppy image</comment>
