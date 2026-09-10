@@ -8,11 +8,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
 
-from .disk_service import SESSION_OWNER, DiskError
+from .disk_service import SESSION_OWNER
+from .errors import DiskError, OperationCancelled
 
-
-class OperationCancelled(DiskError):
-    """Raised at a safe operation boundary after cancellation was requested."""
+# Re-exported so callers can keep importing the cancellation error from the
+# operation registry, which is where it is raised. It is defined in `errors`
+# so a service can catch it without importing the disk service.
+__all__ = ["DiskError", "OperationCancelled", "OperationRegistry"]
 
 
 class OperationRegistry:
