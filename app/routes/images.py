@@ -326,7 +326,7 @@ def create_images_blueprint(
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        service.compact(session, data.get("order"))
+        service.compact(session)
         return jsonify(
             image=service.summary(session),
             message="Free space compacted successfully",
