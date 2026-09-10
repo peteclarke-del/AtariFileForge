@@ -56,6 +56,3 @@ GEMDOS_EXTENSIONS = (
     | IPF_EXTENSIONS
     | HARD_DISK_EXTENSIONS
 )
-
-#: The geometry sidecar that accompanies a bare hard-disk image.
-GEOMETRY_EXTENSIONS = {".geo"}
