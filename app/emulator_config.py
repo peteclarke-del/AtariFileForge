@@ -24,6 +24,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from atarinut.tosrom import is_tos_rom
+
 from .hardware_profiles import profile_addons
 
 
@@ -205,12 +207,39 @@ def tos_directories() -> list[Path]:
     return [TOS_DIR, REPOSITORY_TOS_DIR]
 
 
+def _is_rom(path: Path) -> bool:
+    """Whether the file decodes as a ROM at all.
+
+    A collection gathered from the preservation archives carries files that
+    are not ROMs: odd lengths, partial reads, and dumps that never completed.
+    Handing one to the emulator produces a machine that hangs with nothing on
+    screen, so the header is read before the file is offered.
+    """
+    try:
+        return is_tos_rom(path.read_bytes())
+    except OSError:
+        return False
+
+
 def _tos_candidates(stems: tuple[str, ...]) -> list[Path]:
     """Every ROM file matching one of ``stems``, best first.
 
-    Within one release the UK ROM is preferred, then the US one, then any
-    other language in name order. Alternative dumps such as ``tos104-b.img``
-    match as well, after the plain-language files.
+    Three things decide the order, and each of them was needed by a real
+    collection rather than imagined.
+
+    A file that does not decode as a ROM is left out altogether, whatever it
+    is called. Falling back to the bundled firmware is a result the operator
+    can be told about; a machine that hangs on a partial dump is not.
+
+    Then the name. A ROM with no language in its name comes first, because
+    the later releases were not published per country: ``tos404.img`` is the
+    ROM and ``tos404-a.img`` is somebody's alternative dump of it. Then the
+    UK ROM, then the US one, then anything else.
+
+    Then the length, largest first. Every genuine dump of one release is the
+    same size, so a shorter file of the same release is a truncated one. The
+    header alone does not catch that: a half-length dump of a 512 KiB release
+    still carries a perfectly good header and reports its version happily.
     """
     found: list[Path] = []
     for stem in stems:
@@ -220,12 +249,16 @@ def _tos_candidates(stems: tuple[str, ...]) -> list[Path]:
             matches = sorted(
                 path for path in directory.glob(f"{stem}*.img") if path.is_file()
             )
-            for language in TOS_LANGUAGES:
-                found.extend(path for path in matches if path.name == f"{stem}{language}.img")
-            found.extend(
-                path for path in matches
-                if path.name not in {f"{stem}{language}.img" for language in TOS_LANGUAGES}
-            )
+            preferred = [f"{stem}.img"] + [f"{stem}{language}.img" for language in TOS_LANGUAGES]
+
+            def rank(path: Path, preferred=preferred) -> tuple:
+                try:
+                    place = preferred.index(path.name)
+                except ValueError:
+                    place = len(preferred)
+                return (place, -path.stat().st_size, path.name)
+
+            found.extend(sorted((path for path in matches if _is_rom(path)), key=rank))
     return found
 
 
