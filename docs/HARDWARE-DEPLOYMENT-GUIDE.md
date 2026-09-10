@@ -1,143 +1,234 @@
 # Hardware deployment assistant
 
-Atari File Forge can turn an open image into a checked directory tree for a
-Gotek, FastFileSystem, Hardfile, PiStorm or TOS host. Open the image, apply the target
-hardware profile, then choose **Tools → Build hardware deployment**.
+Atari File Forge turns an open image into a checked directory tree for a Gotek,
+an SD card in an ACSI device, a CompactFlash or IDE drive, a host folder Hatari
+presents as a GEMDOS drive, or a genuine ACSI enclosure. Open the image, apply
+the target hardware profile, then choose **Tools → Build hardware deployment**.
 
 ![The deployment assistant showing a validated Gotek layout](images/hardware-deployment-assistant.png)
 
 The assistant is separate from **Save image**. Save creates the canonical
 archive of the working image. Deployment creates a hardware-specific package
 whose filenames and directories match the selected target. It never writes
-directly to an SD card, USB device or physical disk.
+directly to an SD card, a USB device or a physical disk.
 
 ## Safety model
 
-Validation and packaging use a sparse private snapshot. An HDA image is
-hardware-finalised, checked and hashed in that snapshot, so opening the
-assistant does not advance the live FFS disc ID, alter a directory sequence
-or clear the pane's changed state. The reviewed source revision is recorded in
-the plan. If the image changes before **Download deployment ZIP** is selected,
-the server rejects the stale plan and requires another validation.
+Validation and packaging use a sparse private snapshot. The image is finalised,
+checked and hashed in that snapshot, so opening the assistant does not change
+the live image or clear the pane's changed state. The reviewed source revision
+is recorded in the plan. If the image changes before **Download deployment ZIP**
+is selected, the server rejects the stale plan and requires another validation.
+
+## What a package contains
 
 Every package contains:
 
-- the exact target directory tree;
-- `README.md`, generated from the chosen target and applied hardware profile;
-- `Deployment/manifest.json`, with source revision, paths, sizes and SHA-256
-  values;
-- `Deployment/compatibility-report.md`, using the same compatibility schema as
-  cross-format copies.
+- the exact target directory tree, with the filenames the device expects;
+- `README.md`, generated from the chosen target and the applied hardware
+  profile, holding the numbered installation steps, the verification checks and
+  the rollback instruction;
+- `Deployment/manifest.json`, with the source revision, every path, its size and
+  its SHA-256;
+- `Deployment/compatibility-report.md`, using the same versioned compatibility
+  schema as a cross-format copy.
 
-Blocking findings disable download. Warnings remain visible and are copied to
-the package so a manual hardware requirement cannot be forgotten after the
-browser closes.
+Blocking findings disable download. Warnings stay visible and are copied into
+the package, so a manual hardware requirement cannot be forgotten once the
+browser is closed.
 
 ## Target layouts
 
-### Gotek and FlashFloppy
+### Gotek with FlashFloppy
 
-Supported floppy images can be packaged in Native mode, retaining useful
-filenames, or Indexed mode. Indexed mode creates names beginning at the chosen
-`DSKA0000` position and includes an `FF.CFG` which selects indexed navigation.
-A Gotek package holds floppy images, so a hard drive is not offered for one:
-its partitions are not floppies and inventing them as such would mislead.
-Copy the contents of `GOTEK-USB` to
-the USB root.
+A floppy image is packaged under `GOTEK-USB` together with an `FF.CFG` that
+selects the Shugart interface, the Atari host type and the chosen navigation
+mode. Native mode keeps the image's own filename. Indexed mode names it
+`DSKA0000` at the chosen starting index, and `FF.CFG` sets `nav-mode = indexed`
+with the `DSKA` prefix.
 
-The assistant does not generate `HXCSDFE.CFG`. That file contains physical
-directory-order state maintained by the HxC selector workflow, and creating a
-lookalike from filenames would not be safe.
+FlashFloppy presents `.st`, `.msa` and `.hfe` images. A flux recording is not
+one of those and is refused rather than converted behind your back. A hard drive
+is not offered either: its partitions are not floppies.
 
-### HDF on an SD card
+The geometry has to agree with the boot sector. An ST reads the sectors per
+track and the side count from the BIOS parameter block, so a 720 KiB
+double-sided image whose block says single-sided will not read on hardware even
+though the file size is right. The image health dashboard reports that
+disagreement before the package is built.
 
-An open hard-drive image becomes `SD-CARD/ATARI.HDF`. Copy `ATARI.HDF` to the
-FAT root of the card. The profile check warns when no mass-storage interface or
-FastFileSystem build is declared. STACK, ROM and machine compatibility remain
-part of image audits, not something deployment silently changes.
+Steps:
 
-Both shapes of hard drive are accepted here, because the package copies the
-file as it stands and never reads inside it. A drive carrying a Rigid Disk
-Block declares its own geometry, so the receiving side needs no configuration.
-A bare hardfile does not, and the plan says so: the adapter or firmware has to
-be told the heads, sectors and cylinders, or be one that assumes them. If you
-would rather the file described itself, convert it first with
-**File → Export as… → Partitioned drive with a Rigid Disk Block**.
+1. Format the USB device as FAT32 with a single partition.
+2. Copy the contents of `GOTEK-USB` to the root of the device, keeping `FF.CFG`
+   beside the images.
+3. Insert the device, select the image, and list the disk from the desktop
+   before enabling writes.
 
-### Hardfile
+The assistant does not generate `HXCSDFE.CFG`. That file holds physical
+directory-order state maintained by the HxC selector workflow, and a lookalike
+built from filenames would not be safe.
 
-A matched HDA and GEO pair becomes:
+### SD card for an ACSI device
 
-```text
-SD-CARD/
-└── Hardfile0/
-    ├── scsi0.hda
-    └── scsi0.geo
-```
+The whole drive image is packaged under `SD-CARD` as one raw `.img` file, to be
+written to the card sector for sector. UltraSatan, ACSI2STM and CosmosEx all
+read a card written this way.
 
-The disposable HDA copy is normalised to the GEO geometry, its directory block
-checksums and bitmap are checked, and both files are hashed before the ZIP is
-enabled. Merge the `Hardfile0` directory into a backed-up card. Do not rename
-one half of the pair or combine files from different saves.
+Steps:
 
-### PiStorm
+1. Back up the existing card. Writing the image replaces every byte on it.
+2. Write the image, for example
+   `sudo dd if=SD-CARD/<image>.img of=/dev/sdX bs=1M conv=fsync status=progress`.
+3. Set the ACSI id on the device. Id 0 is the id TOS boots from; UltraSatan and
+   ACSI2STM present their first card there.
+4. Install a driver unless EmuTOS is fitted, which reads ACSI drives itself.
+   AHDI, HDDRIVER, PPDRIVER and the ICD driver all work.
+5. Boot, list the root of each partition, and read from it before writing.
 
-Both PiStorm boards take the same package. Which one a machine can accept is
-decided by its CPU socket, so the workbench offers the original 68000-socket
-board for the A500, A500+, A600 and A2000, and the PiStorm32 for the A1200
-alone. A profile that names the wrong one for its machine is reported before
-the package is built.
+An ACSI device reads the bytes as they stand. If the open image is byte-swapped,
+which is IDE word order, the plan reports it and the image must be un-swapped
+before it is written. An ACSI2STM card larger than 1 GiB needs HDDRIVER or the
+ICD driver; the built-in and AHDI drivers will not address it.
 
+### CompactFlash or IDE drive
 
-An HDF uses `SD-CARD/ATARI.HDF`. A Hardfile pair uses the `Hardfile0` layout
-above. The package is a merge tree: preserve the working Pi firmware,
-`PiStorm.cfg`, saved state and unrelated target directories already on the
-card. Atari 600 profiles are warned when they do not include AP5 or another
-compatible 1 MHz bus route.
+The same raw image, packaged under `CF-CARD`, for an IDE adapter in an ST, STE
+or Mega, for a CompactFlash card on that adapter, and for the Falcon's internal
+IDE interface.
 
-### TOS and Atari 4000 hosts
+Steps:
 
-A supported GEMDOS image is placed below `ATARI-HOST/Images`. The assistant
-can validate the image and its companion metadata, but it cannot infer the
-geometry or controller configuration of every emulator, expansion card or storage
-adapter. The generated README therefore marks attachment as a manual step.
-Run the target filing-system checks before enabling application writes.
+1. Back up the existing card.
+2. Write the image, for example
+   `sudo dd if=CF-CARD/<image>.img of=/dev/sdX bs=1M conv=fsync status=progress`.
+3. Check the byte order the adapter expects. The Falcon internal IDE and most ST
+   and STE IDE adapters wire the data bus swapped, so the image on the card is
+   byte-swapped.
+4. Reproduce the same case in Hatari with `--ide-swap` before trusting the card
+   on hardware.
+5. Install HDDRIVER or the ICD driver unless EmuTOS is fitted.
+6. Boot, list each partition, and read from it before writing.
+
+The plan reports a plain image sent to an IDE target and a byte-swapped image
+sent to an ACSI target, because those are the two ways a correct image reads as
+noise on correct hardware.
+
+### GEMDOS drive folder
+
+The mounted volume is copied out as a host directory tree under `GEMDOS-DRIVE`,
+with a `hatari.cfg` fragment beside it. Hatari's `--harddrive` presents that
+folder to the machine as a GEMDOS drive.
+
+Names are written the way TOS sees them: upper case, eight characters and a
+three-character extension. `AUTO` keeps its name, so Hatari runs the programs
+inside it at boot exactly as a real drive would.
+
+Steps:
+
+1. Extract `GEMDOS-DRIVE` to a directory on the host computer.
+2. Point Hatari at it with `--harddrive /path/to/GEMDOS-DRIVE`, or paste the
+   fragment from `hatari.cfg` into your own configuration.
+3. Leave the drive read-only until it has been listed and read, then allow
+   writes if the software needs to save.
+
+This target is offered for a floppy or for a selected partition of a drive, not
+for a whole partitioned drive: a drive is several volumes and a host folder is
+one.
+
+### ACSI hard drive
+
+A Megafile, SH204, SH205 or third-party enclosure has no removable card, so the
+package holds the raw image under `ACSI-DRIVE`, its SHA-256, and the steps to
+get it onto the drive.
+
+Steps:
+
+1. Back up whatever the enclosure currently holds. The drive inside it is
+   replaced wholesale.
+2. Write `ACSI-DRIVE/<image>.img` to the drive: either connect the drive to the
+   host computer directly, or write the image to a card in a CosmosEx or
+   UltraSatan and copy it across on the machine.
+3. Set the ACSI id with the switch on the back of the enclosure. Id 0 is the
+   drive TOS boots from.
+4. Install a driver: HDX ships with AHDI, HDDRIVER installs itself from the
+   desktop, and the ICD tools drive most third-party host adapters.
+5. Boot from the drive, list each partition, and read from it before writing.
+
+The plan warns about the TOS partition limits before the package is built. TOS
+1.00 stops at 16 MiB, TOS 1.02 to 1.62 at 256 MiB, and TOS 2.06, 3.06 and 4.0x
+at 512 MiB. Nothing above 512 MiB mounts without a replacement DOS such as
+BigDOS or MiNT.
+
+## Profile validation
+
+The applied hardware profile is checked against the selected target before the
+package is built. The assistant reports:
+
+- a target the machine has no interface for: a Gotek package without `gotek`, an
+  SD-card package without `acsi2stm`, `ultrasatan` or `cosmosex`, a
+  CompactFlash package without `ide-internal`, `ide-adapter` or `cf-adapter`,
+  and an ACSI enclosure package without `acsi-megafile` or `acsi-third-party`;
+- a partition larger than the selected TOS release will mount;
+- a byte-swapped image sent to an ACSI target, which needs the bytes un-swapped;
+- a plain image sent to an IDE target on a machine whose adapter expects swapped
+  data;
+- a card image with no partition table, whose geometry the receiving driver has
+  to be told.
+
+## Verification
+
+1. Compare each SHA-256 in `Deployment/manifest.json` against the file you wrote
+   or copied.
+2. Boot the machine and list the root of every volume.
+3. Read a known file from each volume before writing anything.
+4. Reboot and repeat the directory listing, so a write that only appeared to
+   succeed is caught.
+
+## Rollback
+
+Keep the previous working medium unchanged until the new deployment has passed
+every check above. If any check fails, put the backup back and revalidate the
+image in Atari File Forge before trying again. Nothing in the assistant writes
+to a device, so a rollback is always a copy of your own backup rather than an
+undo inside the application.
 
 ## Recommended workflow
 
-1. Apply the exact hardware profile in **Workbench**.
+1. Apply the exact hardware profile.
 2. Save or checkpoint important edits.
 3. Choose **Tools → Build hardware deployment** and select the target.
-4. For Gotek, choose Native or Indexed mode and the first index.
+4. For a Gotek, choose Native or Indexed mode and the first index.
 5. Select **Validate layout**. Review target paths, byte totals, SHA-256 values,
    profile warnings and installation steps.
-6. Resolve blocking findings. Revalidate after changing either the image or
+6. Resolve blocking findings. Revalidate after changing either the image or the
    target options.
 7. Download the ZIP and extract it to a temporary host directory.
-8. Back up the known-good physical medium, then merge the generated tree.
-9. Perform the catalogue, read, write and reboot checks listed in its README.
+8. Back up the known-good physical medium, then write or merge the generated
+   tree.
+9. Perform the verification checks listed in the package README.
 10. Keep the previous medium unchanged until those checks pass.
 
 ## Cross-format preflight
 
-Drag and drop, Cut/Copy/Paste, **File → Insert File**, folder import and Online
-Library installation use the same versioned compatibility report before a
-cross-format batch starts. The report shows each proposed target name, load and
-execute metadata, directory loss, filetype loss, truncation and collisions.
-Nothing is copied while that review is open. Online Library keeps the review
-inside its search dialog and requires a second, explicitly reviewed Install
-action.
+Drag and drop, Cut, Copy and Paste, **File → Insert File**, folder import and
+Online Library installation all use the same versioned compatibility report
+before a cross-format batch starts. The report shows each proposed target name,
+the 8.3 conversion, attribute and datestamp loss, and collisions. Nothing is
+copied while that review is open. Online Library keeps the review inside its
+search dialog and requires a second, explicitly reviewed Install action.
 
-JSON and Markdown exports are available from the full review dialog. The
-manual **Analyse → Dry-run selected items** command remains useful when a
-report is needed without starting a transfer.
+JSON and Markdown exports are available from the full review dialog. The manual
+**Analyse → Dry-run selected items** command remains useful when a report is
+needed without starting a transfer.
 
 ## Limits
 
 - Deployment does not format removable media or overwrite an attached device.
-- TOS controller geometry remains a documented manual decision.
-- Whole-HDF emulator mounting is available for Atari 600 FastFileSystem profiles through
-  the bundled FS-UAE whole-drive adapter. The deployment ZIP itself is
-  still a generated directory tree and never writes a removable card.
-- Ambiguous DMS recordings, unsupported HFE track layouts and ambiguous
-  GEMDOS media retain their read-only or rejected behaviour.
+- Driver installation on the target drive remains a manual step. Atari File
+  Forge does not write AHDI, HDDRIVER or ICD boot code into a package.
+- The geometry an adapter assumes for an image with no partition table is a
+  documented manual decision.
+- Flux recordings, unsupported HFE track layouts and ambiguous GEMDOS media keep
+  their read-only or rejected behaviour, so they are not offered as deployment
+  sources.

@@ -5,20 +5,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.fat_media import build_hdf_card, read_hdf_card
+from app.fat_media import build_image_card, read_image_card
 
 
 class FatMediaTests(unittest.TestCase):
-    def test_builds_a_deterministic_fat32_card_with_contiguous_atari_hdf(self):
+    def test_builds_a_deterministic_fat32_card_with_one_contiguous_image(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            source = root / "games.hdf"
+            source = root / "GAMES.img"
             payload = bytes(range(256)) * 1200
             source.write_bytes(payload)
             card = root / "card.img"
-            layout = build_hdf_card(source, card)
+            layout = build_image_card(source, card)
             data = card.read_bytes()
-            extracted = read_hdf_card(card, layout)
+            extracted = read_image_card(card, layout)
             card_size = card.stat().st_size
 
         self.assertEqual(data[510:512], b"\x55\xAA")
@@ -29,7 +29,7 @@ class FatMediaTests(unittest.TestCase):
         root_entries = struct.unpack_from("<H", data, 17)[0]
         root_offset = (reserved + fats * fat_sectors) * 512
         self.assertEqual(data[root_offset:root_offset + 11], b"ATARI FORGE")
-        self.assertEqual(data[root_offset + 32:root_offset + 43], b"ATARI   HDF")
+        self.assertEqual(data[root_offset + 32:root_offset + 43], b"ATARI   IMG")
         self.assertEqual(struct.unpack_from("<I", data, root_offset + 32 + 28)[0], len(payload))
         self.assertEqual(extracted, payload)
         self.assertEqual(card_size, layout.image_size)

@@ -7,6 +7,10 @@ are the same job: lay out a deterministic FAT32 volume with one contiguous file
 in its root and enough spare clusters for the target to write its own catalogue
 back.
 
+The card is FAT32 and the file inside it is a raw sector image, so nothing here
+is specific to one machine. Only the names are: the volume is labelled
+``ATARI FORGE`` and the file is ``ATARI.IMG``.
+
 Nothing here needs `mkfs`, a loop device or root. The layout is computed and
 written directly, which is what makes it reproducible: the same input always
 produces byte-identical output, so a card can be compared against a previous
@@ -62,14 +66,14 @@ def _geometry(file_size: int) -> tuple[int, int, int, int]:
     return file_clusters, cluster_count, fat_sectors, total_sectors
 
 
-def build_hdf_card(hdf_path: Path, destination: Path) -> FatFileLayout:
-    """Build a deterministic FAT32 card holding one contiguous ``ATARI.HDF``.
+def build_image_card(image_path: Path, destination: Path) -> FatFileLayout:
+    """Build a deterministic FAT32 card holding one contiguous ``ATARI.IMG``.
 
     The file is written as one unbroken run of clusters, with spare clusters
     left after it so the target can write its own catalogue changes back. No
     mount privileges or host filesystem tools are required.
     """
-    file_size = hdf_path.stat().st_size
+    file_size = image_path.stat().st_size
     if file_size <= 0 or file_size > 0xFFFFFFFF:
         raise FatMediaError("The image must contain between 1 byte and 4 GiB minus one byte.")
     file_clusters, cluster_count, fat_sectors, total_sectors = _geometry(file_size)
@@ -125,7 +129,7 @@ def build_hdf_card(hdf_path: Path, destination: Path) -> FatFileLayout:
     file_entry = 32
     # An 8.3 directory entry is exactly eleven bytes: eight for the name and
     # three for the extension, both space-padded and with no separating dot.
-    root[file_entry : file_entry + 11] = b"ATARI   HDF"
+    root[file_entry : file_entry + 11] = b"ATARI   IMG"
     root[file_entry + 11] = 0x20
     struct.pack_into("<H", root, file_entry + 20, FIRST_FILE_CLUSTER >> 16)
     struct.pack_into("<H", root, file_entry + 26, FIRST_FILE_CLUSTER & 0xFFFF)
@@ -140,7 +144,7 @@ def build_hdf_card(hdf_path: Path, destination: Path) -> FatFileLayout:
         output.write(fat)
         output.write(fat)
         output.write(root)
-        with hdf_path.open("rb") as source:
+        with image_path.open("rb") as source:
             while block := source.read(1024 * 1024):
                 output.write(block)
         output.truncate(total_sectors * SECTOR_SIZE)
@@ -149,12 +153,12 @@ def build_hdf_card(hdf_path: Path, destination: Path) -> FatFileLayout:
     return FatFileLayout(total_sectors * SECTOR_SIZE, data_offset, file_size, file_clusters)
 
 
-def read_hdf_card(card_path: Path, layout: FatFileLayout) -> bytes:
+def read_image_card(card_path: Path, layout: FatFileLayout) -> bytes:
     with card_path.open("rb") as source:
         source.seek(layout.data_offset)
         data = source.read(layout.file_size)
     if len(data) != layout.file_size:
-        raise FatMediaError("The card no longer contains a complete ATARI.HDF file.")
+        raise FatMediaError("The card no longer contains a complete ATARI.IMG file.")
     return data
 
 
@@ -173,6 +177,6 @@ __all__ = [
     "FLASHFLOPPY_CONFIG",
     "FatFileLayout",
     "FatMediaError",
-    "build_hdf_card",
-    "read_hdf_card",
+    "build_image_card",
+    "read_image_card",
 ]
