@@ -154,7 +154,19 @@ class STXImage:
 
     @property
     def track_count(self) -> int:
+        """Every track the capture holds, including any beyond the data area."""
         return max((item.track for item in self.tracks), default=-1) + 1
+
+    @property
+    def data_track_count(self) -> int:
+        """The tracks that carry sectors, which is what the layout is.
+
+        A protected disk is commonly captured past the eighty tracks a drive
+        formats, because the protection lives out there. Those extra tracks
+        hold no sectors, so counting them would inflate the sector image and
+        misplace every sector after the first.
+        """
+        return max((item.track for item in self.tracks if item.sectors), default=-1) + 1
 
 
 @dataclass
@@ -281,19 +293,46 @@ def parse_stx(data: bytes) -> STXImage:
 
 
 def _sectors_per_track(image: STXImage) -> int:
-    """Settle the layout: the boot sector first, the commonest count second."""
+    """Settle the layout from the capture, not from what the disk claims.
+
+    A capture records what the head actually read, so the commonest number of
+    sectors across the tracks that carry any is the layout. The parameter
+    block in the boot sector is only consulted to break a tie between two
+    equally common counts, and never to overrule the disk.
+
+    That order matters here. A protected disk often carries a parameter block
+    that does not describe it: the loader does not go through GEMDOS, so the
+    figures in the boot sector were never required to be true. Trusting them
+    produced a sector image of a size no real drive ever wrote, which no
+    filing system could then read.
+    """
+    counts = Counter(len(track.sectors) for track in image.tracks if track.sectors)
+    if not counts:
+        raise STXError("The capture holds no sectors at all.")
+    ranked = counts.most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        for track in image.tracks:
+            if track.track or track.side:
+                continue
+            for sector in track.sectors:
+                if sector.number == 1 and sector.readable:
+                    declared = geometry_for_boot_sector(sector.data or b"")
+                    if declared is not None and declared.sectors in counts:
+                        return declared.sectors
+    return ranked[0][0]
+
+
+def _declared_sectors_per_track(image: STXImage) -> int | None:
+    """What the boot sector claims, so a disagreement can be reported."""
     for track in image.tracks:
         if track.track or track.side:
             continue
         for sector in track.sectors:
             if sector.number == 1 and sector.readable:
                 declared = geometry_for_boot_sector(sector.data or b"")
-                if declared is not None and declared.sides == image.sides:
+                if declared is not None:
                     return declared.sectors
-    counts = Counter(len(track.sectors) for track in image.tracks if track.sectors)
-    if not counts:
-        raise STXError("The capture holds no sectors at all.")
-    return counts.most_common(1)[0][0]
+    return None
 
 
 def _track_evidence(track: STXTrack, sectors_per_track: int) -> list[str]:
@@ -333,7 +372,7 @@ def decode_stx(data: bytes) -> STXDecode:
     image = parse_stx(data)
     sides = image.sides
     sectors_per_track = _sectors_per_track(image)
-    tracks = image.track_count
+    tracks = image.data_track_count
     if tracks == 0:
         raise STXError("The capture holds no tracks.")
     geometry = geometry_for_layout(tracks, sides, sectors_per_track)
@@ -377,6 +416,8 @@ def decode_stx(data: bytes) -> STXDecode:
             }
         )
     protected_tracks = [row for row in report_tracks if row["evidence"]]
+    extra_tracks = image.track_count - tracks
+    declared_spt = _declared_sectors_per_track(image)
     protection = {
         "protected": bool(protected_tracks) or bool(unreadable),
         "sectorsRecovered": recovered,
@@ -384,12 +425,25 @@ def decode_stx(data: bytes) -> STXDecode:
         "unreadableSectors": len(unreadable),
         "fuzzyBytes": fuzzy_total,
         "protectedTracks": len(protected_tracks),
+        "extraTracks": extra_tracks,
+        "declaredSectorsPerTrack": declared_spt,
         "tracks": report_tracks,
     }
     warnings = [
         f"Read from a Pasti capture (revision {image.revision}): {recovered:,} of "
         f"{geometry.total_sectors:,} sectors recovered as {geometry.label}."
     ]
+    if extra_tracks:
+        warnings.append(
+            f"{extra_tracks} track(s) past the data area hold no sectors and were "
+            "left out of the image. Protection is commonly written out there."
+        )
+    if declared_spt is not None and declared_spt != sectors_per_track:
+        warnings.append(
+            f"The parameter block claims {declared_spt} sectors per track and the "
+            f"capture holds {sectors_per_track}. The capture was believed, because "
+            "a disk that does not boot through GEMDOS need not describe itself."
+        )
     if unreadable:
         warnings.append(
             f"{len(unreadable)} sector(s) were unreadable on the original disk and are blank here."
