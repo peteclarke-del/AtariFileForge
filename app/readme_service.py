@@ -4,7 +4,7 @@ A saved image is only useful if the person who opens the archive next year can
 tell what it is. This module writes that: what the image holds, how it is
 shaped, what the catalogue contains, which checksums it was saved with, and
 which TOS releases can use it. It reads through the disk service rather than
-from the raw sectors, so the README describes exactly what the workbench
+from the raw sectors, so the README describes exactly what the application
 showed rather than a second, possibly disagreeing, decode.
 """
 
@@ -390,7 +390,7 @@ def build_download_readme(
             "An ST or STE TOS is 192 KiB or 256 KiB, a TT or Falcon TOS is 512 KiB, and a cartridge is up to 128 KiB. Test an edited ROM in Hatari or on a spare programmable device before fitting it to valuable hardware.",
             "A release, country, video standard and mapped base address are decoded from the TOS header at the start of the image. Printable strings and plausible modules remain evidence rather than invented files or a guarantee of compatibility.",
             "The programmed-byte count means bytes that differ from the configured erased value. It is not filesystem free space. File offsets refer to the complete image; mapped addresses refer to the configured target window.",
-            "`ROM-project.json` holds notes, symbols and analysed regions. It is workbench metadata and is not programmed into the ROM device.",
+            "`ROM-project.json` holds notes, symbols and analysed regions. It is Atari File Forge metadata and is not programmed into the ROM device.",
             "Programmer export does not rewrite the logical ROM. It applies padding or mirroring, optional adjacent-byte and 16-bit word swaps, address-line swaps, then one, two or four physical byte lanes to the programmer download.",
             "Exact ROM identities are keyed by complete SHA-256. Different padding, a one-byte edit or a concatenated bank set is a different identity even when the visible title matches.",
         ))
@@ -399,7 +399,7 @@ def build_download_readme(
             "",
             "This is a partitioned hard drive. Each partition is an ordinary "
             "GEMDOS volume, mounted at the drive letter its position in the "
-            "table gives it, and is browsed by opening it in the workbench.",
+            "table gives it, and is browsed by opening it in Atari File Forge.",
             "",
             *_partition_catalogue(service, session),
         ))
