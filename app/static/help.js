@@ -754,37 +754,27 @@
               </ol>
             </div>
             <div class="help-task">
-              <h4>Copy several floppies onto a hard disk</h4>
+              <h4>Copy a folder of files onto a volume</h4>
               <ol>
-                <li>Open the destination partition and navigate to the folder that will hold the software.</li>
-                <li>Select one or more floppy images in another pane, or use <strong>File &rarr; Insert File</strong> and select several from the host.</li>
-                <li>Each non-empty disk becomes a folder named from its volume label. Review and edit the parent group folders; names such as <code>DISKS1</code> are suggestions, not fixed names.</li>
-                <li>If shortened names would clash, keep the default unique <code>DISK0000</code> naming scheme or review the highlighted names manually.</li>
-                <li>The preflight keeps naming and parent groups on the left. Review or edit the dense disk-to-folder table on the right; its rows scroll without moving the Copy button.</li>
-                <li>If a formatted but empty disk is found, choose <strong>Skip this disk and continue</strong> or <strong>Abort bulk copy</strong>. The dialog names the image and its volume label.</li>
-                <li>Watch the foreground progress dialog. If interrupted, use the retry path to skip items already completed in that dialog.</li>
+                <li>Open the destination volume and navigate to the folder that will hold the files.</li>
+                <li>Drag a folder onto the pane, or choose <strong>File &rarr; Insert Folder &amp; Contents</strong> and select it.</li>
+                <li>Read the cross-format review. It lists every proposed change before a byte is written, with each host name beside the GEMDOS name it will be stored under.</li>
+                <li>Findings are the changes that lose something: a name cut to eight characters, a forbidden character replaced, a datestamp outside the range a FAT directory can hold, or two names that collide once shortened. Turning a lower-case name into an upper-case one is not a finding, because GEMDOS stores every name that way and compares without regard to case.</li>
+                <li>Export the review as JSON or Markdown if you want a record of it, then continue.</li>
+                <li>Choose whether to recreate the host folders under the current GEMDOS folder or place every file directly in it.</li>
+                <li>A file already on the volume is left alone unless you tick <strong>Replace ordinary files that already have the same target path</strong>.</li>
               </ol>
             </div>
-            <figure><img src="/help/copy-name-preflight.png" alt="Bulk copy preflight offering generic DISK0000 names or manual review of shortened GEMDOS names"><figcaption>The naming choice appears only when the complete preflight finds names that would clash after shortening to eight characters. Generic names are selected by default.</figcaption></figure>
+            <figure><img src="/help/copy-name-preflight.png" alt="Cross-format review listing each host filename beside the GEMDOS name it will be stored under"><figcaption>Nothing is written until the review has been read. Every proposed change names its source and its target; the findings beneath list only the changes that lose something.</figcaption></figure>
+            <figure><img src="/help/destination-conflict.png" alt="Folder import dialog choosing between recreating the host folder tree and placing every file in the current folder"><figcaption>The host folder tree is either recreated under the current folder or ignored. A file already on the volume is never overwritten unless replacement is asked for.</figcaption></figure>
             <div class="help-task">
-              <h4>Resolve shortened-name collisions before copying</h4>
+              <h4>Put several floppies onto a hard drive</h4>
               <ol>
-                <li>The preflight checks every proposed leaf name case-insensitively within its destination parent.</li>
-                <li>If there is no collision, the normal safe names are retained and no naming-strategy choice is shown.</li>
-                <li>If shortening or sanitising creates a collision, choose <strong>Use generic unique names</strong> for <code>DISK0000</code>, <code>DISK0001</code> and so on.</li>
-                <li>Alternatively choose <strong>Review shortened names</strong>. Conflicting inputs are highlighted and the copy cannot start until every name is legal and unique in its parent.</li>
-                <li>Generic names make the outer disk folders unique. Each disk keeps its own folder, so two disks that share a file name cannot collide during extraction.</li>
-              </ol>
-            </div>
-            <figure><img src="/help/destination-conflict.png" alt="Populated destination folder conflict offering Abort, Keep existing and Replace"><figcaption>An existing empty folder is filled automatically. These choices appear only when the existing destination contains files or folders.</figcaption></figure>
-            <div class="help-task">
-              <h4>When a destination already exists</h4>
-              <ol>
-                <li>If the existing destination is a folder with no children, it is reused automatically without interrupting the batch.</li>
-                <li>If it is populated, choose <strong>Keep existing and continue</strong> to leave it untouched and skip that source disk.</li>
-                <li>Choose <strong>Replace and continue</strong> to remove the populated folder recursively, recopy the current disk, and continue.</li>
-                <li>Choose <strong>Abort bulk copy</strong> to preserve completed work and start no further disks.</li>
-                <li>A same-named file is never treated as an empty folder and is never overwritten silently.</li>
+                <li>A disk is not a folder of files, and copying one in as though it were loses the thing that made it a disk. Software written for a floppy is staged onto the drive instead, so that its own installer can be run against it.</li>
+                <li>Open the destination partition, then insert each floppy image with <strong>File &rarr; Insert File</strong> or by dragging it onto the pane.</li>
+                <li>Choose <strong>Install it onto this drive</strong>, then <strong>Stage it for installing later</strong>, and give every disk of a set the same title.</li>
+                <li>Each disk lands under <code>INSTALL\\STAGE</code> on the drive itself, so it is in front of you when the drive is started, whether in Hatari or in a real machine.</li>
+                <li>Come back with <strong>Tools &rarr; Staged disks</strong> to install a title into a folder of its own, or to discard it. The list is read off the drive, so a drive staged on another machine still reports what is waiting on it.</li>
               </ol>
             </div>
             <h4>Transfer behaviour at a glance</h4>
@@ -794,7 +784,7 @@
                 <tr><td>File</td><td>Any GEMDOS volume</td><td>Copied with its attribute byte and datestamp</td></tr>
                 <tr><td>Folder</td><td>Any GEMDOS volume</td><td>Recursive folder copy</td></tr>
                 <tr><td>Floppy image, MSA, DIM, HFE, SCP, STX or IPF</td><td>Hard disk partition</td><td>Extracted into a new folder; loader paths are checked</td></tr>
-                <tr><td>Several floppy images</td><td>Hard disk partition</td><td>One folder per non-empty disk, grouped if necessary</td></tr>
+                <tr><td>Several floppy images</td><td>Hard disk partition</td><td>Staged under one title, then installed into a folder of its own</td></tr>
                 <tr><td>CD image</td><td>Any writable volume</td><td>Read-only source; names are converted on the way in</td></tr>
                 <tr><td>Folder or file</td><td>Floppy image</td><td>Copied when the volume has the free clusters for it</td></tr>
               </tbody>
