@@ -99,6 +99,10 @@ INSTALL_RECORDS = frozenset("GFPY")
 #: it is recognised but never proposed as the thing that starts a title.
 ACCESSORY = "ACC"
 
+#: What a desktop record's last field has to look like before it is read as a
+#: path rather than as one of the record's own leading numbers.
+_NAMES_A_FILE = re.compile(r"^(?:[A-Za-z]:|.*[\\*?.])")
+
 
 def _clean_title(value: str) -> str:
     value = re.sub(r"[_-]+", " ", value or "")
@@ -181,11 +185,14 @@ def desktop_installed_programs(text: str) -> list[str]:
     for line in re.split(r"\r\n|\r|\n", str(text or "")):
         if len(line) < 2 or line[0] != "#" or line[1] not in INSTALL_RECORDS:
             continue
-        head = line.split("@", 1)[0].split(None, 4)
-        if len(head) <= 4:
+        # The leading numbers differ between the two spellings of the file, so
+        # the path is taken as the last thing before the first ``@``. A GEMDOS
+        # name can never contain a space, which is what makes that safe.
+        head = line.split("@", 1)[0].split()
+        if len(head) < 3:
             continue
-        path = head[4].strip().upper()
-        if not path or "*" in path or "?" in path:
+        path = head[-1].strip().upper()
+        if "*" in path or "?" in path or not _NAMES_A_FILE.match(path):
             continue
         found.append(atari_paths.leaf(path.split(":", 1)[-1]) or path)
     return found

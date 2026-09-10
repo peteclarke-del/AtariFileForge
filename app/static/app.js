@@ -5390,7 +5390,11 @@ function driveSoftwareFindingMarkup(finding) {
 
 function showDriveSoftwareAudit(index) {
   const pane = panes[index];
-  if (!paneAcceptsInstall(pane)) {
+  //: The first pass reads and the repair writes, so a read-only volume on a
+  //: hard drive is still worth checking; the repair is what would be refused.
+  const auditable = paneAcceptsInstall(pane)
+    || (pane?.image?.kind === "gemdos" && Boolean(pane.image.hardDisk));
+  if (!auditable) {
     toast("Installed software auditing is available only for a volume on a hard drive.", true);
     return;
   }

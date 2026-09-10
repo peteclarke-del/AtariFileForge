@@ -148,6 +148,15 @@ class DesktopConfigurationTests(unittest.TestCase):
         self.assertEqual(record_path(record), "D:\\GAMES\\X\\X.PRG")
         self.assertTrue(is_installed_application(record))
 
+    def test_a_desktop_icon_record_names_its_file_despite_the_blank_drive_field(self) -> None:
+        """``#X`` writes four numbers and a drive-letter field that may be a space."""
+        self.assertEqual(
+            record_path("#X 02 01 04 FF   C:\\GAMES.TXT@ GAMES.TXT@ "), "C:\\GAMES.TXT"
+        )
+
+    def test_a_record_that_names_only_its_own_numbers_names_nothing(self) -> None:
+        self.assertEqual(record_path("#N FF 04 000 @ *.*@ @ "), "")
+
     def test_an_extension_association_is_not_an_installed_application(self) -> None:
         """``*.PRG`` tells GEM how to run programs; it installs none of them."""
         self.assertFalse(is_installed_application("#G 03 FF 000 *.PRG@ @ @ "))

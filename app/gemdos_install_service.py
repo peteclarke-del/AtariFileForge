@@ -36,6 +36,7 @@ from .disk_identity import (
     extension_of,
     program_header,
 )
+from .drive_preparation import record_path
 from .errors import DiskError
 from .image_session import ImageSession
 
@@ -55,21 +56,9 @@ def desktop_record_paths(text: str) -> list[tuple[str, str]]:
     """
     found: list[tuple[str, str]] = []
     for line in re.split(r"\r\n|\r|\n", str(text or "")):
-        if len(line) < 2 or line[0] != "#":
+        if len(line) < 2 or line[0] != "#" or line[1] not in (INSTALL_RECORDS | {"X"}):
             continue
-        # An install record names its program after three numbers; a desktop
-        # icon names its file after four numbers and a drive-letter field that
-        # may be a space, so the two are split to different depths.
-        if line[1] in INSTALL_RECORDS:
-            fields = 4
-        elif line[1] == "X":
-            fields = 5
-        else:
-            continue
-        head = line.split("@", 1)[0].split(None, fields)
-        if len(head) <= fields:
-            continue
-        path = head[fields].strip()
+        path = record_path(line)
         if not path or "*" in path or "?" in path:
             continue
         found.append((line, path))
