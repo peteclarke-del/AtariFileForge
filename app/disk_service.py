@@ -2869,7 +2869,7 @@ class DiskService(
             raise
         return target
 
-    def compact(self, session: ImageSession, order: str | None = None) -> None:
+    def compact(self, session: ImageSession) -> None:
         """Defragment a volume so its files occupy consecutive clusters.
 
         FAT allows a file's clusters to be anywhere, and a disk written and
@@ -2877,7 +2877,6 @@ class DiskService(
         costs a real machine seek time on every read, so the volume is rewritten
         with each file's clusters consecutive.
         """
-        del order
         self.require_writable_geometry(session)
         if not self.mountable(session):
             raise DiskError("Only a mounted GEMDOS volume can be defragmented.")
