@@ -131,14 +131,26 @@ def _safe_leaf(value: str, fallback: str = "DISK") -> str:
     return stem or fallback
 
 
+#: Everything but a letter, a digit and the punctuation GEMDOS allows in a name.
+_NOT_IN_A_GEMDOS_NAME = re.compile(r"[^A-Za-z0-9_$#&@!%()~^{}\'`-]+")
+
+
 def _gemdos_leaf(value: str, fallback: str = "FILE") -> str:
-    """Upper-case a GEMDOS name and keep it inside 8.3, as TOS stores it."""
-    cleaned = re.sub(r"[^A-Za-z0-9_$#&@!%()~^{}'`-]+", "_", str(value or "")).strip("_")
-    base, _dot, extension = cleaned.rpartition(".")
-    if not _dot:
-        base, extension = cleaned, ""
-    base = (base or fallback)[:8].upper()
-    extension = extension[:3].upper()
+    """Upper-case a GEMDOS name and keep it inside 8.3, as TOS stores it.
+
+    The full stop is split off before the rest is cleaned, because it
+    separates the name from its extension rather than being part of either.
+    """
+    text = str(value or "").strip()
+    base, dot, extension = text.rpartition(".")
+    if not dot:
+        base, extension = text, ""
+
+    def clean(part: str) -> str:
+        return _NOT_IN_A_GEMDOS_NAME.sub("_", part).strip("_")
+
+    base = (clean(base) or fallback)[:8].upper()
+    extension = clean(extension)[:3].upper()
     return f"{base}.{extension}" if extension else base
 
 
@@ -496,7 +508,7 @@ def _instructions(session, target: str, options: dict) -> list[str]:
             "Point Hatari at it with --harddrive /path/to/GEMDOS-DRIVE, or paste the fragment from hatari.cfg in this package into your own hatari.cfg.",
             "Keep the names as they are: TOS sees eight characters and a three-character extension, upper case, and a longer host name is not visible to the machine.",
             "The AUTO folder keeps its name, so Hatari runs its programs at boot exactly as a real drive would.",
-            "Leave write protection on until the drive has been listed and read, then turn it off if the software needs to save.",
+            "The fragment sets the Hatari drive read-only. Leave it that way until the drive has been listed and read, then allow writes if the software needs to save.",
         ],
         "acsi-drive": [
             "Back up whatever the enclosure currently holds. The drive inside it is replaced wholesale.",

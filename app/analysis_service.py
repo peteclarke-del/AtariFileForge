@@ -234,13 +234,14 @@ def _walk(
 # ---------------------------------------------------------------------------
 # GEMDOS programs
 # ---------------------------------------------------------------------------
-def describe_program(data: bytes) -> dict | None:
+def describe_program(data: bytes, file_size: int | None = None) -> dict | None:
     """Decode a GEMDOS program header, or return ``None`` for anything else.
 
     The header is 28 bytes: the ``0x601A`` branch, big-endian text, data, BSS
     and symbol-table lengths, a reserved long, the ``_p_flags`` long and the
     absolute-relocation word. A file whose declared sections cannot fit inside
-    it is not a program, whatever its first word says.
+    it is not a program, whatever its first word says, so ``file_size`` is
+    given when only the header itself was read.
     """
     if len(data) < GEMDOS_HEADER_SIZE:
         return None
@@ -249,7 +250,8 @@ def describe_program(data: bytes) -> dict | None:
     )
     if magic != GEMDOS_MAGIC:
         return None
-    if GEMDOS_HEADER_SIZE + text + payload + symbols > max(len(data), GEMDOS_HEADER_SIZE):
+    declared = int(file_size if file_size is not None else len(data))
+    if GEMDOS_HEADER_SIZE + text + payload + symbols > max(declared, GEMDOS_HEADER_SIZE):
         return None
     return {
         "magic": magic,
@@ -336,8 +338,10 @@ def describe_boot_sector(sector: bytes) -> dict:
         return {"executable": False, "checksum": None, "loads": "", "reason": "short sector"}
     checksum = _word_sum(sector)
     executable = checksum == BOOT_CHECKSUM_MAGIC
-    execflg, ldmode, ssect, sectcnt = struct.unpack_from("<HHHH", sector, BS_EXECFLG)
-    load_address, fat_buffer = struct.unpack_from("<II", sector, BS_LDADDR)
+    # The BIOS parameter block is Intel-order because it is a DOS structure,
+    # but everything after it is read by 68000 code as native words.
+    execflg, ldmode, ssect, sectcnt = struct.unpack_from(">HHHH", sector, BS_EXECFLG)
+    load_address, fat_buffer = struct.unpack_from(">II", sector, BS_LDADDR)
     raw_name = sector[BS_FNAME : BS_FNAME + 11]
     base = raw_name[:8].decode("latin-1").strip()
     extension = raw_name[8:].decode("latin-1").strip()
@@ -678,7 +682,7 @@ def inspect_file(
     finally:
         exported.unlink(missing_ok=True)
     basic = decode_basic(preview)
-    program = describe_program(preview)
+    program = describe_program(preview, size)
     printable = sum(value in (9, 10, 13) or 32 <= value < 127 for value in preview)
     looks_text = bool(preview) and printable / len(preview) >= 0.82
     if basic:
@@ -1071,7 +1075,10 @@ def _gather_programs(service, session, entries, limit=64) -> tuple[list, dict]:
             continue
         inspected += 1
         try:
-            header = describe_program(_read_bytes(service, session, path, None, GEMDOS_HEADER_SIZE))
+            header = describe_program(
+                _read_bytes(service, session, path, None, GEMDOS_HEADER_SIZE),
+                _row_size(row),
+            )
         except OperationCancelled:
             raise
         except (DiskError, OSError):
