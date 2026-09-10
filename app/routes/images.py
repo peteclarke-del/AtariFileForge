@@ -73,12 +73,21 @@ def create_images_blueprint(
     @request_effect("lifecycle", "creating an image session")
     def create_image():
         data = payload()
+        # Each shape of media takes its own options, and the pane sends the
+        # group that belongs to the format it asked for. They are merged into
+        # one object here so the service has a single place to read them.
+        options: dict = {}
+        for group in ("rom", "hardDisk"):
+            if isinstance(data.get(group), dict):
+                options.update(data[group])
+        if data.get("bootable") is not None:
+            options["bootable"] = bool(data["bootable"])
         session = service.create_blank(
             data.get("format", "ds-720k"),
             data.get("title", "BLANK"),
             data.get("capacity"),
             data.get("targetHardware", "auto"),
-            options=data.get("rom") if isinstance(data.get("rom"), dict) else None,
+            options=options or None,
         )
         return jsonify(image=service.summary(session))
 
@@ -102,8 +111,15 @@ def create_images_blueprint(
                 "name": str(item.get("device") or item.get("name") or f"Partition {index}"),
                 "type": "partition",
                 "label": str(item.get("label") or ""),
+                # The three-letter identifier AHDI writes, or the two-digit
+                # MBR type code, is what a person recognises the partition by.
+                "identifier": str(item.get("id") or ""),
                 "id": str(item.get("id") or ""),
                 "typeCode": item.get("typeCode"),
+                "format": str(item.get("format") or ""),
+                # AHDI boots the first partition whose flag is set, so the
+                # only priority there is order.
+                "bootPriority": index if item.get("bootable") else None,
                 "length": int(item.get("sizeBytes") or 0),
                 "startSector": int(item.get("startSector") or 0),
                 "sizeSectors": int(item.get("sizeSectors") or 0),

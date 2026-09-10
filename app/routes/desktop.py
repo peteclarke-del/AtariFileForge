@@ -80,6 +80,18 @@ def _physical_media_details(service: DiskService, session) -> dict:
         "name": name,
         "format": media_format.label,
         "automaticVerification": media_format.automatic_verification,
+        # What a capture from this drive can be written as, and the shapes a
+        # sector capture can be told to decode. Both are listed here so the
+        # pane offers exactly what this build supports rather than a fixed
+        # menu that may not match.
+        "captureFormats": [
+            {"id": name, "label": image_format(f"{CAPTURE_STEM}{suffix}").label}
+            for name, suffix in PHYSICAL_READ_FORMATS.items()
+        ],
+        "geometries": [
+            {"id": item.identifier, "label": item.label}
+            for item in sorted(ATARI_GEOMETRIES.values(), key=lambda row: row.size)
+        ],
     }
 
 

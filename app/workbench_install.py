@@ -283,7 +283,7 @@ class WorkbenchInstallMixin:
         for match in matches:
             match["chosen"] = chosen.get(match["role"], {}).get("imageId") == match["imageId"]
         return {
-            "discs": matches,
+            "disks": matches,
             "chosen": {key: match["imageId"] for key, match in chosen.items()},
             "version": release,
             "versions": available_versions(matches),
@@ -362,7 +362,7 @@ class WorkbenchInstallMixin:
         report("Installed", len(ordered), len(ordered))
         return {
             "version": version,
-            "discs": installed,
+            "disks": installed,
             "copied": total_copied,
             "skipped": total_skipped,
             "drawers": drawers,

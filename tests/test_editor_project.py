@@ -39,18 +39,18 @@ class EditorProjectTests(unittest.TestCase):
         session = SimpleNamespace(
             lock=RLock(),
             editor_projects={
-                "-|GAMES/FRAK/DESKTOP.INF": {"notes": "loader"},
+                "-|GAMES\\FRAK\\DESKTOP.INF": {"notes": "loader"},
                 "-|OTHER.TXT": {"notes": "leave me"},
             },
         )
         changed = service.move_editor_projects(
             session,
-            [{"source": "GAMES/FRAK", "destination": "ARCADE/FRAK"}],
+            [{"source": "GAMES\\FRAK", "destination": "ARCADE\\FRAK"}],
             None,
         )
         self.assertEqual(changed, 1)
-        self.assertIn("-|ARCADE/FRAK/DESKTOP.INF", session.editor_projects)
-        self.assertNotIn("-|GAMES/FRAK/DESKTOP.INF", session.editor_projects)
+        self.assertIn("-|ARCADE\\FRAK\\DESKTOP.INF", session.editor_projects)
+        self.assertNotIn("-|GAMES\\FRAK\\DESKTOP.INF", session.editor_projects)
         self.assertIn("-|OTHER.TXT", session.editor_projects)
 
     def test_annotations_are_removed_with_deleted_directory(self):
