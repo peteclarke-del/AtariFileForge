@@ -74,18 +74,18 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
       throw new Error("No machine-code cheat candidate was rendered");
     }
     const sourceBounds = await editor.locator(".disassembly-source").boundingBox();
-    const panelBounds = await editor.locator(".code-intelligence-drawer-docked").boundingBox();
+    const panelBounds = await editor.locator(".code-intelligence-panel-docked").boundingBox();
     if (!sourceBounds || !panelBounds || panelBounds.x <= sourceBounds.x || panelBounds.height < sourceBounds.height * 0.75) {
       throw new Error(`Cheat report did not dock to the right at editor height: ${JSON.stringify({ sourceBounds, panelBounds })}`);
     }
-    const splitter = editor.locator(".code-editor-drawer-splitter");
+    const splitter = editor.locator(".code-editor-panel-splitter");
     const splitterBounds = await splitter.boundingBox();
     if (!splitterBounds) throw new Error("The cheat-panel splitter is not visible");
     await page.mouse.move(splitterBounds.x + splitterBounds.width / 2, splitterBounds.y + splitterBounds.height / 2);
     await page.mouse.down();
     await page.mouse.move(splitterBounds.x - 60, splitterBounds.y + splitterBounds.height / 2, { steps: 4 });
     await page.mouse.up();
-    const resizedPanel = await editor.locator(".code-intelligence-drawer-docked").boundingBox();
+    const resizedPanel = await editor.locator(".code-intelligence-panel-docked").boundingBox();
     if (!resizedPanel || resizedPanel.width < panelBounds.width + 40) {
       throw new Error(`Dragging the splitter did not enlarge the cheat panel: ${JSON.stringify({ panelBounds, resizedPanel })}`);
     }
