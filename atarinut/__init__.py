@@ -25,7 +25,8 @@ depends on:
 ``atarinut.file``
     ``Access``, ``AtariMeta`` and the attribute and datestamp helpers.
 ``atarinut.basic``
-    ST BASIC tokenising and detokenising.
+    GFA BASIC, STOS BASIC and Atari ST BASIC: recognition, listing and, where
+    a dialect can be written back faithfully, tokenising.
 """
 
 from .version import __version__
