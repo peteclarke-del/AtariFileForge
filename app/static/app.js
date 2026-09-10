@@ -8452,8 +8452,25 @@ window.AtariDesktopHost = Object.freeze({
       toast(`Could not display ${image.name}: ${error.message}`, true);
     }
   },
-  showError(message) {
+  showError(message, paneIndex = null) {
     toast(String(message || "The Linux desktop operation failed."), true);
+    // A pane was put into the opening state before the work started, and
+    // nothing else takes it out again. Left alone it goes on saying it is
+    // working on an image that was refused seconds ago, which reads as the
+    // application having hung rather than having answered.
+    const stopWaiting = index => {
+      const pane = panes[index];
+      if (!pane || !pane.loading || pane.image) return;
+      setLoading(index, false);
+    };
+    if (Number.isInteger(paneIndex)) {
+      stopWaiting(paneIndex);
+      return;
+    }
+    // Without a pane number, every pane still waiting for an image it has
+    // not got is waiting for this. An open that is genuinely still running
+    // has an image by now, or is about to replace this state itself.
+    panes.forEach((_pane, index) => stopWaiting(index));
   },
 });
 

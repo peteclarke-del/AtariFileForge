@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 import tempfile
@@ -9,6 +10,7 @@ from desktop.__main__ import (
     _close_chooser_later,
     _desktop_message_text,
     _folder_selection,
+    _open_error_script,
 )
 
 
@@ -156,6 +158,42 @@ class NativeChooserTeardownTests(unittest.TestCase):
         callback, args = glib.deferred[0]
         callback(*args)
         self.assertTrue(chooser.destroyed)
+
+
+class FailedOpenTests(unittest.TestCase):
+    """A refused image must not leave a pane saying it is still working.
+
+    The pane is put into the opening state before the work starts, and
+    nothing else takes it out again. A failure that does not name the pane
+    leaves the workspace reporting progress on an image that was refused
+    seconds ago, which reads as the application having hung rather than
+    having answered.
+    """
+
+    def test_a_failure_names_the_pane_it_left_waiting(self) -> None:
+        script = _open_error_script("EasyAraMint 2.zip", "no image inside", 2)
+        self.assertIn("EasyAraMint 2.zip", script)
+        self.assertIn("no image inside", script)
+        self.assertTrue(script.rstrip().endswith(", 2);"), script)
+
+    def test_a_failure_with_no_pane_says_so_rather_than_guessing(self) -> None:
+        script = _open_error_script("a dropped disk", "not readable", None)
+        self.assertTrue(script.rstrip().endswith(", null);"), script)
+
+    def test_a_name_carrying_quotes_stays_inside_the_string(self) -> None:
+        """A filename is data. It reaches the page as one string argument.
+
+        The name is somebody's file on disk, so it can hold quotes and
+        semicolons. What matters is that the emitted call still has exactly
+        two arguments and that the first one reads back as the message that
+        was meant, rather than escaping into code.
+        """
+        awkward = 'od"d\'; alert(1);//'
+        script = _open_error_script(awkward, "refused", 0)
+        prefix = "window.AtariDesktopHost.showError("
+        self.assertTrue(script.startswith(prefix))
+        arguments = json.loads("[" + script[len(prefix):].rstrip().removesuffix(");") + "]")
+        self.assertEqual(arguments, [f"Could not open {awkward}: refused", 0])
 
 
 if __name__ == "__main__":
