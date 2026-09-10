@@ -2,25 +2,25 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from .ffs_capabilities import capabilities_from_mount
+from .gemdos_capabilities import capabilities_from_mount
 from .errors import DiskError
 from .image_session import ImageSession
 
 
 class FilesystemDiskMixin:
-    """Trusted FFS and Kickstart ROM mounts plus Kickstart ROM filesystem metadata edits."""
+    """Trusted GEMDOS and TOS ROM mounts, plus the TOS ROM's own identity."""
 
     @staticmethod
     def mountable(session: ImageSession) -> bool:
         """Whether this session currently addresses one GEMDOS volume.
 
-        A floppy or single-volume image always does. A partitioned hard drive
-        does once a partition has been chosen; until then the pane is showing
-        the drive's partition table, which is not a volume.
+        A floppy image or a bare volume image always does. A partitioned hard
+        disk does once a partition has been chosen; until then the pane is
+        showing the drive's partition table, which is not a volume.
         """
-        if session.kind in {"ffs", "ofs"}:
+        if session.kind == "gemdos":
             return True
-        return session.kind == "hdf" and session.partition is not None
+        return session.kind == "hd" and session.partition is not None
 
     @staticmethod
     def require_mounted_volume(session: ImageSession) -> None:
@@ -32,38 +32,35 @@ class FilesystemDiskMixin:
         attempt is made, rather than letting a caller reach the raw drive and
         fail later on a mount that has no file operations at all.
         """
-        if session.kind == "hdf" and session.partition is None:
-            raise DiskError("Choose a partition on this hard drive first.")
+        if session.kind == "hd" and session.partition is None:
+            raise DiskError("Choose a partition on this hard disk first.")
 
     @contextmanager
-    def ffs_mount(self, session: ImageSession):
-        """Open an identified FFS image without probing or copying it again.
+    def gemdos_mount(self, session: ImageSession, *, writable: bool = True):
+        """Open an identified GEMDOS volume without probing or copying it again.
 
-        A partition of a hard drive is an ordinary GEMDOS volume that starts
-        part way into a larger file, so it is handed back through the same
-        contract and every caller downstream stays unaware of the difference.
+        A partition of a hard disk is an ordinary FAT volume that starts part
+        way into a larger file, so it is handed back through the same contract
+        and every caller downstream stays unaware of the difference.
         """
-        if session.kind == "hdf":
+        if session.kind == "hd":
             if session.partition is None:
-                raise DiskError("Choose a partition on this hard drive first.")
-            with self.rdb_mount(session) as mount:
+                raise DiskError("Choose a partition on this hard disk first.")
+            with self.partition_mount(session, writable=writable) as mount:
                 yield mount
             return
-        if session.kind not in {"ffs", "ofs"}:
-            raise DiskError("This operation requires an GEMDOS volume.")
+        if session.kind != "gemdos":
+            raise DiskError("This operation requires a GEMDOS volume.")
         try:
-            from atarinut.filesystem import create_filesystem, geometry_from_dsc, reader_for
+            from atarinut.filesystem import create_filesystem, reader_for
         except ImportError as exc:
-            raise DiskError("The Atarinut FFS filesystem API is unavailable.") from exc
+            raise DiskError("The Atarinut GEMDOS filesystem API is unavailable.") from exc
 
         with session.lock:
-            reader = reader_for(session.path, writable=True)
+            reader = reader_for(session.path, writable=writable)
             mount = None
             try:
-                geometry = None
-                if session.descriptor_path and session.descriptor_path.is_file():
-                    geometry = geometry_from_dsc(session.descriptor_path.read_bytes())
-                mount = create_filesystem("gemdos").open(reader, geometry)
+                mount = create_filesystem("gemdos").open(reader)
                 yield mount
             except DiskError:
                 raise
@@ -71,20 +68,12 @@ class FilesystemDiskMixin:
                 raise DiskError(self._friendly_engine_error(str(exc))) from exc
             finally:
                 if mount is not None:
-                    ffs = getattr(mount, "_ffs", None)
-                    unified = getattr(ffs, "_d", None)
-                    disc_image = getattr(unified, "_disc_image", None)
-                    try:
-                        close_ffs = getattr(ffs, "close", None)
-                        if callable(close_ffs):
-                            close_ffs()
-                    finally:
-                        close_disc = getattr(disc_image, "close", None)
-                        if callable(close_disc):
-                            close_disc()
+                    close = getattr(mount, "close", None)
+                    if callable(close):
+                        close()
                 reader.close()
 
-    def refresh_ffs_capabilities(self, session: ImageSession) -> dict:
+    def refresh_gemdos_capabilities(self, session: ImageSession) -> dict:
         """Cache the mounted volume's format and its real name limits.
 
         A volume that will not mount is still worth opening: its bytes can be
@@ -92,43 +81,55 @@ class FilesystemDiskMixin:
         therefore records empty capabilities and a warning rather than making
         the whole session unopenable.
         """
-        if session.kind not in {"ffs", "ofs"}:
-            session.ffs_capabilities = {}
+        if not self.mountable(session):
+            session.gemdos_capabilities = {}
             return {}
         try:
-            with self.ffs_mount(session) as mount:
+            with self.gemdos_mount(session, writable=False) as mount:
                 capabilities = capabilities_from_mount(mount).to_dict()
         except (DiskError, TypeError) as exc:
-            session.ffs_capabilities = {}
+            session.gemdos_capabilities = {}
             self._append_warning(
                 session,
                 f"The filing-system capabilities could not be read: {exc}",
             )
             return {}
-        session.ffs_capabilities = {
+        session.gemdos_capabilities = {
             "format": capabilities["format"],
-            "map": capabilities["map"],
-            "directories": capabilities["directories"],
+            "fatBits": capabilities["fat_bits"],
             "nameLimit": capabilities["name_limit"],
+            "nameForm": capabilities["name_form"],
             "directoryEntryLimit": capabilities["directory_entry_limit"],
+            "caseInsensitive": capabilities["case_insensitive"],
+            "labelLimit": capabilities["label_limit"],
         }
-        return session.ffs_capabilities
+        return session.gemdos_capabilities
 
     @contextmanager
-    def kickfs_mount(self, session: ImageSession, *, writable: bool = False):
-        """Open an identified Kickstart ROM without probing it again."""
-        if session.kind != "kickfs":
-            raise DiskError("This operation requires an Atari Kickstart ROM.")
+    def tosrom_mount(self, session: ImageSession, *, writable: bool = False):
+        """Open an identified TOS ROM without probing it again.
+
+        A TOS ROM is read-only in every sense that matters here: its segments
+        are addressed by the machine's own reset vector, and moving one would
+        break the absolute addresses the rest of the image is linked against.
+        ``writable`` is therefore refused rather than honoured.
+        """
+        if session.kind != "tosrom":
+            raise DiskError("This operation requires an Atari TOS ROM.")
         if writable:
-            self.require_writable_geometry(session)
+            raise DiskError(
+                "A TOS ROM is read-only. Its segments sit at the addresses the "
+                "machine's reset vector expects, so they cannot be rewritten in "
+                "place."
+            )
         try:
             from atarinut.filesystem import create_filesystem, reader_for
         except ImportError as exc:
-            raise DiskError("The Atarinut Kickstart ROM filesystem API is unavailable.") from exc
+            raise DiskError("The Atarinut TOS ROM API is unavailable.") from exc
         with session.lock:
-            reader = reader_for(session.path, writable=writable)
+            reader = reader_for(session.path, writable=False)
             try:
-                mount = create_filesystem("kickfs").open(reader, None)
+                mount = create_filesystem("tosrom").open(reader, None)
                 yield mount
             except DiskError:
                 raise
@@ -137,85 +138,42 @@ class FilesystemDiskMixin:
             finally:
                 reader.close()
 
-    def kickfs_details(self, session: ImageSession) -> dict:
-        """Return decoded Kickstart ROM identity, safety and capacity information."""
+    def tosrom_details(self, session: ImageSession) -> dict:
+        """Return the decoded identity of a TOS ROM and why it cannot be written.
+
+        A TOS ROM is not a filing system with free space in it. It is one
+        linked image with a header naming its release, its build date and the
+        addresses it expects to sit at, followed by the operating system
+        itself. Capacity is therefore reported as unavailable with the reason
+        rather than as a total and a remainder that would mean nothing.
+        """
         try:
-            from atarinut.kickfs.kickfs import KICKFS
-            kickfs = KICKFS.from_bytes(session.path.read_bytes())
+            from atarinut.tosrom import TOSRom
+        except ImportError as exc:  # pragma: no cover - packaging failure
+            raise DiskError("The Atarinut TOS ROM API is unavailable.") from exc
+        try:
+            rom = TOSRom.from_bytes(session.path.read_bytes())
         except Exception as exc:
-            raise DiskError(f"The Kickstart ROM catalogue is invalid: {exc}") from exc
-        warnings = []
-        if not kickfs.is_complete:
+            raise DiskError(f"The TOS ROM header is invalid: {exc}") from exc
+        segments = list(rom.data_files)
+        warnings: list[str] = []
+        if not rom.is_complete:
             warnings.append(
-                "The Kickstart ROM block chain has no end marker. It may be truncated or one part of a multi-ROM set."
+                "This TOS ROM is shorter than its header declares. It may be "
+                "truncated, or one half of a two-chip set."
             )
-        if kickfs.is_complete and not kickfs.is_plain:
-            warnings.append(
-                "Executable or opaque content follows the Kickstart ROM catalogue, so this composite image is read-only."
-            )
-        fs_end = int(getattr(kickfs, "_fs_end", session.path.stat().st_size))
-        total = session.path.stat().st_size
         return {
-            "title": kickfs.title,
-            "headerTitle": kickfs.header_title,
-            "version": kickfs.version,
-            "copyright": kickfs.copyright,
-            "romType": kickfs.rom_type,
-            "dataOffset": kickfs.data_offset,
-            "fileCount": len(kickfs.data_files),
-            "complete": kickfs.is_complete,
-            "plain": kickfs.is_plain,
-            "readOnly": not kickfs.is_complete or not kickfs.is_plain,
+            "title": rom.title,
+            "headerTitle": rom.release,
+            "version": rom.version,
+            "copyright": rom.copyright,
+            "romType": rom.rom_type,
+            "fileCount": len(segments),
+            "complete": rom.is_complete,
+            "readOnly": True,
             "capacity": {
-                "available": kickfs.is_complete and kickfs.is_plain,
-                "unit": "bytes",
-                "total": total,
-                "used": min(total, fs_end),
-                "free": max(0, total - fs_end),
-                "reason": "Composite and multi-ROM images cannot report safely writable tail space."
-                if not (kickfs.is_complete and kickfs.is_plain) else None,
+                "available": False,
+                "reason": "A TOS ROM is read-only",
             },
             "warnings": warnings,
         }
-
-    def set_kickfs_properties(
-        self,
-        session: ImageSession,
-        *,
-        title: str,
-        version: int,
-        copyright_text: str,
-    ) -> None:
-        """Update a ROM's version word and identification string as one edit.
-
-        A ROM's module *names* are fixed by its resident tags, so ``title`` is
-        accepted and reported back but never written: renaming a module would
-        move the pointer the ROM scan follows. The version word and the
-        identification string are both rewritten in place, and the reset
-        checksum is repaired afterwards so the ROM still starts.
-        """
-        if session.kind != "kickfs":
-            raise DiskError("This image does not contain a readable Kickstart ROM.")
-        copyright_text = str(copyright_text or "").strip()
-        if not copyright_text:
-            raise DiskError("A resident identification string cannot be empty.")
-        if len(copyright_text) > 120:
-            raise DiskError(
-                "A resident identification string can contain at most 120 characters."
-            )
-        try:
-            version = int(version)
-        except (TypeError, ValueError) as exc:
-            raise DiskError("A ROM version must be from 0 to 65535.") from exc
-        if not 0 <= version <= 0xFFFF:
-            raise DiskError("A ROM version must be from 0 to 65535.")
-        original = session.path.read_bytes()
-        try:
-            from atarinut.kickfs.kickfs import set_copyright, set_version
-
-            data = set_version(original, version)
-            session.path.write_bytes(set_copyright(data, copyright_text))
-        except Exception as exc:
-            session.path.write_bytes(original)
-            raise DiskError(f"The ROM identity could not be updated: {exc}") from exc
-        self._mark_mutated(session)

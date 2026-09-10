@@ -7,7 +7,7 @@ from difflib import unified_diff
 from bisect import bisect_right
 from pathlib import Path
 
-from .atari_metadata import format_protection
+from .atari_metadata import format_attributes as format_protection
 from .checksum import sha256_bytes, sha256_path
 from .content_kind import (
     analyse_content,
