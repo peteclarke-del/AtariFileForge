@@ -234,14 +234,19 @@ def _detect_launcher(
     entries: list[dict],
     *,
     path: str,
-) -> tuple[dict | None, str, list[str], list[str]]:
+) -> tuple[dict | None, str, list[str], list[str], bool]:
     """Choose the file that starts this software, and say why.
 
     Returns the chosen entry, the directory it lives in relative to ``path``,
-    the evidence for the choice and anything worth warning about.
+    the evidence for the choice, anything worth warning about, and whether the
+    disk itself disagreed about which file starts it. That last one is what
+    separates a disk carrying a misnamed data file, which changes nothing, from
+    a disk carrying two equally good candidates, which nobody can settle from
+    the bytes alone.
     """
     evidence: list[str] = []
     warnings: list[str] = []
+    contested = False
 
     auto = _auto_programs(service, session, path)
     if auto:
@@ -255,7 +260,7 @@ def _detect_launcher(
                 f"{AUTO_DIRECTORY} holds {len(auto)} programs and TOS runs all of "
                 f"them in turn. {chosen['name']} is the first."
             )
-        return chosen, AUTO_DIRECTORY, evidence, warnings
+        return chosen, AUTO_DIRECTORY, evidence, warnings, contested
 
     by_name = {str(row.get("name", "")).upper(): row for row in entries}
     for configuration in DESKTOP_FILES:
@@ -273,11 +278,12 @@ def _detect_launcher(
                 "which is the disk's own record of what starts it"
             )
             if len(present) > 1:
+                contested = True
                 warnings.append(
                     f"{configuration} installs {len(present)} applications; "
                     f"{chosen['name']} is the first."
                 )
-            return chosen, "", evidence, warnings
+            return chosen, "", evidence, warnings, contested
         if installed:
             warnings.append(
                 f"{configuration} installs {', '.join(sorted(set(installed)))}, "
@@ -309,11 +315,12 @@ def _detect_launcher(
                 "headers and sizes rather than by their names"
             )
         if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+            contested = True
             warnings.append(
                 "Two programs on this disk load to the same size, so which one "
                 "starts the title cannot be told from the disk alone."
             )
-        return chosen, "", evidence, warnings
+        return chosen, "", evidence, warnings, contested
 
     basic = [
         row for row in entries
@@ -324,8 +331,9 @@ def _detect_launcher(
             f"{basic[0]['name']} is a saved ST BASIC program, and it is the only "
             "one on the disk; an interpreter loads it rather than TOS starting it"
         )
-        return basic[0], "", evidence, warnings
+        return basic[0], "", evidence, warnings, contested
     if len(basic) > 1:
+        contested = True
         warnings.append(
             f"{len(basic)} saved BASIC programs are on this disk, so which one is "
             "the title cannot be told from the disk alone."
@@ -334,7 +342,7 @@ def _detect_launcher(
         warnings.append("The disk is empty.")
     else:
         warnings.append("No single launch program could be identified.")
-    return None, "", evidence, warnings
+    return None, "", evidence, warnings, True
 
 
 def program_flags(
@@ -394,7 +402,7 @@ def analyse_directory(
     entries = [
         row for row in listing["entries"] if row.get("type") not in {"dir", "directory"}
     ]
-    chosen, sub_directory, evidence, warnings = _detect_launcher(
+    chosen, sub_directory, evidence, warnings, contested = _detect_launcher(
         service, session, entries, path=path
     )
     filename = str(chosen["name"]) if chosen else ""
@@ -425,7 +433,7 @@ def analyse_directory(
         confidence += 25
     if chosen:
         confidence += 45
-    if not warnings:
+    if not contested:
         confidence += 20
     if chosen and program_header(_read(service, session, atari_paths.join(path, sub_directory), filename)):
         confidence += 10
@@ -459,8 +467,8 @@ def analyse_directory(
         "diskTitle": volume_title[:ATARI_NAME_LIMIT],
         "path": path,
         "confidence": confidence,
-        "ambiguous": confidence < 75 or not filename or generic_title,
-        "launchObvious": bool(filename and not warnings),
+        "ambiguous": confidence < 75 or not filename or generic_title or contested,
+        "launchObvious": bool(filename and not contested),
         "evidence": evidence,
         "warnings": warnings,
         "sources": [],

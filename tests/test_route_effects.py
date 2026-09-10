@@ -45,7 +45,6 @@ class RouteEffectTests(unittest.TestCase):
             "rom_tools.rom_build", "rom_tools.rom_patch", "rom_tools.rom_project",
             "rom_tools.rom_repair",
             "tools.apply_image_patch",
-            "tools.install_tos_cd",
             "tools.save_editor_project", "tools.save_inspected_properties",
             "tools.save_inspected_text",
         }
