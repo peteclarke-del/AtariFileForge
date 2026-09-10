@@ -13,16 +13,18 @@ The two are not equivalent, and the difference matters when choosing one:
 * Greaseweazle reads **flux**, so it captures a disk whether or not any
   filesystem decoder accepts it.
 
-The difference is sharper on an Atari disk than on a PC one. GEMDOS writes a
-whole track at once in its own MFM encoding, eleven 512-byte sectors per side at
-double density, without the per-sector gaps a PC controller expects to find. A
-standard PC controller cannot decode that at all, so an Atari floppy is captured
-through Greaseweazle; this adapter serves controllers and kernels that have been
-told the exact geometry, and the CrossDOS-compatible PC disks an Atari also
-reads. The kernel geometry must already match the disk, normally through
-``setfdprm`` or a device node such as ``/dev/fd0u1760``. This module therefore
-verifies what it read against a known geometry and refuses anything that does
-not match, instead of handing back a plausible-looking image of the wrong shape.
+An ST floppy is ordinary IBM-style MFM, which is why a PC controller reads
+one at all: 512-byte sectors, nine per track on a TOS-formatted disk, ten or
+eleven when a formatter squeezed more in, on one or two sides. The kernel
+must already be told that shape, either through ``setfdprm`` or by opening a
+device node that carries it, such as ``/dev/fd0u720`` for the everyday
+double-sided disk, ``/dev/fd0u800`` and ``/dev/fd0u880`` for ten and eleven
+sectors, ``/dev/fd0u360`` for a 5.25-inch PC disk and ``/dev/fd0u1440`` for
+high density. This module therefore verifies what it read against the
+geometry the caller chose and refuses anything that does not match, instead
+of handing back a plausible-looking image of the wrong shape. Which geometry
+to choose is the caller's decision, made from the boot sector where one is
+available; the shapes themselves live in ``app.floppy_geometry``.
 
 Nothing here runs a subprocess: the device is read and written directly, so the
 module has no dependency on external tooling.
@@ -35,48 +37,35 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+
+from app.floppy_geometry import (
+    GEOMETRIES,
+    FloppyGeometry,
+    geometries_for_size,
+    geometry_for_size,
+    resolve_geometry,
+)
+from app.progress import Progress, reporter
 
 
 class FloppyError(RuntimeError):
     """A user-facing floppy device, geometry or media failure."""
 
 
-@dataclass(frozen=True)
-class FloppyGeometry:
-    """One Atari floppy layout, named as the workbench names its images."""
+# The geometries the workbench can open again, shared with every other part
+# of the workbench through the one table.
+ATARI_GEOMETRIES: dict[str, FloppyGeometry] = GEOMETRIES
 
-    identifier: str
-    label: str
-    extension: str
-    tracks: int
-    heads: int
-    sectors: int
-    sector_size: int
-
-    @property
-    def size(self) -> int:
-        return self.tracks * self.heads * self.sectors * self.sector_size
-
-
-# The geometries the workbench can open again. Sizes are the canonical image
-# sizes these formats produce, which is what the capture is checked against.
-#
-# OFS and FFS share every Atari geometry here: the filing system is recorded in
-# the boot block, not in the shape of the disk, so a capture is named by its
-# density and drive rather than by what formatted it. The ``pc-`` geometries are
-# the MS-DOS disks GEMDOS reads through CrossDOS.
-ATARI_GEOMETRIES: dict[str, FloppyGeometry] = {
-    geometry.identifier: geometry
-    for geometry in (
-        FloppyGeometry("dd", "Atari DD, 880 KiB", ".adf", 80, 2, 11, 512),
-        FloppyGeometry("hd", "Atari HD, 1760 KiB", ".adf", 80, 2, 22, 512),
-        FloppyGeometry("dd-40", "Atari 5.25 inch DD, 440 KiB", ".adf", 40, 2, 11, 512),
-        FloppyGeometry("dd-81", "Atari DD, 81 cylinders", ".adf", 81, 2, 11, 512),
-        FloppyGeometry("dd-82", "Atari DD, 82 cylinders", ".adf", 82, 2, 11, 512),
-        FloppyGeometry("pc-720", "CrossDOS PC DD, 720 KiB", ".img", 80, 2, 9, 512),
-        FloppyGeometry("pc-1440", "CrossDOS PC HD, 1440 KiB", ".img", 80, 2, 18, 512),
-    )
+#: The device-node suffix Linux gives each shape, where it has one. Opening
+#: the suffixed node tells the kernel the geometry without ``setfdprm``.
+#: Single-sided 80-track ST disks and the extended track counts have no
+#: stock node and need ``setfdprm``.
+DEVICE_SUFFIXES: dict[str, str] = {
+    "ds-80t-9s": "u720",
+    "ds-80t-10s": "u800",
+    "ds-80t-11s": "u880",
+    "pc-360k": "u360",
+    "hd-1440k": "u1440",
 }
 
 # Read and write in whole tracks so progress is reported at a boundary the
@@ -117,6 +106,7 @@ class FloppyWriteResult:
     device: str
     image: str
     size: int
+    geometry: str = ""
 
 
 def geometry(identifier: str) -> FloppyGeometry:
@@ -129,23 +119,20 @@ def geometry(identifier: str) -> FloppyGeometry:
     return found
 
 
-def geometry_for_size(size: int) -> FloppyGeometry | None:
-    """Return the geometry an image of this size describes, when unambiguous."""
-    matches = {item.identifier: item for item in ATARI_GEOMETRIES.values() if item.size == size}
-    if len(matches) != 1:
-        return None
-    return next(iter(matches.values()))
+def device_suffix(layout: FloppyGeometry) -> str | None:
+    """The ``/dev/fd0`` suffix that carries this geometry, if Linux has one."""
+    return DEVICE_SUFFIXES.get(layout.identifier)
 
 
 # Linux names floppy devices /dev/fd0 upward, optionally with a geometry
-# suffix such as /dev/fd0u800. The complete set is small and fixed, so it is
+# suffix such as /dev/fd0u720. The complete set is small and fixed, so it is
 # enumerated rather than matched: a request names a drive, and selecting a
 # constant from this tuple keeps a request-supplied string from ever reaching
 # the filesystem.
 _DRIVE_COUNT = 4
 _GEOMETRY_SUFFIXES = (
     "", "d360", "h360", "h720", "h880", "h1200", "h1440", "h1680", "h1722",
-    "h1743", "h1760", "h1920", "h2880", "u360", "u720", "u800", "u820", "u830",
+    "h1743", "h1760", "h1920", "h2880", "u360", "u720", "u800", "u820", "u830", "u880",
     "u1040", "u1120", "u1440", "u1600", "u1680", "u1722", "u1743", "u1760",
     "u1840", "u1920", "u2880", "u3200", "u3520", "u3840",
 )
@@ -185,6 +172,44 @@ def available_devices(candidates: int = 4) -> list[str]:
         except OSError:
             continue
     return found
+
+
+def image_geometry(image: Path, geometry_id: str | None = None) -> FloppyGeometry:
+    """Decide the shape of an image that is about to be written.
+
+    An explicit geometry wins, and must match the file's size. Otherwise the
+    boot sector is read and believed when it agrees with the size, and only
+    then does the size alone decide, and only when it names exactly one
+    shape: a 360 KiB file is both a single-sided ST disk and a double-sided
+    PC one, and writing it at the wrong shape scrambles every track.
+    """
+    try:
+        size = image.stat().st_size
+        with image.open("rb") as handle:
+            boot = handle.read(512)
+    except OSError as exc:
+        raise FloppyError(f"The image could not be read: {exc}") from exc
+    if geometry_id:
+        layout = geometry(geometry_id)
+        if layout.size != size:
+            raise FloppyError(
+                f"{image.name} is {size:,} bytes but {layout.label} is {layout.size:,} bytes."
+            )
+        return layout
+    layout = resolve_geometry(size, boot)
+    if layout is None:
+        candidates = geometries_for_size(size)
+        if candidates:
+            raise FloppyError(
+                f"{image.name} has no usable boot sector and its size fits more than one "
+                "geometry (" + ", ".join(item.identifier for item in candidates) + "). "
+                "Choose the geometry explicitly."
+            )
+        raise FloppyError(
+            f"{image.name} is {size:,} bytes, which is not one of the floppy geometries "
+            "this drive can write. Use Greaseweazle for other layouts."
+        )
+    return layout
 
 
 class FloppyDevice:
@@ -232,7 +257,7 @@ class FloppyDevice:
         self,
         destination: str | Path,
         geometry_id: str,
-        progress: Callable[[str, int | None, int | None], None] | None = None,
+        progress: Progress | None = None,
     ) -> FloppyReadResult:
         """Capture the disk in the drive as an image of the chosen geometry.
 
@@ -245,7 +270,7 @@ class FloppyDevice:
         probe = self.probe()
         if not probe.available:
             raise FloppyError(probe.detail)
-        report = progress or (lambda _message, _current=None, _total=None: None)
+        report = reporter(progress)
         report(f"Reading {layout.label} from {self.device}", 0, layout.size)
         written = 0
         try:
@@ -278,7 +303,7 @@ class FloppyDevice:
 
     @staticmethod
     def _read_failure(exc: OSError, written: int, layout: FloppyGeometry) -> str:
-        track = written // (layout.heads * layout.sectors * layout.sector_size)
+        track = written // (layout.sides * layout.track_size)
         if exc.errno in {errno.ENOMEDIUM, errno.ENXIO}:
             return "The drive reported no disk. Insert a disk and try again."
         return (
@@ -290,15 +315,20 @@ class FloppyDevice:
     def write(
         self,
         image: str | Path,
-        progress: Callable[[str, int | None, int | None], None] | None = None,
+        progress: Progress | None = None,
         *,
         confirm: bool = False,
+        geometry_id: str | None = None,
     ) -> FloppyWriteResult:
         """Write an image to the disk in the drive, overwriting it completely.
 
         ``confirm`` must be set by the caller. Writing a physical disk is not
         reversible and there is no undo point on the far side of the drive, so
         the destructive step is never reached by default.
+
+        The image's shape is settled by ``image_geometry``: the caller's
+        choice, else the boot sector, else an unambiguous size. The kernel
+        geometry must agree with it, which the drive's reported size checks.
         """
         path = Path(image)
         if not confirm:
@@ -306,25 +336,19 @@ class FloppyDevice:
                 "Writing a physical disk erases it completely and cannot be undone. "
                 "Confirm the write before it is attempted."
             )
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            raise FloppyError(f"The image could not be read: {exc}") from exc
-        layout = geometry_for_size(size)
-        if layout is None:
-            raise FloppyError(
-                f"{path.name} is {size:,} bytes, which is not one of the Atari floppy "
-                "geometries this drive can write. Use Greaseweazle for other layouts."
-            )
+        layout = image_geometry(path, geometry_id)
+        size = layout.size
         probe = self.probe()
         if not probe.available:
             raise FloppyError(probe.detail)
         if probe.size is not None and probe.size != size:
+            hint = device_suffix(layout)
             raise FloppyError(
-                f"The drive reports {probe.size:,} bytes but {path.name} is {size:,} bytes. "
-                "Set the kernel geometry to match the disk before writing."
+                f"The drive reports {probe.size:,} bytes but {path.name} is {size:,} bytes "
+                f"({layout.label}). Set the kernel geometry to match the disk before writing"
+                + (f", for example by opening /dev/fd0{hint}." if hint else " with setfdprm.")
             )
-        report = progress or (lambda _message, _current=None, _total=None: None)
+        report = reporter(progress)
         report(f"Writing {layout.label} to {self.device}", 0, size)
         written = 0
         try:
@@ -344,11 +368,14 @@ class FloppyDevice:
                 f"incomplete and must not be relied on: {exc}"
             ) from exc
         report("Physical disk written", size, size)
-        return FloppyWriteResult(device=str(self.device), image=path.name, size=size)
+        return FloppyWriteResult(
+            device=str(self.device), image=path.name, size=size, geometry=layout.identifier
+        )
 
 
 __all__ = [
     "ATARI_GEOMETRIES",
+    "DEVICE_SUFFIXES",
     "FloppyDevice",
     "FloppyError",
     "FloppyGeometry",
@@ -357,7 +384,9 @@ __all__ = [
     "FloppyWriteResult",
     "KNOWN_DEVICES",
     "available_devices",
-    "validated_device",
+    "device_suffix",
     "geometry",
     "geometry_for_size",
+    "image_geometry",
+    "validated_device",
 ]
