@@ -1,479 +1,472 @@
-"""ST BASIC tokenising, detokenising and recognition.
+"""The three BASICs the Atari ST was programmed in.
 
-ST BASIC stores a program as a run of numbered lines, each one a length
-byte, a big-endian line number, a token stream and a terminator. Keywords
-become single bytes from ``&80`` upward; the 1.2 release adds a second bank
-behind an escape byte rather than renumbering the first, which is why a 1.0
-program still runs unchanged under 1.2.
+The ST never had one BASIC. Atari shipped ST BASIC in the box and almost
+nobody kept it; GFA BASIC took the machine and is what most surviving ST
+source is written in; STOS was the games BASIC and saves in a format of its
+own. This package reads all three from a disk image and tells the workbench
+which one it is looking at.
 
-Three things are true of this module and are worth stating, because they are
-what the workbench relies on:
+``detect(data)`` is the way in. It takes raw bytes with no hint from the file
+name and returns a ``Detection`` naming the dialect, so the caller does not
+have to guess from an extension that a floppy may not carry.
 
-* Tokenising and detokenising round-trip exactly. The editor proves it on
-  every save rather than trusting it.
-* Scanning never allocates the whole program as text, so a listing view can
-  be built for a file too large to edit.
-* A line's length byte is not touched by a renumber, because the encoding of
-  a line-number reference is fixed width.
+The three dialects are not equally writable, and the difference is deliberate
+rather than unfinished:
+
+``GFA BASIC 3``
+    Read and written. A ``.GFA`` file is decoded to a listing and a listing is
+    encoded back to a ``.GFA``; the tests prove both directions on a corpus.
+    Its plain-text ``.LST`` export is read as well.
+``GFA BASIC 2``
+    A listing dialect only. GFA BASIC 2 saved a different binary layout that
+    this package does not decode, so ``GFA_BASIC_2`` exists for ``.LST``
+    source and for the editor to say that a word is newer than 2.x will run.
+``STOS BASIC``
+    Read only. The reader is faithful and tested, but the keyword table was
+    derived from real programs rather than transcribed from STOS, and a saved
+    file holds interpreter state this package writes as zeros. Writing a file
+    that a real STOS may refuse to load is worse than not writing one, so
+    ``STOS_BASIC.writable`` is ``False`` and ``tokenise`` raises.
+``Atari ST BASIC``
+    Read and written, trivially: ST BASIC saves plain ASCII, so tokenising is
+    the identity encoding and the round trip is exact by construction.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 
 from ..errors import DataError
-from .linenumber import (
-    LINE_NUMBER_TOKEN,
-    MAX_LINE_NUMBER,
-    decode_line_number,
-    encode_line_number,
-)
-
-#: Every tokenised ST BASIC file begins with this byte.
-BASIC_MAGIC = 0xF5
-
-#: Escape byte for keywords that did not fit the single-byte bank. Both
-#: releases understand it.
-ESCAPE_BYTE = 0xFE
-
-#: Escape byte for the keywords ST BASIC 1.2 added. A program that uses it
-#: will not load under 1.0, which is exactly what the dialect check looks for.
-EXTENDED_ESCAPE_BYTE = 0xFF
-
-MAX_LINE_BYTES = 255
+from . import gfa, stbasic, stos, stos_tables
+from .gfa_tables import LINE_COMMANDS, PRIMARY_TOKENS, SECONDARY_TOKENS
 
 
 class TokenKind(Enum):
+    """What a scanned element is, for the editor's colouring."""
+
     KEYWORD = "keyword"
-    LINENUM = "linenum"
+    IDENTIFIER = "identifier"
     NUMBER = "number"
     STRING = "string"
-    IDENT = "ident"
-    SYMBOL = "symbol"
-    REM = "rem"
+    COMMENT = "comment"
+    OPERATOR = "operator"
+    LINE_NUMBER = "line-number"
 
 
 class Verdict(Enum):
     BASIC = "basic"
     BASIC_TRAILING = "basic-trailing"
     NOT_BASIC = "not-basic"
-    DAMAGED = "damaged"
 
 
 @dataclass(frozen=True)
 class Token:
     kind: TokenKind
-    token: int
-    value: object
+    text: str
     start: int
     end: int
-    text: str = ""
+    value: object = None
 
 
 @dataclass(frozen=True)
 class Line:
-    line_number: int
+    """One line of a program: its text, where it came from and its tokens."""
+
+    index: int
+    number: int | None
+    text: str
     start: int
     end: int
-    tokens: list = field(default_factory=list)
+    depth: int = 0
+    tokens: tuple = ()
+
+    @property
+    def line_number(self) -> int:
+        """The printed line number, or the position for a dialect without them."""
+        return self.index if self.number is None else self.number
 
 
 @dataclass(frozen=True)
 class Detection:
     verdict: Verdict
+    dialect: object = None
+    reason: str = ""
     program_length: int | None = None
-    detail: str = ""
+    line_count: int = 0
 
 
 # ---------------------------------------------------------------------------
 # Dialects
 # ---------------------------------------------------------------------------
-#: The ST BASIC 1.0 keyword bank, in token order from &80.
-BASE_KEYWORDS = [
-    "END", "FOR", "NEXT", "DATA", "INPUT", "DIM", "READ", "LET",
-    "GOTO", "RUN", "IF", "RESTORE", "GOSUB", "RETURN", "REM", "STOP",
-    "PRINT", "CLEAR", "LIST", "NEW", "ON", "WAIT", "DEF", "POKE",
-    "CONT", "OUT", "LPRINT", "LLIST", "WIDTH", "ELSE", "TRON", "TROFF",
-    "SWAP", "ERASE", "EDIT", "ERROR", "RESUME", "DELETE", "AUTO", "RENUM",
-    "DEFSTR", "DEFINT", "DEFSNG", "DEFDBL", "LINE", "WHILE", "WEND", "CALL",
-    "WRITE", "OPTION", "RANDOMIZE", "OPEN", "CLOSE", "LOAD", "MERGE", "SAVE",
-    "COLOR", "CLS", "MOTOR", "BSAVE", "BLOAD", "SOUND", "BEEP", "PSET",
-    "PRESET", "SCREEN", "KEY", "LOCATE", "TO", "THEN", "TAB", "STEP",
-    "USR", "FN", "SPC", "NOT", "ERL", "ERR", "STRING$", "USING",
-    "INSTR", "'", "VARPTR", "CSRLIN", "POINT", "OFF", "INKEY$", "CHAIN",
-    "COMMON", "SHARED", "SUB", "STATIC", "LIBRARY", "DECLARE", "WINDOW", "MENU",
-    "MOUSE", "OBJECT", "AREA", "AREAFILL", "PATTERN", "PALETTE", "SCROLL", "SAY",
-    "TRANSLATE$", "WAVE", "TIMER", "COLLISION", "SLEEP", "STICK", "STRIG", "PTAB",
-]
-
-#: ST BASIC 1.2 additions, reached through the escape byte.
-EXTENDED_KEYWORDS = [
-    "UCASE$", "LBOUND", "UBOUND", "SADD", "FRE", "LPOS", "POS", "LOC",
-    "LOF", "EOF", "CVI", "CVS", "CVD", "CVL", "MKI$", "MKS$",
-    "MKD$", "MKL$", "FIELD", "LSET", "RSET", "GET", "PUT", "RESET",
-    "FILES", "NAME", "KILL", "CHDIR", "SYSTEM", "DATE$", "TIME$", "CIRCLE",
-    "PAINT", "SEGMENT",
-]
-
-#: Operators and functions that tokenise as ordinary infix words.
-OPERATOR_KEYWORDS = [
-    "AND", "OR", "XOR", "EQV", "IMP", "MOD",
-]
-
-FUNCTION_KEYWORDS = [
-    "ABS", "ASC", "ATN", "CDBL", "CHR$", "CINT", "CLNG", "COS", "CSNG",
-    "EXP", "FIX", "HEX$", "INPUT$", "INT", "LEFT$", "LEN", "LOG", "MID$",
-    "OCT$", "PEEK", "RIGHT$", "RND", "SGN", "SIN", "SPACE$", "SQR", "STR$",
-    "TAN", "VAL",
-]
+def _gfa_keywords() -> frozenset[str]:
+    """Every word GFA BASIC 3 has a token for, taken from the token tables."""
+    words: set[str] = set()
+    for table in (LINE_COMMANDS, PRIMARY_TOKENS, SECONDARY_TOKENS):
+        for text in table.values():
+            if not text:
+                continue
+            stripped = text.strip().rstrip("(")
+            if stripped and stripped[0].isalpha():
+                words.update(stripped.split())
+    return frozenset(word.upper() for word in words if word)
 
 
+#: Words GFA BASIC 3 introduced. A listing that uses one of these will not run
+#: under GFA BASIC 2, which is what the editor warns about when the file is
+#: opened as 2.x. This list follows the "new in 3.0" section of the GFA BASIC
+#: 3 manual and is best effort: it is a warning, not a refusal.
+GFA_3_KEYWORDS: frozenset[str] = frozenset(
+    """
+    SELECT CASE DEFAULT ENDSELECT FUNCTION ENDFUNC DO LOOP EXIT INLINE RCALL
+    ARRAYFILL SORT VAR LOCAL BMOVE DPEEK DPOKE LPEEK LPOKE SETTIME SUCC PRED
+    TRUNC FRAC RC_INTERSECT OB_ADR DEFNUM DEFWRD DEFBYT DEFFLT DEFBIT DEFLIST
+    CHAR CARD SINGLE DOUBLE DOWNTO ALERT FILESELECT MENU CLIP TEXT
+    """.split()
+)
+
+#: The words that make a listing recognisably GFA rather than anything else.
+GFA_MARKERS = ("PROCEDURE", "ENDFUNC", "ENDSELECT", "REPEAT", "UNTIL", "WEND",
+               "DEFFILL", "DEFLINE", "PBOX", "SPOKE", "SGET", "SPUT", "INLINE")
+
+
+@dataclass(frozen=True)
 class Dialect:
-    """One ST BASIC keyword bank and the escape banks behind it.
+    """One BASIC, and what this package can do with it.
 
-    Keywords are packed into the single-byte range first, most-used first, so
-    ordinary programs tokenise densely. Anything that does not fit moves to
-    the ``&FE`` bank, which both releases understand. The ``&FF`` bank holds
-    the keywords 1.2 introduced, so its presence in a program is a definite
-    statement that 1.0 cannot run it.
+    ``writable`` is the flag the editor reads: a dialect that cannot be
+    re-encoded faithfully opens read-only rather than risking a save that the
+    original interpreter would not load.
     """
 
-    #: Single-byte keyword codes run from &80 up to, but not including, &FE.
-    BASE_CAPACITY = ESCAPE_BYTE - 0x80
+    name: str
+    identifier: str
+    label: str
+    writable: bool
+    tokenised: bool
+    line_numbers: bool
+    generation: int
+    extensions: tuple[str, ...]
+    keywords: frozenset[str] = field(default_factory=frozenset)
+    compound: tuple[str, ...] = ()
+    suffixes: str = ""
+    comment_marks: str = "'"
 
-    def __init__(self, name: str, ordered: list[str], extended: list[str] | None = None):
-        self.name = name
-        self.tokens: dict[int, str] = {}
-        self.keywords: dict[str, bytes] = {}
-        self.escape: dict[int, dict[int, str]] = {}
-
-        base = ordered[: self.BASE_CAPACITY]
-        overflow = ordered[self.BASE_CAPACITY :]
-        for offset, word in enumerate(base):
-            code = 0x80 + offset
-            self.tokens[code] = word
-            self.keywords[word] = bytes((code,))
-        if overflow:
-            bank: dict[int, str] = {}
-            for offset, word in enumerate(overflow):
-                if offset > 0xFF - 0x80:
-                    raise DataError("The overflow keyword bank is full.")
-                code = 0x80 + offset
-                bank[code] = word
-                self.keywords[word] = bytes((ESCAPE_BYTE, code))
-            self.escape[ESCAPE_BYTE] = bank
-        if extended:
-            bank = {}
-            for offset, word in enumerate(extended):
-                code = 0x80 + offset
-                bank[code] = word
-                self.keywords[word] = bytes((EXTENDED_ESCAPE_BYTE, code))
-            self.escape[EXTENDED_ESCAPE_BYTE] = bank
-
-        # Longest first, so MID$ is matched before MID.
-        self._pattern = re.compile(
-            "|".join(
-                re.escape(word)
-                for word in sorted(self.keywords, key=len, reverse=True)
-            ),
-            re.IGNORECASE,
-        )
-
-    def match_keyword(self, text: str, position: int):
-        found = self._pattern.match(text, position)
-        if not found:
-            return None
-        word = found.group(0).upper()
-        return word, self.keywords[word], found.end()
+    def __str__(self) -> str:  # pragma: no cover - convenience only
+        return self.name
 
 
-#: Keyword order. Operators and functions come first because almost every
-#: line uses them, so they take one byte rather than two.
-ORDERED_KEYWORDS = OPERATOR_KEYWORDS + FUNCTION_KEYWORDS + BASE_KEYWORDS
+GFA_BASIC_3 = Dialect(
+    name="GFA BASIC 3",
+    identifier="gfa-basic-3",
+    label="GFA BASIC 3.x",
+    writable=True,
+    tokenised=True,
+    line_numbers=False,
+    generation=3,
+    extensions=(".gfa", ".lst"),
+    keywords=_gfa_keywords(),
+    compound=("EXIT IF", "ELSE IF", "END SELECT", "END IF", "DO WHILE", "DO UNTIL",
+              "LOOP WHILE", "LOOP UNTIL", "ON ERROR", "ON MENU", "OPEN OUT"),
+    suffixes="$%&!#|",
+)
 
-STBASIC_10 = Dialect("ST BASIC 1.0", ORDERED_KEYWORDS)
-STBASIC_12 = Dialect("ST BASIC 1.2", ORDERED_KEYWORDS, EXTENDED_KEYWORDS)
+GFA_BASIC_2 = Dialect(
+    name="GFA BASIC 2",
+    identifier="gfa-basic-2",
+    label="GFA BASIC 2.x listing",
+    writable=True,
+    tokenised=False,
+    line_numbers=False,
+    generation=2,
+    extensions=(".lst",),
+    keywords=frozenset(GFA_BASIC_3.keywords - GFA_3_KEYWORDS),
+    compound=("ELSE IF", "END IF", "ON ERROR"),
+    suffixes="$%!#",
+)
 
-DIALECTS = {
-    STBASIC_10.name: STBASIC_10,
-    STBASIC_12.name: STBASIC_12,
+STOS_BASIC = Dialect(
+    name="STOS BASIC",
+    identifier="stos-basic",
+    label="STOS BASIC",
+    writable=False,
+    tokenised=True,
+    line_numbers=True,
+    generation=2,
+    extensions=(".bas", ".asc"),
+    keywords=frozenset(stos_tables.STOS_KEYWORDS),
+    compound=stos_tables.STOS_COMPOUND_KEYWORDS,
+    suffixes="$#",
+    comment_marks="",
+)
+
+ST_BASIC = Dialect(
+    name="ST BASIC",
+    identifier="st-basic",
+    label="Atari ST BASIC",
+    writable=True,
+    tokenised=False,
+    line_numbers=True,
+    generation=1,
+    extensions=(".bas",),
+    keywords=stbasic.KEYWORDS,
+    compound=stbasic.COMPOUND_KEYWORDS,
+    suffixes=stbasic.TYPE_SUFFIXES,
+)
+
+DIALECTS: dict[str, Dialect] = {
+    dialect.name: dialect for dialect in (GFA_BASIC_3, GFA_BASIC_2, STOS_BASIC, ST_BASIC)
 }
+DIALECTS_BY_ID: dict[str, Dialect] = {dialect.identifier: dialect for dialect in DIALECTS.values()}
 
 
-# ---------------------------------------------------------------------------
-# Scanning
-# ---------------------------------------------------------------------------
-def _scan_line_tokens(data: bytes, start: int, end: int, dialect: Dialect) -> list[Token]:
-    tokens: list[Token] = []
-    position = start
-    while position < end:
-        byte = data[position]
-        if byte == LINE_NUMBER_TOKEN:
-            value = decode_line_number(data[position + 1 : position + 4])
-            tokens.append(
-                Token(TokenKind.LINENUM, byte, value, position, position + 4, str(value))
-            )
-            position += 4
-            continue
-        if byte in dialect.escape:
-            following = data[position + 1] if position + 1 < end else 0
-            word = dialect.escape[byte].get(following)
-            if word is None:
-                raise DataError(
-                    f"Unknown extended keyword &{following:02X} at offset {position}."
-                )
-            tokens.append(
-                Token(TokenKind.KEYWORD, byte, word, position, position + 2, word)
-            )
-            position += 2
-            continue
-        if byte >= 0x80:
-            word = dialect.tokens.get(byte)
-            if word is None:
-                raise DataError(f"Unknown keyword token &{byte:02X} at offset {position}.")
-            kind = TokenKind.REM if word in {"REM", "'"} else TokenKind.KEYWORD
-            tokens.append(Token(kind, byte, word, position, position + 1, word))
-            position += 1
-            if kind is TokenKind.REM:
-                text = data[position:end].decode("latin-1")
-                tokens.append(
-                    Token(TokenKind.STRING, 0, text, position, end, text)
-                )
-                position = end
-            continue
-        if byte == 0x22:  # a quoted string
-            close = data.find(b'"', position + 1, end)
-            close = end - 1 if close < 0 else close
-            text = data[position + 1 : close].decode("latin-1")
-            tokens.append(
-                Token(TokenKind.STRING, 0, text, position, close + 1, f'"{text}"')
-            )
-            position = close + 1
-            continue
-        run_start = position
-        if chr(byte).isdigit() or byte == 0x2E:
-            while position < end and (
-                chr(data[position]).isdigit() or data[position] in b".eE+-"
-            ):
-                if data[position] in b"+-" and data[position - 1] not in b"eE":
-                    break
-                position += 1
-            text = data[run_start:position].decode("latin-1")
-            tokens.append(Token(TokenKind.NUMBER, 0, text, run_start, position, text))
-            continue
-        if chr(byte).isalpha() or byte == 0x5F:
-            while position < end and (
-                chr(data[position]).isalnum() or data[position] in b"_$%!#&."
-            ):
-                position += 1
-            text = data[run_start:position].decode("latin-1")
-            tokens.append(Token(TokenKind.IDENT, 0, text, run_start, position, text))
-            continue
-        text = chr(byte)
-        tokens.append(Token(TokenKind.SYMBOL, 0, text, position, position + 1, text))
-        position += 1
-    return tokens
-
-
-def scan_program(data: bytes, dialect: Dialect = STBASIC_10):
-    """Yield one ``Line`` per numbered line, without building the whole listing."""
-    if not data:
-        return
-    position = 1 if data[:1] == bytes((BASIC_MAGIC,)) else 0
-    while position < len(data):
-        length = data[position]
-        if length == 0:
-            return
-        if position + length > len(data):
-            raise DataError(
-                f"The line at offset {position} declares {length} bytes but only "
-                f"{len(data) - position} remain."
-            )
-        if length < 4:
-            raise DataError(f"The line at offset {position} is too short to be valid.")
-        line_number = (data[position + 1] << 8) | data[position + 2]
-        end = position + length - 1
-        tokens = _scan_line_tokens(data, position + 3, end, dialect)
-        yield Line(line_number=line_number, start=position, end=position + length, tokens=tokens)
-        position += length
-
-
-# ---------------------------------------------------------------------------
-# Detokenising
-# ---------------------------------------------------------------------------
-def detokenise(data: bytes, dialect: Dialect = STBASIC_10) -> str:
-    """Render a tokenised program as its source listing."""
-    lines = []
-    for line in scan_program(data, dialect=dialect):
-        body = "".join(token.text for token in line.tokens)
-        lines.append(f"{line.line_number} {body}".rstrip())
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Tokenising
-# ---------------------------------------------------------------------------
-_LINE_START = re.compile(r"\s*(\d+)\s?(.*)$")
-_JUMP_KEYWORDS = {"GOTO", "GOSUB", "THEN", "ELSE", "RESTORE", "RUN", "RESUME", "LIST"}
-
-
-def _tokenise_body(body: str, dialect: Dialect) -> bytes:
-    out = bytearray()
-    position = 0
-    last_keyword = ""
-    while position < len(body):
-        character = body[position]
-        if character == '"':
-            close = body.find('"', position + 1)
-            close = len(body) if close < 0 else close
-            out.extend(body[position : close + 1].encode("latin-1", "replace"))
-            position = close + 1 if close < len(body) else len(body)
-            continue
-        matched = dialect.match_keyword(body, position)
-        if matched and (position == 0 or not (body[position - 1].isalnum() or body[position - 1] == "_")):
-            word, encoded, end = matched
-            # A word only tokenises as a keyword when it is not glued to an
-            # identifier on either side, so ``FORMAT`` stays a variable name.
-            following = body[end] if end < len(body) else ""
-            if not (following.isalnum() or following == "_"):
-                out.extend(encoded)
-                position = end
-                last_keyword = word
-                if word in {"REM", "'"}:
-                    out.extend(body[position:].encode("latin-1", "replace"))
-                    return bytes(out)
-                continue
-        if character.isdigit() and last_keyword in _JUMP_KEYWORDS:
-            run = position
-            while run < len(body) and body[run].isdigit():
-                run += 1
-            value = int(body[position:run])
-            if value > MAX_LINE_NUMBER:
-                raise DataError(f"{value} is not a valid line number.")
-            out.append(LINE_NUMBER_TOKEN)
-            out.extend(encode_line_number(value))
-            position = run
-            continue
-        if character.isalnum() or character == "_":
-            run = position
-            while run < len(body) and (body[run].isalnum() or body[run] in "_$%!#&."):
-                run += 1
-            out.extend(body[position:run].encode("latin-1", "replace"))
-            position = run
-            continue
-        if not character.isspace() or character == " ":
-            out.extend(character.encode("latin-1", "replace"))
-        if character not in " ":
-            last_keyword = ""
-        position += 1
-    return bytes(out)
-
-
-def tokenise(source: str, dialect: Dialect = STBASIC_10) -> bytes:
-    """Tokenise a numbered listing into an ST BASIC program."""
-    program = bytearray((BASIC_MAGIC,))
-    seen: set[int] = set()
-    previous = -1
-    found_any = False
-    for raw in str(source).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if not raw.strip():
-            continue
-        match = _LINE_START.match(raw)
-        if not match:
-            raise DataError(f"Every ST BASIC line needs a line number: {raw.strip()!r}")
-        number = int(match.group(1))
-        if number > MAX_LINE_NUMBER:
-            raise DataError(f"Line number {number} is above {MAX_LINE_NUMBER}.")
-        if number in seen:
-            raise DataError(f"Line {number} appears more than once.")
-        if number < previous:
-            raise DataError(f"Line {number} is out of order.")
-        seen.add(number)
-        previous = number
-        found_any = True
-        body = _tokenise_body(match.group(2), dialect)
-        length = len(body) + 4
-        if length > MAX_LINE_BYTES:
-            raise DataError(
-                f"Line {number} tokenises to {length} bytes, above the {MAX_LINE_BYTES}-byte limit."
-            )
-        program.append(length)
-        program.append((number >> 8) & 0xFF)
-        program.append(number & 0xFF)
-        program.extend(body)
-        program.append(0)
-    if not found_any:
-        raise DataError("The listing contains no numbered lines.")
-    program.append(0)
-    return bytes(program)
+def dialect_for(name: str) -> Dialect:
+    """Look a dialect up by name or by identifier."""
+    key = str(name or "")
+    if key in DIALECTS:
+        return DIALECTS[key]
+    if key in DIALECTS_BY_ID:
+        return DIALECTS_BY_ID[key]
+    raise DataError(f"{name!r} is not a BASIC dialect this package knows.")
 
 
 # ---------------------------------------------------------------------------
 # Recognition
 # ---------------------------------------------------------------------------
+_NUMBERED_LINE = re.compile(r"^\s*\d+[ \t]")
+
+
+def _as_text(data: bytes) -> str | None:
+    """Decode bytes as a listing, or return ``None`` when they are not text."""
+    if not data:
+        return None
+    printable = sum(1 for byte in data if 32 <= byte < 127 or byte in (9, 10, 13))
+    if printable / len(data) < 0.94:
+        return None
+    return data.decode("latin-1").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _detect_text(text: str) -> Detection:
+    rows = [row for row in text.split("\n") if row.strip()]
+    if not rows:
+        return Detection(Verdict.NOT_BASIC, None, "The file holds no lines.")
+    numbered = sum(1 for row in rows if _NUMBERED_LINE.match(row))
+    upper = text.upper()
+    gfa_score = sum(2 for word in GFA_MARKERS if re.search(rf"\b{word}\b", upper))
+    if numbered < len(rows) * 0.8:
+        if gfa_score >= 4:
+            return Detection(Verdict.BASIC, GFA_BASIC_3, f"An unnumbered GFA BASIC listing of {len(rows)} lines.", len(text), len(rows))
+        return Detection(Verdict.NOT_BASIC, None, "The lines carry no line numbers and no GFA BASIC structure.")
+    stos_score = sum(
+        2 for word in ("SCREEN OPEN", "SPRITE", "PUT BOB", "WAIT VBL", "CURS OFF", "AUTO BACK",
+                       "SET ZONE", "WINDOPEN", "MOUSE KEY", "CLW", "INK ", "POLYMARK")
+        if word in upper
+    )
+    st_score = stbasic.score(text)
+    if stos_score > st_score:
+        return Detection(Verdict.BASIC, STOS_BASIC, f"A numbered STOS BASIC listing of {len(rows)} lines.", len(text), len(rows))
+    if st_score >= 3:
+        return Detection(Verdict.BASIC, ST_BASIC, f"A numbered ST BASIC listing of {len(rows)} lines.", len(text), len(rows))
+    return Detection(Verdict.NOT_BASIC, None, "Numbered lines, but no recognisable BASIC keywords.")
+
+
 def detect(data: bytes) -> Detection:
-    """Decide whether these bytes begin with a tokenised ST BASIC program."""
-    if len(data) < 6 or data[0] != BASIC_MAGIC:
-        return Detection(Verdict.NOT_BASIC, None, "No ST BASIC magic byte.")
-    position = 1
-    lines = 0
-    previous = -1
-    while position < len(data):
-        length = data[position]
-        if length == 0:
-            position += 1
-            break
-        if length < 4 or position + length > len(data):
-            return Detection(
-                Verdict.DAMAGED, None, f"The line at offset {position} is malformed."
-            )
-        number = (data[position + 1] << 8) | data[position + 2]
-        if number > MAX_LINE_NUMBER or number < previous:
-            return Detection(
-                Verdict.DAMAGED, None, f"Line {number} at offset {position} is out of order."
-            )
-        if data[position + length - 1] != 0:
-            return Detection(
-                Verdict.DAMAGED, None, f"The line at offset {position} is unterminated."
-            )
-        previous = number
-        lines += 1
-        position += length
-    if not lines:
-        return Detection(Verdict.NOT_BASIC, None, "No numbered lines were found.")
-    if position < len(data):
-        return Detection(
-            Verdict.BASIC_TRAILING,
-            position,
-            f"{len(data) - position:,} trailing bytes follow the program.",
-        )
-    return Detection(Verdict.BASIC, position, f"{lines} line(s).")
+    """Decide which BASIC, if any, these bytes hold.
+
+    Nothing about the file name is consulted, because a program recovered from
+    a floppy may have any extension or none.
+    """
+    raw = bytes(data or b"")
+    if raw[2:12] == gfa.MAGIC_3:
+        try:
+            program = gfa.parse_program(raw)
+        except DataError as error:
+            return Detection(Verdict.NOT_BASIC, None, f"A GFA BASIC 3 header that does not parse: {error}")
+        consumed = gfa.HEADER_LENGTH + program.pool_length + program.program_length
+        reason = f"{len(program.lines)} line(s) of GFA BASIC 3."
+        if program.protected:
+            reason += " The program is PSAVE protected, so its names are gone."
+        if consumed < len(raw):
+            return Detection(Verdict.BASIC_TRAILING, GFA_BASIC_3,
+                             reason + f" {len(raw) - consumed:,} trailing bytes follow.", consumed, len(program.lines))
+        return Detection(Verdict.BASIC, GFA_BASIC_3, reason, consumed, len(program.lines))
+    if raw[:10] == gfa.MAGIC_2:
+        return Detection(Verdict.NOT_BASIC, None,
+                         "A GFA BASIC 2 saved program. Only its .LST listing export is readable here.")
+    if raw[:10] == stos.PROGRAM_MAGIC:
+        try:
+            program = stos.parse_program(raw)
+        except DataError as error:
+            return Detection(Verdict.NOT_BASIC, None, f"A STOS header that does not parse: {error}")
+        consumed = stos.HEADER_LENGTH + (program.lines[-1].end if program.lines else 0)
+        reason = f"{len(program.lines)} line(s) of STOS BASIC."
+        if consumed < len(raw):
+            return Detection(Verdict.BASIC_TRAILING, STOS_BASIC,
+                             reason + f" {len(raw) - consumed:,} trailing bytes hold the memory banks.",
+                             consumed, len(program.lines))
+        return Detection(Verdict.BASIC, STOS_BASIC, reason, consumed, len(program.lines))
+    if raw[:10] == stos.BANK_MAGIC:
+        return Detection(Verdict.NOT_BASIC, None, "A STOS memory bank file, which carries no program.")
+    text = _as_text(raw)
+    if text is None:
+        return Detection(Verdict.NOT_BASIC, None, "The bytes are not a known BASIC and are not readable text.")
+    return _detect_text(text)
 
 
 def is_tokenised(data: bytes) -> bool:
-    return detect(data).verdict in {Verdict.BASIC, Verdict.BASIC_TRAILING}
+    """True when the bytes hold a program stored in a tokenised form."""
+    detection = detect(data)
+    return detection.verdict in {Verdict.BASIC, Verdict.BASIC_TRAILING} and bool(
+        detection.dialect and detection.dialect.tokenised
+    )
+
+
+def _dialect_of(data: bytes, dialect: Dialect | None) -> Dialect:
+    if dialect is not None:
+        return dialect
+    detection = detect(data)
+    if detection.dialect is None:
+        raise DataError(detection.reason or "These bytes are not a BASIC program.")
+    return detection.dialect
+
+
+# ---------------------------------------------------------------------------
+# Listing
+# ---------------------------------------------------------------------------
+def detokenise(data: bytes, dialect: Dialect | None = None) -> str:
+    """Render a saved program as its source listing.
+
+    ``dialect`` may be left out, in which case ``detect`` chooses it.
+    """
+    raw = bytes(data or b"")
+    chosen = _dialect_of(raw, dialect)
+    if chosen is GFA_BASIC_3 and raw[2:12] == gfa.MAGIC_3:
+        return gfa.detokenise_gfa(raw)
+    if chosen is STOS_BASIC and raw[:10] == stos.PROGRAM_MAGIC:
+        return stos.detokenise_stos(raw)
+    text = _as_text(raw)
+    if text is None:
+        raise DataError(f"These bytes are not a {chosen.name} program.")
+    return text
+
+
+def tokenise(source: str, dialect: Dialect = GFA_BASIC_3) -> bytes:
+    """Encode a listing as the dialect stores it.
+
+    A dialect that saves plain text encodes to plain text with the ST's CR LF
+    line endings, so the round trip is exact. ``STOS_BASIC`` refuses: see the
+    package docstring for why.
+    """
+    text = str(source).replace("\r\n", "\n").replace("\r", "\n")
+    if dialect is STOS_BASIC:
+        raise NotImplementedError(
+            "STOS BASIC is read-only here. The reader is derived from real saved programs "
+            "rather than from STOS itself, so a file written back could hold interpreter "
+            "state STOS refuses. Export the listing instead."
+        )
+    if dialect is GFA_BASIC_3:
+        return gfa.tokenise_gfa(text)
+    if dialect in (GFA_BASIC_2, ST_BASIC):
+        return text.replace("\n", "\r\n").encode("latin-1", "replace")
+    raise DataError(f"{dialect} cannot be written by this package.")
+
+
+# ---------------------------------------------------------------------------
+# Scanning
+# ---------------------------------------------------------------------------
+_TEXT_KINDS = {kind.value: kind for kind in TokenKind}
+
+
+def _scan_text(text: str, dialect: Dialect) -> Iterator[Line]:
+    starts = [0]
+    for index, character in enumerate(text):
+        if character == "\n":
+            starts.append(index + 1)
+    rows = text.split("\n")
+    by_line: list[list[Token]] = [[] for _ in rows]
+    for kind, piece, start, end in stbasic.scan_source(
+        text, dialect.keywords, dialect.compound, dialect.suffixes,
+        comment_marks=dialect.comment_marks,
+    ):
+        index = max(position for position, offset in enumerate(starts) if offset <= start)
+        by_line[index].append(Token(_TEXT_KINDS[kind], piece, start, end))
+    for index, row in enumerate(rows):
+        tokens = by_line[index]
+        number = None
+        if tokens and tokens[0].kind is TokenKind.LINE_NUMBER:
+            number = int(tokens[0].text)
+        yield Line(index, number, row.rstrip(), starts[index], starts[index] + len(row), 0, tuple(tokens))
+
+
+def _scan_gfa(data: bytes) -> Iterator[Line]:
+    program = gfa.parse_program(data)
+    for index, line in enumerate(gfa.decode_lines(program)):
+        tokens = tuple(
+            Token(_TEXT_KINDS[piece.kind], piece.text, piece.start, piece.end, piece.value)
+            for piece in line.pieces
+            if piece.kind in _TEXT_KINDS
+        )
+        yield Line(index, None, line.text, line.offset, line.offset + line.size, line.depth, tokens)
+
+
+def _scan_stos(data: bytes) -> Iterator[Line]:
+    program = stos.parse_program(data)
+    base = stos.HEADER_LENGTH
+    for index, line in enumerate(program.lines):
+        tokens = [Token(TokenKind.LINE_NUMBER, str(line.number), base + line.start + 2, base + line.start + 4, line.number)]
+        tokens.extend(
+            Token(_TEXT_KINDS[item.kind], item.text, base + line.start + 4 + item.start, base + line.start + 4 + item.end)
+            for item in line.items
+            if item.kind in _TEXT_KINDS
+        )
+        yield Line(index, line.number, f"{line.number} {line.text}".rstrip(), base + line.start, base + line.end, 0, tuple(tokens))
+
+
+def scan_program(program: bytes | str, dialect: Dialect | None = None) -> Iterator[Line]:
+    """Yield one ``Line`` per program line, tokens typed for colouring.
+
+    Both a saved program and a listing are accepted, because the editor holds
+    the listing and the file inspector holds the bytes, and both want the same
+    view. Nothing builds the whole listing as one string first, so a program
+    too large to edit can still be shown.
+    """
+    if isinstance(program, str):
+        chosen = dialect or ST_BASIC
+        yield from _scan_text(program.replace("\r\n", "\n").replace("\r", "\n"), chosen)
+        return
+    raw = bytes(program or b"")
+    chosen = _dialect_of(raw, dialect)
+    if chosen is GFA_BASIC_3 and raw[2:12] == gfa.MAGIC_3:
+        yield from _scan_gfa(raw)
+        return
+    if chosen is STOS_BASIC and raw[:10] == stos.PROGRAM_MAGIC:
+        yield from _scan_stos(raw)
+        return
+    text = _as_text(raw)
+    if text is None:
+        raise DataError(f"These bytes are not a {chosen.name} program.")
+    yield from _scan_text(text, chosen)
 
 
 __all__ = [
-    "STBASIC_10",
-    "STBASIC_12",
-    "BASIC_MAGIC",
     "DIALECTS",
+    "DIALECTS_BY_ID",
+    "GFA_3_KEYWORDS",
+    "GFA_BASIC_2",
+    "GFA_BASIC_3",
+    "ST_BASIC",
+    "STOS_BASIC",
     "Detection",
     "Dialect",
-    "ESCAPE_BYTE",
-    "EXTENDED_ESCAPE_BYTE",
     "Line",
-    "MAX_LINE_BYTES",
     "Token",
     "TokenKind",
     "Verdict",
-    "decode_line_number",
     "detect",
     "detokenise",
-    "encode_line_number",
+    "dialect_for",
     "is_tokenised",
     "scan_program",
     "tokenise",
