@@ -107,6 +107,10 @@ class PartitionMixin:
         session.partition = chosen
         session.content_kind_cache.clear()
         session.gemdos_capabilities = {}
+        # The chosen partition is a volume of its own, with its own label,
+        # format and cluster count, so its capabilities are read now rather
+        # than left describing whichever partition was open before.
+        self.refresh_gemdos_capabilities(session)
         self._persist_session(session)
         return chosen
 

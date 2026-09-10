@@ -250,6 +250,49 @@ class DiskService(
         except OSError:
             return False
 
+    #: How confident the volume probe has to be before a bootable disk is
+    #: treated as a filing system rather than as a loader. A cracked game
+    #: disk often carries a boot sector whose parameter block reads as
+    #: plausible while the directory behind it is the loader's own data.
+    MINIMUM_VOLUME_CONFIDENCE = 0.5
+
+    @classmethod
+    def _custom_loader_disk(cls, path: Path) -> bool:
+        """Whether this is an Atari disk that boots without a filing system.
+
+        A great many ST games were shipped this way: the boot sector is real
+        68000 code carrying the 0x1234 checksum TOS looks for, and the rest
+        of the disk is the loader's own layout rather than a FAT volume.
+        Such a disk has nothing to list, but it is still a disk, and refusing
+        to open it would put a genuine, working, preserved game beyond reach
+        of the hex editor and of every conversion that works on whole tracks.
+
+        Two things have to be true together. The boot sector must be one TOS
+        will execute, which is what makes this a loader rather than damage.
+        And the probe must not find a directory it believes in, because a
+        disk that boots *and* carries a filing system is an ordinary
+        bootable floppy and is opened as one.
+        """
+        try:
+            from atarinut.filesystem import probe_volume, reader_for
+            from atarinut.filesystem.blocks import is_executable_sector
+        except ImportError:  # pragma: no cover - packaging failure
+            return False
+        try:
+            if path.stat().st_size not in FLOPPY_SIZES:
+                return False
+            with path.open("rb") as image:
+                if not is_executable_sector(image.read(512)):
+                    return False
+            reader = reader_for(path, writable=False)
+            try:
+                found = probe_volume(reader)
+            finally:
+                reader.close()
+        except OSError:
+            return False
+        return found is None or found[0] < cls.MINIMUM_VOLUME_CONFIDENCE
+
     @staticmethod
     def _rom_kind(path: Path) -> str | None:
         """Say whether these bytes are a TOS ROM, a cartridge, or neither."""
@@ -513,13 +556,23 @@ class DiskService(
             path, kind, ipf_warnings = self._open_ipf(path)
         elif kind == "scp":
             path, kind, scp_original, scp_read_only, scp_warnings = self._open_scp(path)
-        identified = kind == "unknown"
-        if identified:
-            kind = self.identify_kind(path)
-        elif kind in {"gemdos", "hd", "rom", "tosrom"}:
-            # ``.img`` and ``.bin`` are shared by a cartridge dump, a drive
-            # image and a bare volume, so the bytes settle which it is.
-            kind = self.identify_kind(path, kind)
+        custom_loader = False
+        try:
+            if kind == "unknown":
+                kind = self.identify_kind(path)
+            elif kind in {"gemdos", "hd", "rom", "tosrom"}:
+                # ``.img`` and ``.bin`` are shared by a cartridge dump, a
+                # drive image and a bare volume, so the bytes settle which
+                # it is.
+                kind = self.identify_kind(path, kind)
+        except DiskError:
+            if not self._custom_loader_disk(path):
+                raise
+            kind = "unknown"
+            custom_loader = True
+        if kind == "gemdos" and self._custom_loader_disk(path):
+            kind = "unknown"
+            custom_loader = True
         session = ImageSession(
             id=image_id,
             name=name,
@@ -533,6 +586,14 @@ class DiskService(
             scp_read_only=scp_read_only,
             warnings=hfe_warnings + scp_warnings + ipf_warnings,
         )
+        if custom_loader:
+            session.warnings.append(
+                "This disk boots its own loader and carries no GEMDOS filing "
+                "system, which is how a great many ST games were published. "
+                "There is nothing to list, but its sectors can be inspected, "
+                "converted between disk containers and written back to a "
+                "floppy unchanged."
+            )
         if kind == "gemdos":
             self.refresh_gemdos_capabilities(session)
         elif kind == "hd":
@@ -950,16 +1011,18 @@ class DiskService(
         can also be wrapped as an MSA or a DIM, or as HFE or SCP flux when
         HxCFE has a loader for its geometry.
         """
-        if session.kind not in {"gemdos", "hd"}:
+        if session.kind not in {"gemdos", "hd", "unknown"}:
             return []
         size = session.path.stat().st_size
+        if session.kind == "unknown" and size not in FLOPPY_SIZES:
+            return []
         native_extension = "img" if session.kind == "hd" else "st"
         formats = [{
             "format": "native",
             "extension": native_extension,
             "label": f"Native sector image (.{native_extension})",
         }]
-        if session.kind == "gemdos" and size in FLOPPY_SIZES:
+        if session.kind in {"gemdos", "unknown"} and size in FLOPPY_SIZES:
             formats.append({
                 "format": "msa",
                 "extension": "msa",
@@ -1677,10 +1740,9 @@ class DiskService(
         for child in sorted(
             mount.iter_entries(target), key=lambda entry: natural_name_key(entry.name)
         ):
-            meta = mount.atari_meta(child.path)
-            bits = int(meta.attributes or 0)
+            bits = int(child.attributes or 0)
             attributes = format_attributes(bits)
-            stamp = meta.datestamp
+            stamp = child.datestamp
             datestamp = (
                 stamp.isoformat(sep="T", timespec="milliseconds") if stamp else ""
             )
@@ -1691,13 +1753,21 @@ class DiskService(
                 "attributeBits": bits,
                 "attr": attributes,
                 "datestamp": datestamp,
-                "length": (
-                    sum(1 for _entry in mount.iter_entries(child.path))
-                    if child.is_dir
-                    else int(child.length)
-                ),
+                "length": int(child.length),
                 "filetype": "" if child.is_dir else (mount.filetype(child.path) or ""),
             }
+            if child.is_dir:
+                # A directory entry's length field is meaningless on a FAT
+                # volume, so the useful number is how many entries it holds.
+                # A damaged entry that points outside the volume must not
+                # stop the rest of its parent being listed, which is exactly
+                # the state a cracked or partly overwritten game disk is
+                # often found in.
+                try:
+                    row["length"] = sum(1 for _entry in mount.iter_entries(child.path))
+                except Exception as exc:
+                    row["length"] = 0
+                    row["damaged"] = self._friendly_engine_error(str(exc))
             if not child.is_dir:
                 content_kind = self._listing_content_kind(
                     session, None, str(child.path), row,
