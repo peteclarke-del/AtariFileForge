@@ -64,9 +64,16 @@ does:
 | Falcon030 | TOS 4.00, 4.02, 4.04 | `tos404.img`, `tos402.img`, `tos400.img` |
 
 Any language variant is accepted: `tos104de.img` is still TOS 1.04. Within
-one release the `uk` file is preferred, then `us`, then the rest in name
-order. The Falcon ROMs have no language suffix because one ROM covers every
-language.
+one release the file with no language comes first, then `uk`, then `us`, then
+the rest in name order. The Falcon ROMs have no language suffix because one
+ROM covers every language, which is why the plain name ranks first.
+
+A collection gathered from the preservation archives carries alternative
+dumps beside the good ones, so two more rules apply. A file that does not
+decode as a ROM is ignored altogether, and between two dumps of one release
+the larger is taken. Both are needed: a dump of half the expected length
+still carries a perfectly good header and reports its version happily, and
+booting one gives a machine that hangs with nothing on screen.
 
 ## How the application chooses
 
