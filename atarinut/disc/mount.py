@@ -1,15 +1,16 @@
-"""Turning ``image.adf:C/List`` into a mounted volume and an inner path.
+"""Turning ``image.st:AUTO\\FOO.PRG`` into a mounted volume and an inner path.
 
-Every workbench operation names one place inside one image. Rather than pass a
-file path and an inner path separately through a dozen call sites, the engine
-accepts a single *compound path*: the host file, a colon, then the GEMDOS
-path inside it. That is the same shape an Atari user types at a shell prompt,
-and it means a command can be logged, repeated and reasoned about as one
-string.
+Every workbench operation names one place inside one image. Rather than pass
+a file path and an inner path separately through a dozen call sites, the
+engine accepts a single *compound path*: the host file, a colon, then the
+GEMDOS path inside it. That mirrors what an Atari user types at a shell
+prompt, and it means a command can be logged, repeated and reasoned about as
+one string.
 
-Splitting is done by testing candidate prefixes against the filesystem rather
-than by finding the first colon, because a host directory may legitimately
-contain one and an inner path may legitimately begin with one.
+Splitting is done by testing candidate prefixes against the filesystem
+rather than by finding the first colon, because a host directory may
+legitimately contain one and an inner path may legitimately begin with a
+drive letter.
 """
 
 from __future__ import annotations
@@ -19,13 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import ConfigurationError, DataError
-from ..filesystem import (
-    RigidDiskMount,
-    create_filesystem,
-    geometry_from_geo,
-    identify,
-    reader_for,
-)
+from ..filesystem import AhdiMount, create_filesystem, identify, reader_for
 from ..filesystem.gemdos import join_path, split_path
 
 
@@ -37,6 +32,7 @@ class ResolvedMount:
     path: str
     image: Path
     filesystem: str
+    partition: int | None = None
 
     @property
     def parts(self) -> list[str]:
@@ -44,7 +40,7 @@ class ResolvedMount:
 
 
 def split_compound(compound: str) -> tuple[Path, str]:
-    """Split ``image.adf:C/List`` into its host path and inner path."""
+    """Split ``image.st:AUTO\\FOO.PRG`` into its host path and inner path."""
     text = str(compound)
     if not text:
         raise ConfigurationError("An empty path names nothing.")
@@ -53,7 +49,7 @@ def split_compound(compound: str) -> tuple[Path, str]:
         return candidate, ""
     # Walk the colons from the right so the longest existing file wins. A
     # trailing colon means "the root of this volume", which is how GEMDOS
-    # spells a device root.
+    # spells a drive root.
     positions = [index for index, character in enumerate(text) if character == ":"]
     for index in reversed(positions):
         host = Path(text[:index])
@@ -65,17 +61,6 @@ def split_compound(compound: str) -> tuple[Path, str]:
     return candidate, ""
 
 
-def _geometry_sidecar(image: Path):
-    """Load a ``.geo`` sidecar written beside an RDB-less hardfile."""
-    for candidate in (
-        image.with_suffix(image.suffix + ".geo"),
-        image.with_suffix(".geo"),
-    ):
-        if candidate.is_file():
-            return geometry_from_geo(candidate.read_bytes())
-    return None
-
-
 def mount_image(
     image: Path | str,
     *,
@@ -83,7 +68,11 @@ def mount_image(
     filesystem: str | None = None,
     partition: int | None = None,
 ):
-    """Mount an image, choosing the filing system by content when not told."""
+    """Mount an image, choosing the filing system by content when not told.
+
+    An AHDI image opens as its partition table unless ``partition`` selects
+    one of the volumes on it.
+    """
     image = Path(image)
     if not image.is_file():
         raise DataError(f"{image} does not exist.")
@@ -93,19 +82,19 @@ def mount_image(
         if not candidates:
             raise DataError(
                 "No GEMDOS filing system was found in these bytes. Supply the raw, "
-                "uncompressed image rather than an emulator wrapper, an archive member "
-                "or a flux capture. This build reads OFS and FFS volumes "
-                "(DOS\\0 to DOS\\5), RDB partitioned hard drives and Kickstart ROMs."
+                "uncompressed image rather than an MSA or DIM container, an archive "
+                "member or a flux capture. This build reads FAT12 and FAT16 volumes, "
+                "AHDI partitioned hard disks and TOS ROM images."
             )
         name = candidates[0].filesystem
     driver = create_filesystem(name)
     reader = reader_for(image, writable=writable)
     try:
-        mount = driver.open(reader, _geometry_sidecar(image))
+        mount = driver.open(reader, None)
     except Exception:
         reader.close()
         raise
-    if isinstance(mount, RigidDiskMount) and partition is not None:
+    if isinstance(mount, AhdiMount) and partition is not None:
         try:
             return mount.open_partition(partition, writable=writable), name
         except Exception:
@@ -133,6 +122,7 @@ def resolve_mount(
             path=join_path(split_path(inner)),
             image=image,
             filesystem=name,
+            partition=partition,
         )
     finally:
         close = getattr(mount, "close", None)

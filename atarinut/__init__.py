@@ -1,31 +1,31 @@
 """Atarinut: the GEMDOS filing-system engine used by Atari File Forge.
 
-Atarinut reads and writes the media an Atari actually used:
+Atarinut reads and writes the media an Atari ST actually used:
 
-* **OFS** and **FFS** volumes (``DOS\\0`` to ``DOS\\5``), on 880 KiB and
-  1.76 MiB floppies and on hard-drive partitions of any size.
-* **RDB** (Rigid Disk Block) partitioned hard-drive files, so one ``.hdf``
-  can present several independently mountable volumes.
-* **Kickstart** ROM images, decoded into their resident-module list.
+* **FAT12** floppies in every format TOS writes, from single-sided 360 KiB
+  to high-density 1.44 MiB, and **FAT16** hard-disk volumes with the large
+  logical sectors AHDI, HDX and HDDRIVER choose.
+* **AHDI** partitioned hard-disk images, including XGM chains, ICD tables,
+  PC-style MBR tables and byte-swapped IDE dumps.
+* **TOS ROM** images, decoded into their components by ``atarinut.tosrom``.
 
 The public API is deliberately small and is the only surface Atari File Forge
 depends on:
 
 ``atarinut.filesystem``
-    ``create_filesystem``, ``reader_for``, ``identify``, ``geometry_from_geo``
-    and the ``AtariMetadata`` / ``Datestamped`` / ``Filetyped`` protocols.
+    ``create_filesystem``, ``reader_for``, ``identify``, ``format_volume``,
+    ``geometry_from_bpb``, ``create_partitioned_image`` and the
+    ``AtariMetadata`` / ``Datestamped`` protocols.
 ``atarinut.disc.mount``
-    ``resolve_mount``, which turns ``image.adf:C/List`` into a mounted volume
-    and an inner path.
+    ``resolve_mount``, which turns ``image.st:AUTO\\FOO.PRG`` into a mounted
+    volume and an inner path, with ``partition=N`` for hard disks.
 ``atarinut.disc.cli``
-    The ``adisc`` command line and the bulk-copy helpers it shares with the
-    workbench.
+    The ``python -m atarinut`` command line and the bulk-copy helpers it
+    shares with the workbench.
 ``atarinut.file``
-    ``Access``, ``AtariMeta`` and the protection-bit helpers.
+    ``Access``, ``AtariMeta`` and the attribute and datestamp helpers.
 ``atarinut.basic``
     ST BASIC tokenising and detokenising.
-``atarinut.kickfs``
-    Kickstart ROM identity and module decoding.
 """
 
 from .version import __version__
