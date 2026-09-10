@@ -58,7 +58,6 @@ def create_hex_editor_blueprint(service: DiskService) -> Blueprint:
             session,
             _integer(request.args.get("offset"), "offset"),
             _integer(request.args.get("length"), "length", 256),
-            str(request.args.get("target") or "image"),
         ))
 
     @blueprint.get("/api/images/<image_id>/hex/search")
@@ -71,7 +70,6 @@ def create_hex_editor_blueprint(service: DiskService) -> Blueprint:
             _integer(request.args.get("start"), "start"),
             str(request.args.get("direction") or "forward"),
             str(request.args.get("wrap") or "true").lower() not in {"0", "false", "no"},
-            str(request.args.get("target") or "image"),
         ))
 
     @blueprint.post("/api/images/<image_id>/hex")
@@ -85,7 +83,6 @@ def create_hex_editor_blueprint(service: DiskService) -> Blueprint:
             str(data.get("version") or ""),
             data.get("changes"),
             data.get("confirmed") is True,
-            str(data.get("target") or "image"),
         ))
 
     @blueprint.post("/api/images/<image_id>/hex/compare")
@@ -93,7 +90,7 @@ def create_hex_editor_blueprint(service: DiskService) -> Blueprint:
     def compare_hex(image_id):
         upload, size = _comparison_upload()
         session = service.get(image_id)
-        report = compare_raw_image(session, upload.stream, size, str(request.args.get("target") or "image"))
+        report = compare_raw_image(session, upload.stream, size)
         report["name"] = upload.filename
         return jsonify(report)
 

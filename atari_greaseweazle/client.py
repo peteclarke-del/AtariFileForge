@@ -1,8 +1,33 @@
-"""Safe subprocess adapter for writing Atari images with Greaseweazle.
+"""Safe subprocess adapter for reading and writing Atari floppies with Greaseweazle.
 
 The module deliberately has no Flask, GTK or Nautilus dependencies. Both
 Atari File Forge and a file-manager extension can therefore use the same
 probe, validation, progress and verification policy.
+
+Formats and geometry
+--------------------
+
+``gw`` decides what a file is by its suffix, and for a sector image it also
+needs to be told the disk's shape. An ``.st`` maps to gw's plain ``IMG``
+class, which has no default format, so ``gw read disk.st`` and ``gw write
+disk.st`` both stop with "Sector image requires a disk format to be
+specified" unless ``--format`` is given. An ``.msa`` carries its own shape,
+so writing one needs no format, but reading a disk into one does: gw has no
+sectors to describe until a format tells it how to decode the flux. Flux
+targets (``.hfe``, ``.scp``) and ``.ipf`` never take a format.
+
+The format names are gw's own ``atarist.*`` definitions, which cover eighty
+cylinders at nine, ten and eleven sectors on one or two sides, plus the IBM
+definitions for high density and 5.25-inch media. ``gw_format`` turns a
+layout into one of those names and refuses a layout gw has no definition
+for, rather than letting gw write the first eighty tracks of an 82-track
+image and call it done.
+
+Two suffixes are refused outright because gw would misread them. ``.stx`` is
+a Pasti capture gw does not support at all; the disk it came from is captured
+as ``.scp`` or ``.hfe`` flux instead. ``.dim`` is, to gw, the PC-98 DIFC
+format, not the FastCopy Pro image an ST user means; convert it to ``.st``
+first.
 """
 
 from __future__ import annotations
@@ -30,6 +55,14 @@ class ImageFormat:
     suffix: str
     label: str
     automatic_verification: bool
+    #: Whether gw needs ``--format`` to read a disk into this file.
+    format_on_read: bool = False
+    #: Whether gw needs ``--format`` to write this file to a disk.
+    format_on_write: bool = False
+
+    @property
+    def sector_image(self) -> bool:
+        return self.automatic_verification
 
 
 @dataclass(frozen=True)
@@ -62,13 +95,39 @@ class WriteResult:
 #: image can be verified by reading the disk back and comparing it; a flux
 #: capture cannot, because two reads of the same disk are never bit-identical.
 IMAGE_FORMATS = {
-    ".adf": ImageFormat(".adf", "GEMDOS sector image", True),
-    ".adz": ImageFormat(".adz", "Compressed GEMDOS sector image", True),
-    ".dms": ImageFormat(".dms", "DiskMasher archive", True),
+    ".st": ImageFormat(".st", "Atari ST sector image", True, format_on_read=True, format_on_write=True),
+    ".msa": ImageFormat(".msa", "Magic Shadow Archiver image", True, format_on_read=True),
     ".hfe": ImageFormat(".hfe", "HFE flux-level disk", False),
     ".scp": ImageFormat(".scp", "SuperCard Pro flux capture", False),
     ".ipf": ImageFormat(".ipf", "SPS preservation image", False),
 }
+
+#: Suffixes gw would accept or misread, and what to do instead.
+REFUSED_FORMATS = {
+    ".stx": (
+        "Greaseweazle cannot read or write Pasti .stx captures. Capture the disk as "
+        "SCP or HFE flux instead, or convert the STX to .st to write its plain sectors."
+    ),
+    ".dim": (
+        "Greaseweazle reads .dim as the PC-98 DIFC format, not a FastCopy Pro image. "
+        "Convert the DIM to .st before writing it."
+    ),
+}
+
+#: gw's own disk definitions, keyed by (tracks, sides, sectors per track).
+GW_FORMATS: dict[tuple[int, int, int], str] = {
+    (80, 1, 9): "atarist.360",
+    (80, 1, 10): "atarist.400",
+    (80, 1, 11): "atarist.440",
+    (80, 2, 9): "atarist.720",
+    (80, 2, 10): "atarist.800",
+    (80, 2, 11): "atarist.880",
+    (80, 2, 18): "ibm.1440",
+    (40, 1, 9): "ibm.180",
+    (40, 2, 9): "ibm.360",
+}
+_FORMAT_NAME = re.compile(r"^[a-z0-9]+(\.[a-z0-9]+)+$")
+
 DRIVE_CHOICES = ("A", "B", "0", "1", "2", "3")
 _DRIVE_PATTERN = re.compile(r"[A-Za-z0-9]+")
 _TRACK_PATTERN = re.compile(r"^\s*T(\d+)\.(\d+):")
@@ -77,6 +136,8 @@ _GEOMETRY_PATTERN = re.compile(r"(?:Writing|Reading) c=(\d+)-(\d+):h=(\d+)-(\d+)
 
 def image_format(path_or_name: str | Path) -> ImageFormat:
     suffix = Path(path_or_name).suffix.casefold()
+    if suffix in REFUSED_FORMATS:
+        raise GreaseweazleError(REFUSED_FORMATS[suffix])
     try:
         return IMAGE_FORMATS[suffix]
     except KeyError as exc:
@@ -84,6 +145,27 @@ def image_format(path_or_name: str | Path) -> ImageFormat:
         raise GreaseweazleError(
             f"Greaseweazle writing supports {supported}; {suffix or 'this file'} is not a floppy image."
         ) from exc
+
+
+def gw_format(tracks: int, sides: int, sectors: int) -> str:
+    """The gw ``--format`` name for a layout, or a refusal naming the gap."""
+    name = GW_FORMATS.get((int(tracks), int(sides), int(sectors)))
+    if name is None:
+        raise GreaseweazleError(
+            f"Greaseweazle has no disk definition for {tracks} tracks, {sides} side(s), "
+            f"{sectors} sectors per track. Its Atari ST definitions cover eighty tracks at "
+            "9, 10 or 11 sectors; capture or write other layouts as HFE or SCP flux."
+        )
+    return name
+
+
+def _validated_format(value: str | None) -> str | None:
+    if value is None:
+        return None
+    name = str(value).strip()
+    if name not in set(GW_FORMATS.values()) and not _FORMAT_NAME.fullmatch(name):
+        raise GreaseweazleError(f"“{value}” is not a Greaseweazle disk format name.")
+    return name
 
 
 @contextmanager
@@ -260,20 +342,31 @@ class GreaseweazleClient:
         progress: Callable[[str, int | None, int | None], None] | None = None,
         *,
         revolutions: int | None = None,
+        disk_format: str | None = None,
     ) -> ReadResult:
         """Capture a physical disk into an image file.
 
         The destination suffix selects what gw produces, so an ``.scp`` target
-        captures flux and a sector suffix such as ``.adf`` or ``.adf`` decodes
-        as it reads. The file is only returned once gw has exited cleanly and
-        left a non-empty image behind.
+        captures flux and a sector suffix such as ``.st`` or ``.msa`` decodes
+        as it reads. A sector target needs ``disk_format``, one of gw's own
+        names such as ``atarist.720``; ``gw_format`` supplies it from a
+        layout. The file is only returned once gw has exited cleanly and left
+        a non-empty image behind.
         """
         path = Path(destination)
         image_type = image_format(path)
         selected_drive = self._drive(drive)
+        format_name = _validated_format(disk_format)
+        if image_type.format_on_read and format_name is None:
+            raise GreaseweazleError(
+                f"Reading a disk into {image_type.suffix} needs its geometry: Greaseweazle "
+                "cannot decode sectors without a disk format. Choose one, or capture flux as SCP or HFE."
+            )
         command = self._ready_command()
         report = progress or (lambda _message, _current=None, _total=None: None)
         arguments = [command, "read", f"--drive={selected_drive}"]
+        if format_name is not None:
+            arguments.append(f"--format={format_name}")
         if revolutions is not None:
             if not 1 <= int(revolutions) <= 10:
                 raise GreaseweazleError("Choose between 1 and 10 revolutions per track.")
@@ -319,15 +412,32 @@ class GreaseweazleClient:
         image: str | Path,
         drive: str,
         progress: Callable[[str, int | None, int | None], None] | None = None,
+        *,
+        disk_format: str | None = None,
     ) -> WriteResult:
+        """Write an image to a physical disk.
+
+        A ``.st`` needs ``disk_format`` because gw cannot tell its shape from
+        the file; an ``.msa`` carries its own and a flux container needs none.
+        """
         path = Path(image)
         image_type = image_format(path)
         selected_drive = self._drive(drive)
+        format_name = _validated_format(disk_format)
+        if image_type.format_on_write and format_name is None:
+            raise GreaseweazleError(
+                f"Writing a {image_type.suffix} needs its geometry: Greaseweazle cannot tell "
+                "the shape of a plain sector image. Choose the disk format before writing."
+            )
         command = self._ready_command()
         report = progress or (lambda _message, _current=None, _total=None: None)
+        arguments = [command, "write", f"--drive={selected_drive}"]
+        if format_name is not None:
+            arguments.append(f"--format={format_name}")
+        arguments.append(str(path))
         report(f"Starting physical write on drive {selected_drive}", 0, None)
         return_code, output, tracks, total = self._stream(
-            [command, "write", f"--drive={selected_drive}", str(path)],
+            arguments,
             report,
             activity="Writing physical floppy",
             limit_message=(
@@ -353,7 +463,7 @@ class GreaseweazleClient:
                 "Greaseweazle finished without confirming that all tracks verified. Treat the physical disk as unverified."
             )
         report(
-            "Physical disk written and verified" if verified else "Physical disk written; HFE verification is not available",
+            "Physical disk written and verified" if verified else "Physical disk written; flux verification is not available",
             total or len(tracks),
             total or len(tracks),
         )

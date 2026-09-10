@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import atari_paths
 from .editor_project import editor_project_key, normalise_editor_project
 from .errors import DiskError
 from .image_session import ImageSession
@@ -11,9 +12,11 @@ from .rom import (
     bank_count,
     bank_number,
     inspect_bank as inspect_rom_bank,
+    image_context,
     inspect_image as inspect_rom_image,
-    parse_rom_header,
+    parse_cartridge_header,
     read_bank as read_rom_bank,
+    rename_cartridge,
     validate_bank_size,
     validate_layout,
     validate_platform,
@@ -53,16 +56,15 @@ class RomDiskMixin:
             data,
             int(bank),
             session.rom_erase_byte,
+            image_context(session.path),
             include_contents=True,
-            # Kickstart finds a ROM's contents by scanning for resident tags,
-            # so every Atari ROM is scanned for them, not only an extended one.
-            include_resident_modules=True,
+            include_entry_points=True,
         )
         decoded["matchingBanks"] = summary.get("matchingBanks", [])
-        if summary.get("extensionHeader"):
-            decoded["extensionHeader"] = summary["extensionHeader"]
-            decoded["filetype"] = summary["filetype"]
-            decoded["structures"] = summary["structures"]
+        if summary.get("imageHeader"):
+            # The whole image's identity travels with every bank, so a bank
+            # after the first is named after the ROM it belongs to.
+            decoded["imageHeader"] = summary["imageHeader"]
         return decoded
 
     def configure_rom(
@@ -176,43 +178,28 @@ class RomDiskMixin:
         return targets
 
     def rename_rom_bank(self, session: ImageSession, bank: int, title: str) -> None:
+        """Rename a cartridge's first application in place.
+
+        A TOS ROM has no title field: its identity is the version word and
+        country code, and every string in it is addressed absolutely, so
+        nothing can be renamed without moving code. A cartridge application
+        header does carry a fixed 14-byte name, and that is the one rename
+        the workbench offers.
+        """
         try:
-            data = bytearray(read_rom_bank(session.path, bank, session.rom_bank_size))
+            data = read_rom_bank(session.path, bank, session.rom_bank_size)
         except RomError as exc:
             raise DiskError(str(exc)) from exc
-        header = parse_rom_header(data)
-        if header is None:
-            raise DiskError("That bank has no editable Atari-family ROM title header.")
-        try:
-            encoded = str(title).encode("ascii")
-        except UnicodeEncodeError as exc:
-            raise DiskError("ROM titles can use printable ASCII characters only.") from exc
-        marker = int(data[7])
-        copyright_end = data.find(0, marker + 1, min(len(data), marker + 192)) if marker < len(data) else -1
-        region_end = copyright_end + 1 if copyright_end >= 0 else marker + 1
-        version = header.version.encode("ascii", "replace")
-        copyright_text = header.copyright.encode("ascii", "replace")
-        required = len(encoded) + 1 + len(version) + 1 + len(copyright_text) + 1
-        available = region_end - 9
-        maximum_title = max(0, available - (required - len(encoded)))
-        if not encoded or required > available:
+        if parse_cartridge_header(data) is None:
             raise DiskError(
-                f"This header has room for a title of 1 to {maximum_title} characters. "
-                "Use the hex editor to reorganise the header before making it longer."
+                "That bank has no cartridge application header. A TOS ROM's identity is "
+                "its version and country words and cannot be renamed."
             )
-        if any(byte < 32 or byte > 126 for byte in encoded):
-            raise DiskError("ROM titles can use printable ASCII characters only.")
-        data[9:region_end] = bytes((session.rom_erase_byte,)) * available
-        cursor = 9
-        for value in (encoded, version):
-            data[cursor : cursor + len(value)] = value
-            cursor += len(value)
-            data[cursor] = 0
-            cursor += 1
-        data[7] = cursor - 1
-        data[cursor : cursor + len(copyright_text)] = copyright_text
-        data[cursor + len(copyright_text)] = 0
-        self.put_rom_bank(session, bytes(data), bank)
+        try:
+            updated = rename_cartridge(data, title)
+        except RomError as exc:
+            raise DiskError(str(exc)) from exc
+        self.put_rom_bank(session, updated, bank)
 
     def rom_bank_bytes(self, session: ImageSession, inner: str) -> bytes:
         try:
@@ -266,7 +253,10 @@ class RomDiskMixin:
         """Follow file and directory moves without orphaning editor annotations."""
         replacements = sorted(
             (
-                (str(item.get("source") or "").rstrip("."), str(item.get("destination") or "").rstrip("."))
+                (
+                    atari_paths.normalise(item.get("source")),
+                    atari_paths.normalise(item.get("destination")),
+                )
                 for item in moves
                 if item.get("source") and item.get("destination")
             ),
@@ -282,12 +272,17 @@ class RomDiskMixin:
             key_side, separator, path = key.partition("|")
             if not separator or key_side != side_key:
                 continue
-            folded = path.casefold()
+            # An annotation key was stored exactly as the client spelled the
+            # path, which may have used either separator. Both are folded to
+            # the canonical form before the subtree comparison.
+            canonical = atari_paths.normalise(path)
+            folded = canonical.casefold()
             for source, destination in replacements:
                 source_folded = source.casefold()
-                if folded != source_folded and not folded.startswith(source_folded + "/"):
+                branch = f"{source_folded}{atari_paths.SEPARATOR}"
+                if folded != source_folded and not folded.startswith(branch):
                     continue
-                suffix = path[len(source):]
+                suffix = canonical[len(source):]
                 changed[editor_project_key(destination + suffix, side)] = project
                 removed.append(key)
                 break
@@ -307,15 +302,19 @@ class RomDiskMixin:
         side: int | None,
     ) -> int:
         """Remove annotations belonging to deleted files or directory trees."""
-        prefixes = [str(path or "").rstrip(".").casefold() for path in paths if path]
+        prefixes = [atari_paths.normalise(path).casefold() for path in paths if path]
         side_key = str(side) if side is not None else "-"
         removed = []
         for key in session.editor_projects:
             key_side, separator, path = key.partition("|")
             if not separator or key_side != side_key:
                 continue
-            folded = path.casefold()
-            if any(folded == prefix or folded.startswith(prefix + "/") for prefix in prefixes):
+            folded = atari_paths.normalise(path).casefold()
+            if any(
+                folded == prefix
+                or folded.startswith(f"{prefix}{atari_paths.SEPARATOR}")
+                for prefix in prefixes
+            ):
                 removed.append(key)
         if not removed:
             return 0

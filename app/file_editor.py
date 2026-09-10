@@ -7,19 +7,24 @@ from difflib import unified_diff
 from bisect import bisect_right
 from pathlib import Path
 
-from .atari_metadata import format_protection
+from .atari_metadata import format_attributes as format_protection
 from .checksum import sha256_bytes, sha256_path
 from .content_kind import (
     analyse_content,
     format_basic_listing as _format_basic_listing,
-    is_dms_container,
+    is_container_file,
 )
 from .disk_service import DiskError, DiskService, ImageSession
 from .hex_service import MAX_HEX_READ, _decode_changes, _search_pattern
 from .operations import OperationCancelled
+from .disk_identity import program_header
 from .rom_workbench import RomWorkbenchError, disassemble
 from . import atari_paths
 
+
+#: Session kinds whose entries are whole tracks of a disk container rather
+#: than files in a filing system.
+CONTAINER_SESSION_KINDS = frozenset({"msa", "dim", "stx"})
 
 MAX_EDITABLE_TEXT = 64 * 1024
 MAX_DISASSEMBLY_FILE = 1024 * 1024
@@ -34,22 +39,20 @@ def _catalogue_search_terms(row: dict) -> dict[str, list[str]]:
     fields = {
         "disk title": ("diskTitle",),
         "file type": ("contentKind", "filetype", "type"),
-        "access": ("attr", "access", "attributes"),
-        "protection": ("protectionText", "protection"),
-        "comment": ("comment",),
+        "attributes": ("attributes", "attr"),
+        "datestamp": ("datestamp",),
     }
     for label, keys in fields.items():
         value = next((row.get(key) for key in keys if row.get(key) not in (None, "")), None)
         if value is None:
             continue
         values = {str(value)}
-        if label == "protection":
-            try:
-                numeric = int(str(value), 0) if not isinstance(value, int) else value
-            except (TypeError, ValueError):
-                numeric = None
-            if numeric is not None:
-                values.update({format_protection(numeric), f"&{numeric:X}", f"0x{numeric:X}"})
+        if label == "attributes":
+            # A person may search for the letters the pane prints or for the
+            # byte itself, so both spellings of the same value are indexed.
+            bits = row.get("attributeBits")
+            if isinstance(bits, int):
+                values.update({format_protection(bits), f"0x{bits:02X}", str(bits)})
         terms[label] = sorted(values)
     return terms
 
@@ -129,16 +132,19 @@ def inspect_editable_file(
     side: int | None,
 ) -> dict:
     data, metadata, size, digest = _context(service, session, path, side, MAX_DISASSEMBLY_FILE)
-    dms_proof = None
-    if session.kind == "dms":
-        dms_proof = service.dms_member_editability(session, path)
+    container_proof = None
+    if session.kind in CONTAINER_SESSION_KINDS:
+        container_proof = service.container_member_editability(session, path)
     report = inspect_file_data(
         data, metadata, path,
-        read_only=bool(session.hfe_read_only or (dms_proof and not dms_proof["editable"])),
+        read_only=bool(
+            session.hfe_read_only
+            or (container_proof and not container_proof["editable"])
+        ),
         size=size, digest=digest,
     )
-    if dms_proof is not None:
-        report["dmsProject"] = dms_proof
+    if container_proof is not None:
+        report["containerProject"] = container_proof
     return report
 
 
@@ -155,13 +161,13 @@ def inspect_file_data(
     size = len(data) if size is None else int(size)
     digest = digest or sha256_bytes(data)
     truncated = size > len(data)
-    if is_dms_container(data):
+    if is_container_file(data):
         return {
             "path": path,
             "size": size,
             "sha256": digest,
             "view": "container",
-            "containerKind": "dms",
+            "containerKind": "disk-or-archive",
             "text": "",
             "editable": False,
             "tokenisedBasic": False,
@@ -207,29 +213,28 @@ def search_image_files(
 ) -> dict:
     """Search names and readable source across one mounted filesystem context.
 
-    ``all_partitions`` widens a hard-drive search to every partition the Rigid
-    Disk Block chains to, which is what a person means by "search this drive".
-    Each result then carries the device name of the partition it came from, so
-    two identically named files in different volumes stay distinguishable.
+    ``all_partitions`` widens a hard-disk search to every partition the
+    drive's own table declares, which is what a person means by "search this
+    drive". Each result then carries the drive letter of the partition it came
+    from, so two identically named files in different volumes stay
+    distinguishable.
     """
     needle = str(query or "").strip()
     if not needle:
         raise DiskError("Enter text to search for in this image.")
     if len(needle) > 200:
         raise DiskError("Search text is limited to 200 characters.")
-    if session.kind == "hdf" and session.partition is None and not all_partitions:
+    if session.kind == "hd" and session.partition is None and not all_partitions:
         raise DiskError("Open a partition on this drive before searching its files.")
 
-    if session.kind == "hdf" and all_partitions:
+    if session.kind == "hd" and all_partitions:
         return _search_every_partition(
             service, session, query, side, root, progress, supplemental
         )
 
     files: list[dict] = []
     failed_reads = 0
-    if session.kind == "ofs":
-        files = service.list_ofs_catalogue_files(session, side)
-    elif session.kind in {"kickfs", "dms"}:
+    if session.kind in {"tosrom", "msa", "dim", "stx", "iso"}:
         files = [
             {**row, "path": str(row.get("path") or row.get("name") or "")}
             for row in service.list_directory(session, "", side)["entries"]
@@ -246,7 +251,7 @@ def search_image_files(
             }
             for row in service.list_rom_banks(session)
         ]
-    elif session.kind in {"ffs", "ofs", "hdf"}:
+    elif service.mountable(session):
         pending = [str(root or "")]
         visited = set()
         while pending and len(files) < MAX_IMAGE_SEARCH_FILES:
@@ -401,13 +406,17 @@ def search_image_files(
 M68K_ARCHITECTURES = ("68000", "68010", "68020", "68030", "68040", "68060", "m68k")
 
 #: The processor each hardware profile implies, and why.
+#: Which processor a disassembly assumes for each medium an image can be
+#: prepared for. A floppy has to run on the machine it is put into, and the
+#: oldest of those is a 68000, so floppy code is decoded as 68000 code. A hard
+#: disk implies a machine with a hard-disk interface, and a TOS ROM implies
+#: whichever machine it was built for; both are decoded at the 68030 the TT
+#: and the Falcon carry, which is a superset.
 PROFILE_PROCESSORS = {
-    "a500-ofs": ("68000", "The active hardware profile targets an Atari 500 or 2000"),
-    # An Atari 600 is a 68000 and an Atari 1200 a 68EC020, so code that runs
-    # on both is 68000 code and that is what the profile decodes as.
-    "a1200-ffs": ("68000", "The active hardware profile targets an Atari 600 or 1200"),
-    "tos": ("68030", "The active hardware profile targets an TOS hard drive"),
-    "hardfile": ("68000", "The active hardware profile targets a UAE hardfile"),
+    "floppy": ("68000", "The active hardware profile targets a floppy any ST can read"),
+    "hd": ("68030", "The active hardware profile targets a hard disk"),
+    "volume": ("68030", "The active hardware profile targets a hard-disk volume"),
+    "tos": ("68030", "The active hardware profile targets a TOS ROM"),
 }
 
 
@@ -534,10 +543,10 @@ def _annotate_file_context(
 ) -> None:
     """Add readable-text notes, and mark an entry point when one is known.
 
-    An GEMDOS load file is relocatable and its catalogue entry records no
+    A GEMDOS program is relocatable and its directory entry records no
     address, so ``entry`` is normally ``None``. It is passed only where the
-    caller has proved one, such as a hunk whose first code block starts at a
-    known offset.
+    caller has proved one, such as a program whose header gives the size of
+    the text segment the code begins at.
     """
     rows = report.get("rows", [])
     if not rows:
@@ -628,7 +637,7 @@ def disassemble_file(
     side: int | None,
     architecture: str = "auto",
     origin: int | None = None,
-    start: int = 0,
+    start: int | None = None,
     length: int | None = None,
 ) -> dict:
     data, metadata, size, digest = _context(service, session, path, side, MAX_DISASSEMBLY_FILE)
@@ -646,7 +655,7 @@ def disassemble_file_data(
     path: str,
     architecture: str = "auto",
     origin: int | None = None,
-    start: int = 0,
+    start: int | None = None,
     length: int | None = None,
     *,
     size: int | None = None,
@@ -659,11 +668,12 @@ def disassemble_file_data(
     if not data:
         raise DiskError("An empty file has no machine code to disassemble.")
     architecture, reason = _architecture(session, architecture)
-    # An GEMDOS binary is relocatable: the hunk loader places it wherever
-    # there is free RAM, so there is no base address to assume and nothing in
-    # the catalogue records one. Origin defaults to zero, which is what a
-    # relative listing wants, and the caller can move it deliberately.
+    # A GEMDOS program is relocatable: TOS loads it wherever there is free
+    # RAM, so there is no base address to assume and the directory records
+    # none. Origin defaults to zero, which is what a relative listing wants,
+    # and the caller can move it deliberately.
     selected_origin = int(origin) if origin is not None else 0
+    header, start, length = _program_body(data, start, length)
     available = max(1, len(data) - start)
     requested_length = min(length or available, available, MAX_DISASSEMBLY_FILE)
     entries: list[int] = []
@@ -692,8 +702,36 @@ def disassemble_file_data(
         "architectureReason": reason,
         "strings": strings,
         "project": project or {},
+        "programHeader": header,
         "limited": size > start + requested_length,
     }
+
+
+#: What a GEMDOS program header occupies before the code begins.
+PROGRAM_TEXT_OFFSET = 28
+
+
+def _program_body(data: bytes, start: int, length: int | None):
+    """Where the machine code in a GEMDOS program actually starts.
+
+    The first 28 bytes of a ``.PRG`` are its header: the ``0x601A`` marker
+    and the sizes TOS needs to load it. Disassembling from zero decodes those
+    sizes as instructions, so a listing opened on any Atari program began with
+    seven lines of nonsense before reaching the first real instruction.
+
+    The symbol table at the end is not code either, so the length defaults to
+    the text segment. A caller that names an offset gets exactly that offset,
+    because somebody reading the header deliberately is entitled to. An absent
+    offset is therefore not the same as zero, and the two are kept apart all
+    the way up to the query string.
+    """
+    if start is not None:
+        return None, int(start), length
+    header = program_header(data)
+    if header is None:
+        return None, 0, length
+    text = int(header["text"])
+    return header, PROGRAM_TEXT_OFFSET, length if length is not None else (text or None)
 
 
 def _project_data_rows(
@@ -806,67 +844,145 @@ def _apply_editor_project(report: dict, project: dict, data: bytes, origin: int,
     report["rows"] = rows
 
 
-def _renumber_tokenised(program: bytes, start: int, step: int) -> bytes:
+#: The dialect the editing helpers assume when a request names none. It is
+#: the numbered, text-saving BASIC Atari shipped, which is the one those
+#: helpers were written for; every other dialect has to be named outright so
+#: a listing is never re-encoded as a BASIC it was not written in.
+DEFAULT_BASIC_DIALECT = "st-basic"
+
+
+def _basic_dialect(name: object = None):
+    """Resolve the dialect a request named, and refuse one that cannot be written."""
     try:
-        from atarinut.basic import TokenKind, scan_program
-        from atarinut.basic.linenumber import encode_line_number
-    except ImportError as exc:
-        raise DiskError("The ST BASIC editing library is unavailable.") from exc
-    lines = list(scan_program(program))
-    if not lines:
+        from atarinut.basic import dialect_for
+    except ImportError as exc:  # pragma: no cover - the tokeniser ships with the app
+        raise DiskError("The BASIC editing library is unavailable.") from exc
+    try:
+        dialect = dialect_for(str(name or DEFAULT_BASIC_DIALECT))
+    except Exception as exc:
+        raise DiskError(f"“{name}” is not a BASIC this build reads.") from exc
+    if not dialect.writable:
+        raise DiskError(
+            f"{dialect.name} is read-only in this build: its token stream is "
+            "decoded but never re-encoded, so a saved program could not be "
+            "proved to load again."
+        )
+    return dialect
+
+
+def _dialect_of(data: bytes):
+    """Return the dialect a saved program is written in, refusing an unwritable one."""
+    try:
+        from atarinut.basic import Verdict, detect
+    except ImportError as exc:  # pragma: no cover - the tokeniser ships with the app
+        raise DiskError("The BASIC editing library is unavailable.") from exc
+    detection = detect(data)
+    if detection.verdict not in {Verdict.BASIC, Verdict.BASIC_TRAILING} or detection.dialect is None:
+        raise DiskError("The file is no longer a recognised BASIC program.")
+    if not detection.dialect.writable:
+        raise DiskError(
+            f"{detection.dialect.name} is read-only in this build: its token "
+            "stream is decoded but never re-encoded, so a saved program could "
+            "not be proved to load again."
+        )
+    return detection.dialect
+
+
+def _renumber_listing(listing: str, start: int, step: int) -> str:
+    """Renumber a numbered listing and every reference that follows it.
+
+    Renumbering is a text transform. ST BASIC saves its listing as characters,
+    so the numbers at the start of each line and the destinations named by
+    GOTO, GOSUB, THEN, RESTORE and RUN are all ordinary text, and rewriting
+    them is the whole of the job.
+    """
+    rows = listing.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    numbered = [
+        (index, int(match.group(1)), row[match.end():])
+        for index, row in enumerate(rows)
+        if (match := re.match(r"^\s*(\d+)[ \t]?", row))
+    ]
+    if not numbered:
         raise DiskError("The BASIC program contains no numbered lines.")
-    if start < 0 or step < 1 or start + step * (len(lines) - 1) > 32767:
+    if start < 0 or step < 1 or start + step * (len(numbered) - 1) > 32767:
         raise DiskError("Choose line numbers from 0 to 32767 with a positive step.")
-    mapping = {line.line_number: start + index * step for index, line in enumerate(lines)}
-    result = bytearray(program)
-    for line in lines:
-        replacement = mapping[line.line_number]
-        result[line.start + 1] = replacement >> 8
-        result[line.start + 2] = replacement & 0xFF
-        for token in line.tokens:
-            if token.kind is TokenKind.LINENUM:
-                referenced = int(token.value)
-                if referenced in mapping:
-                    result[token.start + 1:token.start + 4] = encode_line_number(mapping[referenced])
-    return bytes(result)
+    mapping = {
+        original: start + position * step
+        for position, (_index, original, _body) in enumerate(numbered)
+    }
+
+    def retarget(match: "re.Match[str]") -> str:
+        referenced = int(match.group(2))
+        return f"{match.group(1)}{mapping.get(referenced, referenced)}"
+
+    for position, (index, original, body) in enumerate(numbered):
+        body = re.sub(
+            r"(\b(?:GOTO|GOSUB|RESTORE|THEN|RUN|ELSE)\s+)(\d+)",
+            retarget,
+            body,
+            flags=re.IGNORECASE,
+        )
+        rows[index] = f"{mapping[original]} {body.lstrip()}".rstrip()
+    return "\n".join(rows)
 
 
-def prepare_basic_source(source: str, start: int, step: int) -> dict:
+def prepare_basic_source(source: str, start: int, step: int, dialect: object = None) -> dict:
+    """Renumber a listing, and prove the result still encodes."""
+    chosen = _basic_dialect(dialect)
+    if not chosen.line_numbers:
+        raise DiskError(
+            f"{chosen.name} has no line numbers; it indents its blocks instead, "
+            "so there is nothing to renumber."
+        )
     try:
         from atarinut.basic import detokenise, scan_program, tokenise
-        program = tokenise(source.replace("\r\n", "\n").replace("\r", "\n"))
-        renumbered = _renumber_tokenised(program, start, step)
+        cleaned = source.replace("\r\n", "\n").replace("\r", "\n")
+        program = tokenise(_renumber_listing(cleaned, start, step), dialect=chosen)
         return {
-            "text": _format_basic_listing(detokenise(renumbered)),
-            "lineCount": len(list(scan_program(renumbered))),
+            "text": _format_basic_listing(
+                detokenise(program, dialect=chosen), numbered=chosen.line_numbers
+            ),
+            "lineCount": len(list(scan_program(program, dialect=chosen))),
+            "dialect": chosen.name,
+            "dialectId": chosen.identifier,
         }
     except DiskError:
         raise
     except Exception as exc:
-        raise DiskError(f"The BASIC listing could not be tokenised: {exc}") from exc
+        raise DiskError(f"The BASIC listing could not be encoded: {exc}") from exc
 
 
-def normalise_basic_source(source: str) -> dict:
+def normalise_basic_source(source: str, dialect: object = None) -> dict:
+    chosen = _basic_dialect(dialect)
     try:
         from atarinut.basic import detokenise, scan_program, tokenise
-        program = tokenise(source.replace("\r\n", "\n").replace("\r", "\n"))
+        program = tokenise(
+            source.replace("\r\n", "\n").replace("\r", "\n"), dialect=chosen
+        )
         return {
-            "text": _format_basic_listing(detokenise(program)),
-            "lineCount": len(list(scan_program(program))),
+            "text": _format_basic_listing(
+                detokenise(program, dialect=chosen), numbered=chosen.line_numbers
+            ),
+            "lineCount": len(list(scan_program(program, dialect=chosen))),
+            "dialect": chosen.name,
+            "dialectId": chosen.identifier,
         }
     except Exception as exc:
-        raise DiskError(f"The pasted text is not a valid numbered ST BASIC listing: {exc}") from exc
+        raise DiskError(f"The pasted text is not a valid {chosen.name} listing: {exc}") from exc
 
 
-def verify_basic_source(source: str, baseline: str = "") -> dict:
-    """Tokenise, detokenise and retokenise source, reporting its exact round trip."""
+def verify_basic_source(source: str, baseline: str = "", dialect: object = None) -> dict:
+    """Encode, decode and re-encode a listing, reporting its exact round trip."""
+    chosen = _basic_dialect(dialect)
     try:
         from atarinut.basic import detokenise, scan_program, tokenise
         cleaned = source.replace("\r\n", "\n").replace("\r", "\n")
-        program = tokenise(cleaned)
-        listing = _format_basic_listing(detokenise(program))
-        repeated = tokenise(listing)
-        scanned = list(scan_program(program))
+        program = tokenise(cleaned, dialect=chosen)
+        listing = _format_basic_listing(
+            detokenise(program, dialect=chosen), numbered=chosen.line_numbers
+        )
+        repeated = tokenise(listing, dialect=chosen)
+        scanned = list(scan_program(program, dialect=chosen))
         ranges = []
         for index, line in enumerate(scanned):
             end = scanned[index + 1].start if index + 1 < len(scanned) else len(program)
@@ -879,9 +995,9 @@ def verify_basic_source(source: str, baseline: str = "") -> dict:
         diff = list(unified_diff(baseline_lines, listing.splitlines(), fromfile="original", tofile="proposed", lineterm=""))
         warnings = []
         if program != repeated:
-            warnings.append("Tokenising the round-trip listing did not reproduce identical bytes.")
+            warnings.append("Encoding the round-trip listing did not reproduce identical bytes.")
         if len(program) > 65535:
-            warnings.append("The tokenised program exceeds 64 KiB and may not fit the target machine.")
+            warnings.append("The saved program exceeds 64 KiB and may not fit the target machine.")
         return {
             "valid": not warnings,
             "roundTripExact": program == repeated,
@@ -891,25 +1007,36 @@ def verify_basic_source(source: str, baseline: str = "") -> dict:
             "lineRanges": ranges,
             "destinations": destinations,
             "diff": diff[:4000],
+            "dialect": chosen.name,
+            "dialectId": chosen.identifier,
             "warnings": warnings,
         }
     except Exception as exc:
-        raise DiskError(f"The BASIC listing could not complete a tokenisation round trip: {exc}") from exc
+        raise DiskError(f"The BASIC listing could not complete an encoding round trip: {exc}") from exc
 
 
-def pack_basic_lines(runs: list[list[str]]) -> dict:
-    """Pack ordered BASIC statements using the tokeniser's real line limit.
+def pack_basic_lines(runs: list[list[str]], dialect: object = None) -> dict:
+    """Pack ordered BASIC statements using the encoder's real line limit.
 
-    The browser decides which physical-line boundaries are semantically safe to
-    remove.  This helper has the narrower job of fitting those safe runs into as
-    few tokenised ST BASIC 1.0 lines as possible.  Measuring the actual token stream
-    matters because keywords and line destinations occupy fewer bytes than their
-    readable source spelling.
+    The browser decides which physical-line boundaries are semantically safe
+    to remove. This helper has the narrower job of fitting those safe runs
+    into as few saved lines as possible. Measuring what the encoder actually
+    produces matters because a keyword and a line destination can occupy
+    fewer bytes than their readable spelling.
+
+    Only a numbered dialect is packed: a line number is what a statement can
+    be joined onto, and a dialect without them has nothing to pack into.
     """
+    chosen = _basic_dialect(dialect)
+    if not chosen.line_numbers:
+        raise DiskError(
+            f"{chosen.name} has no line numbers, so its statements cannot be "
+            "packed onto fewer of them."
+        )
     try:
         from atarinut.basic import tokenise
     except ImportError as exc:
-        raise DiskError("The ST BASIC editing library is unavailable.") from exc
+        raise DiskError("The BASIC editing library is unavailable.") from exc
 
     packed: list[list[int]] = []
     for run_number, raw_run in enumerate(runs, start=1):
@@ -921,7 +1048,7 @@ def pack_basic_lines(runs: list[list[str]]) -> dict:
         for statement in statements:
             candidate = [*current, statement]
             try:
-                tokenise(f"10 {':'.join(candidate)}")
+                tokenise(f"10 {':'.join(candidate)}", dialect=chosen)
                 current = candidate
             except Exception as exc:
                 if not current:
@@ -932,7 +1059,7 @@ def pack_basic_lines(runs: list[list[str]]) -> dict:
                 groups.append(len(current))
                 current = [statement]
                 try:
-                    tokenise(f"10 {statement}")
+                    tokenise(f"10 {statement}", dialect=chosen)
                 except Exception as single_exc:
                     raise DiskError(
                         f"A BASIC statement in packing run {run_number} cannot fit on a "
@@ -957,26 +1084,30 @@ def replace_file_bytes(service, session, path, side, content: bytes, expected_sh
     current = service.read_file(session, path, side)
     if sha256_bytes(current) != expected_sha256:
         raise DiskError("The file changed after the editor opened it. Reopen the file before saving.")
-    if session.kind == "dms":
-        service.replace_dms_member(session, path, content)
-        return service.summary(session)
+    if session.kind in CONTAINER_SESSION_KINDS:
+        raise DiskError(
+            "A track inside an MSA, DIM or Pasti container cannot be rewritten "
+            "in place. Convert the container to a .st image and edit that."
+        )
     row = _find_row(service, session, path, side)
     with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="file-edit-", delete=False) as temporary:
         temporary.write(content)
         temporary_path = Path(temporary.name)
-    filetype = row.get("filetype") or None
-    protection = str(row.get("protectionText") or row.get("protection") or "") or None
-    comment = str(row.get("comment") or "") or None
-    # A locked entry shows neither the write nor the delete flag.
-    attributes = str(row.get("attr") or "")
-    was_locked = bool(attributes) and ("w" not in attributes or "d" not in attributes)
+    # The whole of a GEMDOS entry's metadata is one attribute byte and a
+    # datestamp, and both have to survive a rewrite. A read-only file is
+    # unlocked to make room for the new bytes and locked again afterwards,
+    # because that bit is exactly what stops the desktop replacing it.
+    attributes = str(row.get("attributes") or row.get("attr") or "") or None
+    datestamp = str(row.get("datestamp") or "") or None
+    was_locked = bool(attributes) and "r" in attributes
     try:
         if was_locked:
-            service.set_access(session, [path], writable=True, side=side)
-        service.mutate(session, ["rm", "--force", "{image}:" + path], side)
-        service.put(session, path, temporary_path, protection, comment, filetype, side)
+            service.set_access(session, [path], writable=True)
+        service.put(
+            session, path, temporary_path, attributes, datestamp=datestamp,
+        )
         if was_locked:
-            service.set_access(session, [path], writable=False, side=side)
+            service.set_access(session, [path], writable=False)
     finally:
         temporary_path.unlink(missing_ok=True)
     return service.summary(session)
@@ -990,65 +1121,73 @@ def update_file_properties(
     expected_sha256: str,
     *,
     protection: str = "",
-    comment: str = "",
-    filetype: str = "",
     writable: bool = True,
+    datestamp: str | None = None,
 ) -> dict:
-    """Rewrite catalogue metadata without changing the file's bytes."""
+    """Rewrite directory metadata without changing the file's bytes.
+
+    A GEMDOS entry keeps its attribute byte and its datestamp in the
+    directory itself, so both are changed in place. Nothing is rewritten,
+    which is what makes this safe on a file whose contents the editor has
+    not read in full.
+    """
     content = service.read_file(session, path, side)
     if sha256_bytes(content) != expected_sha256:
         raise DiskError("The file changed after the editor opened it. Reopen the file before changing its properties.")
     _find_row(service, session, path, side)
-    with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="file-properties-", delete=False) as temporary:
-        temporary.write(content)
-        temporary_path = Path(temporary.name)
-    try:
-        service.set_access(session, [path], writable=True, side=side)
-        service.mutate(session, ["rm", "--force", "{image}:" + path], side)
-        service.put(
-            session, path, temporary_path,
-            str(protection or "") or None,
-            str(comment or "") or None,
-            str(filetype or "") or None,
-            side,
+    if protection:
+        service.set_file_metadata(session, path, str(protection), datestamp=datestamp)
+    elif datestamp:
+        current = service.file_metadata(session, path)
+        service.set_file_metadata(
+            session,
+            path,
+            format_protection(current.get("attributes")),
+            datestamp=datestamp,
         )
-        if not writable:
-            service.set_access(session, [path], writable=False, side=side)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    service.set_access(session, [path], writable=writable)
     return service.summary(session)
 
 
-def _encode_editor_text(text: str, basic: bool) -> bytes:
+def _encode_editor_text(text: str, basic: bool, dialect=None) -> bytes:
     """Encode edited text the way GEMDOS stores it: one newline per line."""
     try:
         normalised = text.replace("\r\n", "\n").replace("\r", "\n")
         if basic:
             from atarinut.basic import tokenise
-            return tokenise(normalised)
+
+            return tokenise(normalised, dialect=dialect or _basic_dialect())
         return normalised.encode("latin-1", "strict")
+    except DiskError:
+        raise
     except Exception as exc:
         raise DiskError(f"The edited file could not be encoded: {exc}") from exc
 
 
-def _preserve_basic_payload(original: bytes, tokenised: bytes) -> bytes:
-    """Replace only an ST BASIC 1.0 program prefix and retain a proven trailing payload."""
+def _preserve_basic_payload(original: bytes, program: bytes) -> bytes:
+    """Replace only the BASIC program and retain a proven trailing payload."""
     try:
         from atarinut.basic import Verdict, detect
-    except ImportError as exc:
-        raise DiskError("The ST BASIC editing library is unavailable.") from exc
+    except ImportError as exc:  # pragma: no cover - the tokeniser ships with the app
+        raise DiskError("The BASIC editing library is unavailable.") from exc
     detection = detect(original)
     if detection.verdict not in {Verdict.BASIC, Verdict.BASIC_TRAILING}:
-        raise DiskError("The file is no longer a recognised tokenised BASIC program.")
+        raise DiskError("The file is no longer a recognised BASIC program.")
     program_length = int(detection.program_length or len(original))
     if program_length < 2 or program_length > len(original):
         raise DiskError("The original BASIC program boundary is invalid.")
-    return tokenised + original[program_length:]
+    return program + original[program_length:]
 
 
 def encode_editor_replacement(original: bytes, text: str, basic: bool) -> bytes:
-    """Encode editor text and preserve any recognised compound BASIC payload."""
-    encoded = _encode_editor_text(text, basic)
+    """Encode editor text and preserve any recognised compound BASIC payload.
+
+    The dialect comes from the bytes being replaced rather than from the
+    request, so an edited program is always saved as the BASIC it was written
+    in and a read-only one is refused before anything is written.
+    """
+    dialect = _dialect_of(original) if basic else None
+    encoded = _encode_editor_text(text, basic, dialect)
     return _preserve_basic_payload(original, encoded) if basic else encoded
 
 
@@ -1080,22 +1219,18 @@ def save_editor_text_as(
         raise DiskError(f"“{leaf}” already exists in this directory.")
 
     row = _find_row(service, session, path, side)
-    content = _encode_editor_text(text, basic)
-    if basic:
-        content = _preserve_basic_payload(current, content)
-    filetype = row.get("filetype") or None
-    protection = str(row.get("protectionText") or row.get("protection") or "") or None
-    comment = str(row.get("comment") or "") or None
-    # A locked entry shows neither the write nor the delete flag.
-    attributes = str(row.get("attr") or "")
-    was_locked = bool(attributes) and ("w" not in attributes or "d" not in attributes)
+    content = encode_editor_replacement(current, text, basic)
+    attributes = str(row.get("attributes") or row.get("attr") or "") or None
+    # The read-only bit is the one attribute a copy must carry: a file the
+    # desktop refuses to delete has to stay that way.
+    was_locked = bool(attributes) and "r" in attributes
     with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="file-save-as-", delete=False) as temporary:
         temporary.write(content)
         temporary_path = Path(temporary.name)
     try:
-        service.put(session, destination, temporary_path, protection, comment, filetype, side)
+        service.put(session, destination, temporary_path, attributes)
         if was_locked:
-            service.set_access(session, [destination], writable=False, side=side)
+            service.set_access(session, [destination], writable=False)
     finally:
         temporary_path.unlink(missing_ok=True)
     return service.summary(session), destination
@@ -1106,7 +1241,10 @@ def file_range(service, session, path, side, offset: int, length: int) -> dict:
         raise DiskError(f"Read between 1 and {MAX_HEX_READ:,} bytes at a time.")
     data = service.read_file(session, path, side)
     return data_range(data, atari_paths.leaf(path), offset, length,
-                      read_only=bool(session.hfe_read_only or session.kind == "dms"))
+                      read_only=bool(
+                          session.hfe_read_only
+                          or session.kind in CONTAINER_SESSION_KINDS
+                      ))
 
 
 def data_range(data: bytes, target_name: str, offset: int, length: int, *, read_only: bool) -> dict:

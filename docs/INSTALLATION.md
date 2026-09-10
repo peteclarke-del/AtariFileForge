@@ -67,9 +67,9 @@ and release references.
 
 The normal installation exposes:
 
-- host port `8674` for the application and API, published from `8666` inside
+- host port `8684` for the application and API, published from `8666` inside
   the container;
-- host port `8675` for the managed emulator display over noVNC, published from
+- host port `8685` for the managed emulator display over noVNC, published from
   `8668` inside the container;
 - the named `atari-file-forge-work` volume for private working sessions.
 
@@ -88,10 +88,10 @@ You need:
 - a current browser with JavaScript, `dialog`, IndexedDB and drag-and-drop
   support.
 
-Large HDA, HDF and RAW images require additional temporary space while an image
+Large hard-disk images require additional temporary space while an image
 is uploaded, checkpointed and packaged. Allow space for the source image, its
 working copy and the finished ZIP at the same time. Raspberry Pi builds also
-need room for native HxCFE, Capstone and FS-UAE compilation.
+need room for the native HxCFE and Capstone builds.
 
 ## Install on desktop Linux, macOS or Windows
 
@@ -104,7 +104,7 @@ cd AtariFileForge
 docker compose up --build -d
 ```
 
-Open <http://localhost:8674> after the service reports healthy.
+Open <http://localhost:8684> after the service reports healthy.
 
 ![Atari File Forge ready for its first image](images/getting-started.png)
 
@@ -152,7 +152,7 @@ docker compose build --pull --progress=plain
 docker compose up -d
 ```
 
-Open `http://<pi-address>:8674` from a browser on the same trusted network.
+Open `http://<pi-address>:8684` from a browser on the same trusted network.
 
 The save and background-operation identifiers work on this plain-HTTP LAN URL.
 Browsers expose `crypto.randomUUID()` only in a secure context, which excludes
@@ -175,7 +175,7 @@ The build performs the following platform-sensitive work:
 1. Builds a native Capstone installation when no suitable wheel can be used.
 2. Builds the pinned HxCFloppyEmulator command-line converter (`hxcfe`), its
    private libraries and the upstream licence.
-3. Builds the FS-UAE runtime components.
+3. Installs the emulator runtime components.
 4. Installs Trixie package names appropriate to the target architecture,
    including `liballegro4.4t64`.
 5. Verifies that Capstone exposes M68K support for every 68000-family mode.
@@ -193,7 +193,7 @@ Check the service and API:
 
 ```bash
 docker compose ps
-curl http://localhost:8674/api/health
+curl http://localhost:8684/api/health
 docker compose logs --tail=100 atari-file-forge
 ```
 
@@ -216,13 +216,13 @@ The Compose service defines these settings:
 | --- | --- | --- |
 | `ATARI_FILE_FORGE_WORK_DIR` | `/app/work` | Working-session and job storage inside the container |
 | `ATARI_MAX_UPLOAD_GIB` | `8` | Maximum accepted browser upload size in GiB |
-| `ATARI_FILE_FORGE_PORT` | `8674` | Host port for the web UI and JSON API |
-| `ATARI_FILE_FORGE_VNC_PORT` | `8675` | Host port for the noVNC emulator display |
+| `ATARI_FILE_FORGE_PORT` | `8684` | Host port for the web UI and JSON API |
+| `ATARI_FILE_FORGE_VNC_PORT` | `8685` | Host port for the noVNC emulator display |
 
 The container always listens on `8666` and `8668`; only the published host
-ports move. They default to `8674` and `8675` because `8666` and `8668` are
-frequently already in use -- the sibling Acorn File Forge publishes exactly
-those, and the two are meant to run side by side.
+ports move. They default to `8684` and `8685` because `8666` and `8668` are
+frequently already in use. The sibling File Forge applications publish 8666,
+8668, 8674 and 8675, and they are all meant to run side by side.
 
 Set either variable to move a port, or bind it to one interface by editing the
 left side of the Compose mapping directly: `127.0.0.1:9866:8666` keeps the

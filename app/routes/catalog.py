@@ -3,17 +3,21 @@ from __future__ import annotations
 import io
 import json
 import re
-import tempfile
-import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
 
-from ..atari_metadata import atari_zip_metadata
-from ..archive_utils import validated_zip_members
 from ..catalog_service import CatalogueService, archive_members
-from ..disk_service import DiskError, DiskService
-from ..formats import OFS_EXTENSIONS, HFE_EXTENSIONS, SCP_EXTENSIONS, DMS_EXTENSIONS
+from ..errors import DiskError
+from ..formats import (
+    DIM_EXTENSIONS,
+    HFE_EXTENSIONS,
+    MSA_EXTENSIONS,
+    SCP_EXTENSIONS,
+    ST_EXTENSIONS,
+    STX_EXTENSIONS,
+)
 from ..filename_policy import session_name_policy
 from ..disk_identity import analyse_directory
 from ..metadata_lookup import enrich_if_ambiguous
@@ -21,8 +25,20 @@ from .common import payload
 from .effects import image_mutation, request_effect
 from .. import atari_paths
 
+if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
+    from ..disk_service import DiskService
 
-DISK_EXTENSIONS = OFS_EXTENSIONS | HFE_EXTENSIONS | SCP_EXTENSIONS | DMS_EXTENSIONS
+
+#: Every floppy container an online download may arrive as. A CD image is not
+#: here: a disc is opened and browsed, not installed onto another volume.
+DISK_EXTENSIONS = (
+    ST_EXTENSIONS
+    | MSA_EXTENSIONS
+    | DIM_EXTENSIONS
+    | STX_EXTENSIONS
+    | HFE_EXTENSIONS
+    | SCP_EXTENSIONS
+)
 
 
 def _catalogue_identities(value: object) -> set[str]:
@@ -38,13 +54,13 @@ def _catalogue_identities(value: object) -> set[str]:
     }
 
 
-def _available_ffs_directory_name(
-    service: DiskService,
+def _available_folder_name(
+    service: "DiskService",
     target,
     parent: str,
     preferred: str,
 ) -> str:
-    """Allocate a legal, unused FFS child name for an online import."""
+    """Allocate a legal, unused folder name for an online import."""
     policy = session_name_policy(target)
     used = {
         str(entry.get("name") or "").casefold()
@@ -60,12 +76,18 @@ def _disk_members(filename: str, content: bytes) -> list[tuple[str, bytes]]:
     ]
 
 
+#: Which container a download's disks are taken from when it offers several.
+#: A ZIP holding the same disk as a plain image and as an MSA should install
+#: once, from the image that needs no unpacking.
+MEDIA_PRIORITY = {".st": 0, ".msa": 1, ".stx": 2, ".dim": 3, ".hfe": 4, ".scp": 5, ".zip": 6}
+
+
 def _preferred_disk_members(filename: str, content: bytes) -> list[tuple[str, bytes]]:
-    """Keep every disk in the best available format, not duplicate dms variants."""
+    """Keep every disk in the best available format, not each of its variants."""
     members = _disk_members(filename, content)
     if not members:
         return []
-    priority = {".adf": 0, ".adz": 1, ".hfe": 2, ".scp": 3, ".dms": 4}
+    priority = MEDIA_PRIORITY
     best = min(priority.get(Path(name).suffix.lower(), 99) for name, _data in members)
     return [
         (name, data)
@@ -74,7 +96,7 @@ def _preferred_disk_members(filename: str, content: bytes) -> list[tuple[str, by
     ]
 
 
-def _copy_disk_files(service: DiskService, source, target, target_path, target_side):
+def _copy_disk_files(service: "DiskService", source, target, target_path, target_side):
     sides = [0, 2] if service.is_two_volume_image(source) else [None]
     copied = 0
     for source_side in sides:
@@ -94,50 +116,7 @@ def _copy_disk_files(service: DiskService, source, target, target_path, target_s
     return copied
 
 
-def _install_tos_package(service: DiskService, target, target_path: str, content: bytes) -> int:
-    if target.kind not in {"ffs", "ofs"}:
-        raise DiskError("TOS packages can only be installed into an FFS or TOS image.")
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile as exc:
-        raise DiskError("The downloaded TOS package is not a valid ZIP file.") from exc
-    installed = 0
-    made = set()
-    try:
-        for info in validated_zip_members(archive):
-            path = PurePosixPath(info.filename)
-            if not path.parts or path.parts[0].casefold() == "riscpkg" or ".." in path.parts:
-                continue
-            parts = [part for part in path.parts if part not in {"", "."}]
-            if info.is_dir() or not parts:
-                continue
-            parent = target_path
-            for part in parts[:-1]:
-                parent = atari_paths.join(parent, part)
-                if parent.casefold() not in made:
-                    service.mutate(target, ["mkdir", "-p", "{image}:" + parent])
-                    made.add(parent.casefold())
-            destination = atari_paths.join(parent, parts[-1])
-            # GEMDOS stores no load or execution address, so the only
-            # metadata a ZIP can carry across is the protection long, which an
-            # Atari-written archive keeps in its external attributes.
-            metadata = atari_zip_metadata(info) or {}
-            protection = hex(metadata["protection"]) if "protection" in metadata else None
-            with tempfile.NamedTemporaryFile(dir=service.work_dir, delete=False) as temporary:
-                temporary.write(archive.read(info)); host_path = Path(temporary.name)
-            try:
-                service.put(target, destination, host_path, protection)
-            finally:
-                host_path.unlink(missing_ok=True)
-            installed += 1
-    finally:
-        archive.close()
-    if not installed:
-        raise DiskError("The package did not contain any installable TOS files.")
-    return installed
-
-
-def create_catalog_blueprint(service: DiskService, work_dir: Path) -> Blueprint:
+def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprint:
     catalogue = CatalogueService(work_dir)
     blueprint = Blueprint("catalog", __name__)
 
@@ -178,7 +157,7 @@ def create_catalog_blueprint(service: DiskService, work_dir: Path) -> Blueprint:
                 installed.update(_catalogue_identities(entry["name"]))
         except DiskError:
             pass
-        for name in session.ffs_source_names.values():
+        for name in session.source_names.values():
             installed.update(_catalogue_identities(name))
         for row in rows:
             candidates = _catalogue_identities(row["title"])
@@ -209,17 +188,15 @@ def create_catalog_blueprint(service: DiskService, work_dir: Path) -> Blueprint:
         for offset, item_id in enumerate(item_ids):
             source = None
             try:
-                filename, content, item = catalogue.download(
-                    item_id,
-                    "ffs" if target.kind in {"ffs", "ofs"} else "ofs",
-                )
-                if item["artifactType"] == "tos-package":
-                    count = _install_tos_package(service, target, target_path, content)
-                    results.append({"id": item_id, "title": item["title"], "installed": count, "metadata": None})
-                    continue
+                # A download offered in several formats is taken as the plain
+                # sector image, which every part of this workshop opens without
+                # unpacking or converting anything first.
+                filename, content, item = catalogue.download(item_id, ".st")
                 members = _preferred_disk_members(filename, content)
                 if not members:
-                    raise DiskError("No supported ADF, ADZ, HFE or DMS image was found in the download.")
+                    raise DiskError(
+                        "No ST, MSA, STX, DIM, HFE or SCP disk image was found in the download."
+                    )
                 for member_name, member_data in members:
                     source = service.create_from_stream(Path(member_name).name, io.BytesIO(member_data))
                     if target.kind in {"ffs", "ofs", "hdf"}:
@@ -230,10 +207,10 @@ def create_catalog_blueprint(service: DiskService, work_dir: Path) -> Blueprint:
                                 item["title"], "ONLINE"
                             )
                         if create_dir:
-                            directory = _available_ffs_directory_name(
+                            directory = _available_folder_name(
                                 service, target, target_path, directory
                             )
-                        destination = service.extract_image_to_ffs_directory(source, target, target_path, directory, create_directory=create_dir)
+                        destination = service.extract_image_to_directory(source, target, target_path, directory, create_directory=create_dir)
                         metadata = analyse_directory(service, target, destination) if identify else None
                         if metadata:
                             metadata["title"] = str(item.get("title") or metadata["title"])

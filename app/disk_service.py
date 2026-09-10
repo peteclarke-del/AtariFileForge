@@ -1,3 +1,28 @@
+r"""The workbench's view of one Atari image, whatever shape it arrived in.
+
+``DiskService`` owns every session: opening media, identifying it from its
+bytes, listing and editing what is inside it, and handing back something the
+user can put on a real machine. The knowledge that is specific to one kind of
+media lives in a mixin beside this module; what is here is the part that is
+true of all of them.
+
+Six shapes of media reach it, and they are told apart by content:
+
+* a GEMDOS floppy image, which is a FAT12 volume and nothing else;
+* a bare volume image, which is the same thing at hard-disk size;
+* a partitioned hard disk, which carries an AHDI, XGM, ICD or MBR table and
+  is opened on that table until a partition is chosen;
+* an MSA, DIM or Pasti container, which is a floppy behind a header and is
+  decoded to a working ``.st`` before it can be browsed;
+* an HFE, SCP or IPF flux capture, which is decoded the same way;
+* a ROM image, either a cartridge or a TOS ROM.
+
+Two rules run through all of it. The filename extension is a hint and never a
+decision: everything is identified from its bytes. And nothing that cannot be
+proved is written: a flux container is only released after it decodes back to
+exactly the sectors on screen.
+"""
+
 from __future__ import annotations
 
 import gzip
@@ -8,24 +33,15 @@ import shutil
 import subprocess
 import threading
 import uuid
-import zipfile
 from contextlib import ExitStack, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, Callable
 
-from .ffs_install_service import FFSInstallMixin
+from .gemdos_install_service import GemdosInstallMixin
 from .install_service import InstallMixin
 from .iso_disk_service import IsoDiskMixin
-from .workbench_install import WorkbenchInstallMixin
-from .hardfile_geometry import (
-    BLOCK_SIZE as HARDFILE_SECTOR_SIZE,
-    MAX_SIZE as HARDFILE_MAX_SIZE,
-    block_checksum,
-    descriptor_size as HARDFILE_DESCRIPTOR_SIZE,
-    volume_extent,
-    range_is_zero,
-)
+from .drive_preparation import DrivePreparationMixin
 from .checkpoints import CheckpointStore
 from .content_kind import LISTING_SNIFF_LIMIT, analyse_content, metadata_kind
 from .disk_tools import decode_disc_json, friendly_engine_error, run_disc, run_hxcfe
@@ -35,19 +51,21 @@ from .image_session import (
     SESSION_OWNER as SESSION_OWNER,
 )
 from .formats import (
-    DMS_EXTENSIONS,
-    ISO_EXTENSIONS,
-    FFS_EXTENSIONS,
-    HDF_EXTENSIONS,
+    DIM_EXTENSIONS,
+    HARD_DISK_EXTENSIONS,
     HFE_EXTENSIONS,
     IPF_EXTENSIONS,
-    OFS_EXTENSIONS,
+    ISO_EXTENSIONS,
+    MSA_EXTENSIONS,
     ROM_EXTENSIONS,
     SCP_EXTENSIONS,
+    ST_EXTENSIONS,
+    STX_EXTENSIONS,
 )
-from .atari_metadata import format_protection, parse_protection
+from .atari_metadata import attribute_value, format_attributes
 from .filename_policy import session_name_policy
 from .filesystem_disk_service import FilesystemDiskMixin
+from .container_disk_service import CONTAINER_KINDS, ContainerDiskMixin
 from .atarinut_internals import (
     ensure_directory_chain,
     file_copy_item,
@@ -56,25 +74,20 @@ from .atarinut_internals import (
     write_copy_item,
 )
 from .rom_disk_service import RomDiskMixin
-from .rdb_service import RdbPartitionMixin
+from .partition_service import PartitionMixin
 from .session_disk_service import SessionDiskMixin
-from .dms_disk_service import DMSDiskMixin
 from .session_state import normalise_warnings
 from .rom import (
     DEFAULT_BANK_SIZE,
     MAX_ROM_SIZE,
     RomError,
     bank_number,
-    make_expansion_rom,
-    parse_rom_header,
+    make_cartridge_rom,
     validate_bank_size,
     validate_layout,
     validate_platform,
 )
-from .ofs_compat import (
-    is_two_volume_dump,
-    root_block_number,
-)
+from .floppy_geometry import resolve_geometry
 from .flux_containers import (
     BROWSEABLE_KINDS,
     FLOPPY_SIZES,
@@ -88,31 +101,81 @@ from .flux_containers import (
     sector_image_suffix,
 )
 from .hfe import HFEError, HFEHeader, parse_hfe_header
-from .dms import (
-    DMSError,
-    parse_dms,
-)
 from . import atari_paths
 from . import progress as progress_module
 
 
 COPY_BUFFER_SIZE = 8 * 1024 * 1024
 FICLONE = 0x40049409
+
+#: One mebibyte, spelled out because every capacity in this module is.
+MIB = 1024 * 1024
+
+#: The largest partition TOS 1.04 will mount. Later releases and replacement
+#: drivers go further, but a drive built to this limit works everywhere.
+TOS_PARTITION_LIMIT = 256 * MIB
+
+#: The blank floppy formats, named by the engine's own geometry table.
+FLOPPY_FORMATS = (
+    "ss-360k",
+    "ss-400k",
+    "ss-440k",
+    "ds-720k",
+    "ds-800k",
+    "ds-880k",
+    "ds-720k-81",
+    "ds-800k-81",
+    "ds-880k-81",
+    "ds-720k-82",
+    "ds-800k-82",
+    "ds-880k-82",
+    "ds-720k-83",
+    "ds-800k-83",
+    "ds-880k-83",
+    "hd-1440k",
+)
+
+#: Blank floppies wrapped as HxC flux, keyed by the geometry inside them.
+HFE_FORMATS = {
+    "hfe-st-360k": "ss-360k",
+    "hfe-st-400k": "ss-400k",
+    "hfe-st-440k": "ss-440k",
+    "hfe-st-720k": "ds-720k",
+    "hfe-st-800k": "ds-800k",
+    "hfe-st-880k": "ds-880k",
+    "hfe-st-1440k": "hd-1440k",
+}
+
+#: Everything ``create_blank`` accepts, in the order the pane offers it.
+BLANK_FORMATS = (
+    *FLOPPY_FORMATS,
+    *HFE_FORMATS,
+    "hd",
+    "volume",
+    "rom",
+    "cartridge",
+)
+
+#: The partition-table schemes a new hard disk can be built with.
+PARTITION_SCHEMES = ("ahdi", "mbr")
+
+#: Extensions that name a ROM and nothing else. ``.img`` and ``.bin`` are
+#: shared with a drive image and a bare volume, so only the bytes settle
+#: those.
+ROM_ONLY_EXTENSIONS = ROM_EXTENSIONS - HARD_DISK_EXTENSIONS
+
+
 class DiskService(
     SessionDiskMixin,
     FilesystemDiskMixin,
-    FFSInstallMixin,
+    GemdosInstallMixin,
     InstallMixin,
     IsoDiskMixin,
-    WorkbenchInstallMixin,
-    RdbPartitionMixin,
+    DrivePreparationMixin,
+    PartitionMixin,
     RomDiskMixin,
-    DMSDiskMixin,
+    ContainerDiskMixin,
 ):
-    _hardfile_descriptor_size = staticmethod(HARDFILE_DESCRIPTOR_SIZE)
-    _volume_extent = staticmethod(volume_extent)
-    _range_is_zero = staticmethod(range_is_zero)
-    _block_checksum = staticmethod(block_checksum)
     _normalise_warnings = staticmethod(normalise_warnings)
 
     def __init__(self, work_dir: str | Path):
@@ -126,10 +189,7 @@ class DiskService(
     @contextmanager
     def _locked_sessions(*sessions: ImageSession):
         """Acquire one or more session locks once, in a stable order."""
-        locks = {
-            id(session.lock): session.lock
-            for session in sessions
-        }
+        locks = {id(session.lock): session.lock for session in sessions}
         with ExitStack() as stack:
             for _identity, lock in sorted(locks.items()):
                 stack.enter_context(lock)
@@ -145,17 +205,27 @@ class DiskService(
         name = Path(name or "image").name
         return re.sub(r"[^A-Za-z0-9._() +!-]", "_", name)[:180] or "image"
 
+    # ------------------------------------------------------------------
+    # Identification
+    # ------------------------------------------------------------------
     @staticmethod
     def detect_kind(name: str) -> str:
+        """Guess a kind from the filename, to decide which probe runs first.
+
+        The answer is never final. ``.img`` is used for a cartridge dump and
+        for an ACSI drive image alike, and ``.bin`` for both of those and a
+        bare volume, so anything this returns is confirmed against the bytes
+        before a session is created.
+        """
         ext = Path(name).suffix.lower()
-        if ext in HDF_EXTENSIONS:
-            return "hdf"
-        if ext in OFS_EXTENSIONS:
-            return "ofs"
-        if ext in FFS_EXTENSIONS:
-            return "ffs"
-        if ext in DMS_EXTENSIONS:
-            return "dms"
+        if ext in ST_EXTENSIONS:
+            return "gemdos"
+        if ext in MSA_EXTENSIONS:
+            return "msa"
+        if ext in DIM_EXTENSIONS:
+            return "dim"
+        if ext in STX_EXTENSIONS:
+            return "stx"
         if ext in HFE_EXTENSIONS:
             return "hfe"
         if ext in SCP_EXTENSIONS:
@@ -164,6 +234,8 @@ class DiskService(
             return "ipf"
         if ext in ISO_EXTENSIONS:
             return "iso"
+        if ext in HARD_DISK_EXTENSIONS:
+            return "hd"
         if ext in ROM_EXTENSIONS:
             return "rom"
         return "unknown"
@@ -185,68 +257,123 @@ class DiskService(
         except OSError:
             return False
 
-    def identify_kind(self, path: Path, expected_kind: str | None = None) -> str:
-        """Identify media, constraining probes when its format is already known.
+    #: How confident the volume probe has to be before a bootable disk is
+    #: treated as a filing system rather than as a loader. A cracked game
+    #: disk often carries a boot sector whose parameter block reads as
+    #: plausible while the directory behind it is the loader's own data.
+    MINIMUM_VOLUME_CONFIDENCE = 0.5
 
-        Atarinut's generic identifier asks every installed filing system to
-        inspect the image. That is right for an extensionless file, but
-        needlessly expensive when the format is already known: a Kickstart
-        probe over a hard-drive-sized file reads the whole thing. Restricting
-        the cascade still validates the bytes and leaves the generic path
-        available for ambiguous names.
+    @classmethod
+    def _custom_loader_disk(cls, path: Path) -> bool:
+        """Whether this is an Atari disk that boots without a filing system.
+
+        A great many ST games were shipped this way: the boot sector is real
+        68000 code carrying the 0x1234 checksum TOS looks for, and the rest
+        of the disk is the loader's own layout rather than a FAT volume.
+        Such a disk has nothing to list, but it is still a disk, and refusing
+        to open it would put a genuine, working, preserved game beyond reach
+        of the hex editor and of every conversion that works on whole tracks.
+
+        Two things have to be true together. The boot sector must be one TOS
+        will execute, which is what makes this a loader rather than damage.
+        And the probe must not find a directory it believes in, because a
+        disk that boots *and* carries a filing system is an ordinary
+        bootable floppy and is opened as one.
         """
+        try:
+            from atarinut.filesystem import probe_volume, reader_for
+            from atarinut.filesystem.blocks import is_executable_sector
+        except ImportError:  # pragma: no cover - packaging failure
+            return False
+        try:
+            if path.stat().st_size not in FLOPPY_SIZES:
+                return False
+            with path.open("rb") as image:
+                if not is_executable_sector(image.read(512)):
+                    return False
+            reader = reader_for(path, writable=False)
+            try:
+                found = probe_volume(reader)
+            finally:
+                reader.close()
+        except OSError:
+            return False
+        return found is None or found[0] < cls.MINIMUM_VOLUME_CONFIDENCE
+
+    @staticmethod
+    def _rom_kind(path: Path) -> str | None:
+        """Say whether these bytes are a TOS ROM, a cartridge, or neither."""
+        try:
+            from atarinut.tosrom import is_cartridge_rom, is_tos_rom
+        except ImportError:  # pragma: no cover - packaging failure
+            return None
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None
+        if is_tos_rom(data):
+            return "tosrom"
+        if is_cartridge_rom(data):
+            return "rom"
+        return None
+
+    #: Which filing systems each named kind is worth probing for. Restricting
+    #: the cascade keeps a 400 MiB drive image from being read end to end
+    #: looking for a ROM header.
+    PROBE_ORDER = {
+        "gemdos": ("gemdos", "ahdi"),
+        "hd": ("ahdi", "gemdos"),
+        "tosrom": ("tosrom",),
+    }
+
+    def identify_kind(self, path: Path, expected_kind: str | None = None) -> str:
+        """Identify media from its bytes, constraining probes when it is known."""
         # A CD carries no GEMDOS filing system, so the cascade below would
         # refuse it with a message about supplying a raw image. It identifies
         # itself at a fixed offset, which is cheap to check and is exactly the
         # "from its bytes, not from the name" rule the rest of this obeys.
         if self._looks_like_iso(path):
             return "iso"
-        expected_filesystems = {
-            "ffs": ("ffs", "ofs", "rdb"),
-            "ofs": ("ofs", "ffs"),
-            "hdf": ("rdb", "ffs", "ofs"),
-            "kickfs": ("kickfs",),
-        }.get(expected_kind or "")
-        if expected_filesystems:
-            try:
-                from atarinut.filesystem import create_filesystem, identify
-
-                filesystems = {
-                    name: create_filesystem(name) for name in expected_filesystems
-                }
-                candidates = identify(
-                    path,
-                    suffix_hint=path.suffix.lower(),
-                    filesystems=filesystems,
-                )
-                rows = [
-                    {"filesystem": candidate.filesystem}
-                    for candidate in candidates
-                ]
-            except Exception as exc:
-                raise DiskError(friendly_engine_error(str(exc))) from exc
-        else:
-            result = self._run_json(["identify", "--as", "json", str(path)])
-            rows = result.get("reports", {}).get("candidates", {}).get("rows", [])
-        if not rows:
+        # A ROM probe is cheap and decisive, so it runs whenever the bytes
+        # could be a ROM: either nothing else is expected, or the name is one
+        # of the extensions a cartridge and a drive image share.
+        if expected_kind in {None, "rom", "tosrom"} or path.suffix.lower() in ROM_EXTENSIONS:
+            rom_kind = self._rom_kind(path)
+            if rom_kind:
+                return rom_kind
+        try:
+            from atarinut.filesystem import create_filesystem, identify
+        except ImportError as exc:  # pragma: no cover - packaging failure
+            raise DiskError("The Atarinut identification API is unavailable.") from exc
+        names = self.PROBE_ORDER.get(expected_kind or "")
+        try:
+            filesystems = (
+                {name: create_filesystem(name) for name in names} if names else None
+            )
+            candidates = identify(
+                path,
+                suffix_hint=path.suffix.lower(),
+                filesystems=filesystems,
+            )
+        except Exception as exc:
+            raise DiskError(friendly_engine_error(str(exc))) from exc
+        if not candidates:
             raise DiskError(
                 "No GEMDOS filing system was found in the uploaded bytes. "
-                "The filename extension is only a hint. Supply the raw, uncompressed "
-                "image rather than an emulator wrapper, an archive member or a flux "
-                "capture. This build recognises OFS and FFS volumes (DOS\\0 to "
-                "DOS\\5, including International and Directory Cache), RDB "
-                "partitioned hard drives and Kickstart ROMs. The source image "
-                "has not been changed."
+                "The filename extension is only a hint. Supply the raw, "
+                "uncompressed image rather than an MSA or DIM container, an "
+                "archive member or a flux capture. This build recognises "
+                "FAT12 and FAT16 volumes, AHDI, XGM, ICD and MBR partitioned "
+                "hard disks, and TOS ROMs. The source image has not been "
+                "changed."
             )
-        filesystem = str(rows[0].get("filesystem", "")).lower()
-        if filesystem in {"ofs", "gemdos"}:
-            return "ofs"
-        if filesystem == "ffs":
-            return "ffs"
-        if filesystem == "rdb":
-            return "hdf"
-        if filesystem == "kickfs":
-            return "kickfs"
+        filesystem = str(candidates[0].filesystem).lower()
+        if filesystem in {"gemdos", "fat12", "fat16"}:
+            return "gemdos"
+        if filesystem == "ahdi":
+            return "hd"
+        if filesystem == "tosrom":
+            return "tosrom"
         raise DiskError(f"The detected {filesystem or 'unknown'} filesystem is not supported.")
 
     @staticmethod
@@ -255,6 +382,7 @@ class DiskService(
 
     @staticmethod
     def require_writable_geometry(session: ImageSession) -> None:
+        """Refuse an edit to media whose bytes cannot be rewritten honestly."""
         if session.hfe_read_only:
             raise DiskError(
                 "This HFE uses advanced track features or contains unreadable sectors. "
@@ -265,69 +393,42 @@ class DiskService(
                 "This SCP flux capture could not be re-encoded and decoded back to identical sectors. "
                 "It can be browsed and copied from, but cannot be rewritten safely."
             )
-        if session.kind == "kickfs":
-            try:
-                from atarinut.kickfs.kickfs import KICKFS
-                kickfs = KICKFS.from_bytes(session.path.read_bytes())
-            except Exception as exc:
-                raise DiskError(f"The Kickstart ROM cannot be edited safely: {exc}") from exc
-            if not kickfs.is_complete:
-                raise DiskError(
-                    "This Kickstart ROM is incomplete or part of a multi-ROM set. "
-                    "It can be browsed and extracted, but not rebuilt safely."
-                )
-            if not kickfs.is_plain:
-                raise DiskError(
-                    "This composite Kickstart ROM contains executable code after its files. "
-                    "It is read-only because moving that code could break absolute addresses."
-                )
-        if (
-            session.kind in {"ffs", "ofs"}
-            and session.path.suffix.lower() in {".hdf", ".hda"}
-            and session.descriptor_path is None
-            and session.ffs_capabilities.get("map") != "new"
-        ):
+        if session.kind == "stx":
             raise DiskError(
-                "This bare Hardfile HDA image was opened without its matching GEO "
-                "geometry file, which is where its surfaces, blocks per track and "
-                "cylinders are recorded. Reopen the original HDA and GEO together "
-                "before making changes. An image carrying a Rigid Disk Block "
-                "describes its own geometry and needs no sidecar."
+                "A Pasti capture records what the controller read from a physical "
+                "disk, including timing and protection a sector image cannot hold. "
+                "Convert it to a .st image to edit the sectors."
             )
+        if session.kind == "tosrom":
+            raise DiskError(
+                "A TOS ROM is read-only. It is one linked image whose parts sit at "
+                "the addresses the machine's reset vector expects, so nothing in it "
+                "can be moved or rewritten in place."
+            )
+        if session.kind == "iso":
+            raise DiskError("A CD image is read-only.")
 
+    # ------------------------------------------------------------------
+    # Opening
+    # ------------------------------------------------------------------
     def create_from_stream(
         self,
         name: str,
         stream: BinaryIO,
-        descriptor: tuple[str, BinaryIO] | None = None,
         target_hardware: str = "auto",
         rom_options: dict | None = None,
         force_kind: str | None = None,
     ) -> ImageSession:
-        safe_name, kind, descriptor_name = self._new_session_source(
-            name,
-            descriptor[0] if descriptor else None,
-            force_kind,
-        )
+        safe_name, kind = self._new_session_source(name, force_kind)
         image_id = uuid.uuid4().hex
         folder = self.work_dir / image_id
         folder.mkdir()
         path = folder / safe_name
         try:
             self._copy_stream(stream, path)
-            descriptor_path = None
-            if descriptor and descriptor_name:
-                descriptor_path = folder / descriptor_name
-                self._copy_stream(descriptor[1], descriptor_path)
             return self._finalize_new_session(
-                image_id,
-                safe_name,
-                path,
-                descriptor_name,
-                descriptor_path,
-                kind,
-                target_hardware,
-                rom_options,
+                image_id, safe_name, path, kind, target_hardware, rom_options,
+                force_rom=force_kind == "rom",
             )
         except Exception:
             shutil.rmtree(folder, ignore_errors=True)
@@ -336,7 +437,6 @@ class DiskService(
     def create_from_path(
         self,
         source: Path,
-        descriptor: Path | None = None,
         target_hardware: str = "auto",
         rom_options: dict | None = None,
         force_kind: str | None = None,
@@ -348,42 +448,24 @@ class DiskService(
         The source remains untouched and all edits still target the session.
         """
         source = Path(source)
-        descriptor = Path(descriptor) if descriptor is not None else None
-        safe_name, kind, descriptor_name = self._new_session_source(
-            source.name,
-            descriptor.name if descriptor else None,
-            force_kind,
-        )
+        safe_name, kind = self._new_session_source(source.name, force_kind)
         image_id = uuid.uuid4().hex
         folder = self.work_dir / image_id
         folder.mkdir()
         path = folder / safe_name
         try:
             self._copy_local_file(source, path)
-            descriptor_path = None
-            if descriptor and descriptor_name:
-                descriptor_path = folder / descriptor_name
-                self._copy_local_file(descriptor, descriptor_path)
             return self._finalize_new_session(
-                image_id,
-                safe_name,
-                path,
-                descriptor_name,
-                descriptor_path,
-                kind,
-                target_hardware,
-                rom_options,
+                image_id, safe_name, path, kind, target_hardware, rom_options,
+                force_rom=force_kind == "rom",
             )
         except Exception:
             shutil.rmtree(folder, ignore_errors=True)
             raise
 
     def _new_session_source(
-        self,
-        name: str,
-        descriptor_name: str | None,
-        force_kind: str | None,
-    ) -> tuple[str, str, str | None]:
+        self, name: str, force_kind: str | None
+    ) -> tuple[str, str]:
         """Validate and normalise names shared by stream and local opens."""
         safe_name = self.safe_filename(name)
         kind = self.detect_kind(safe_name)
@@ -391,22 +473,10 @@ class DiskService(
             if force_kind != "rom":
                 raise DiskError("Only the raw ROM format override is supported.")
             kind = force_kind
-        safe_descriptor = self.safe_filename(descriptor_name) if descriptor_name else None
-        if safe_descriptor and not safe_name.lower().endswith((".hdf", ".hda")):
-            raise DiskError("A GEO descriptor can only accompany a Hardfile HDA image.")
-        if safe_descriptor and Path(safe_descriptor).suffix.lower() != ".geo":
-            raise DiskError("The Hardfile geometry file must use the GEO extension.")
-        if (
-            safe_name.lower().endswith((".hdf", ".hda"))
-            and safe_descriptor
-            and Path(safe_descriptor).stem.casefold()
-            != Path(safe_name).stem.casefold()
-        ):
-            raise DiskError(f"Choose {Path(safe_name).stem}.geo for this HDA image.")
-        return safe_name, kind, safe_descriptor
+        return safe_name, kind
 
-    #: The largest image a gzip container is expanded into. An ADZ or an HDZ
-    #: holds an ordinary disk image, so anything past a full hard drive is a
+    #: The largest image a gzip container is expanded into. A gzipped image
+    #: holds an ordinary disk image, so anything past a full hard disk is a
     #: decompression bomb rather than a disk.
     MAX_EXPANDED_IMAGE = 2 * 1024 * 1024 * 1024
 
@@ -414,12 +484,11 @@ class DiskService(
     def _expand_gzip_image(path: Path) -> Path:
         """Expand a gzip-compressed disk image in place.
 
-        An ``.adz`` is an ``.adf`` that has been gzipped, and an ``.hdz`` is a
-        gzipped ``.hdf``; that is the whole of what those extensions mean. The
-        workbench reads sectors, so a compressed image is expanded once as it
-        arrives and keeps the name the user gave it. A file that is not gzip is
-        returned untouched, because the extension is a hint and never a
-        decision.
+        Atari images are routinely distributed gzipped, which is all a
+        ``.st.gz`` means. The workbench reads sectors, so a compressed image
+        is expanded once as it arrives and keeps the name the user gave it. A
+        file that is not gzip is returned untouched, because the extension is
+        a hint and never a decision.
         """
         try:
             with path.open("rb") as image:
@@ -454,78 +523,84 @@ class DiskService(
         expanded.replace(path)
         return path
 
-    def is_two_volume_image(self, session: ImageSession) -> bool:
-        """Whether one file holds two double-density volumes rather than one.
+    def is_double_sided(self, session: ImageSession) -> bool:
+        """Whether the volume in this image occupies both sides of the disk.
 
-        A two-disk set is sometimes preserved as a single file, which is the
-        same length as one high-density floppy. The two are told apart by
-        where the root blocks sit, which costs three block reads.
+        Single-sided ST disks exist and are still written by some copiers, so
+        the side count is worth reporting; it is read from the boot sector's
+        own BIOS parameter block rather than inferred from the file size.
         """
-        if session.kind not in {"ofs", "ffs"}:
+        if session.kind != "gemdos":
             return False
         try:
             size = session.path.stat().st_size
             with session.path.open("rb") as image:
-
-                def read_block(number: int) -> bytes:
-                    image.seek(number * 512)
-                    return image.read(512)
-
-                return is_two_volume_dump(read_block, size // 512)
+                boot = image.read(512)
         except OSError:
             return False
+        found = resolve_geometry(size, boot)
+        return bool(found and found.sides == 2)
 
     def _finalize_new_session(
         self,
         image_id: str,
         name: str,
         path: Path,
-        descriptor_name: str | None,
-        descriptor_path: Path | None,
         kind: str,
         target_hardware: str = "auto",
         rom_options: dict | None = None,
+        force_rom: bool = False,
     ) -> ImageSession:
         path = self._expand_gzip_image(path)
+        hfe_original = None
+        hfe_header = None
+        hfe_read_only = False
+        hfe_warnings: list[str] = []
+        ipf_warnings: list[str] = []
+        scp_original = None
+        scp_read_only = False
+        scp_warnings: list[str] = []
         if kind == "hfe":
             path, kind, hfe_original, hfe_header, hfe_read_only, hfe_warnings = self._open_hfe(path)
-        else:
-            hfe_original = None
-            hfe_header = None
-            hfe_read_only = False
-            hfe_warnings = []
-        if kind == "ipf":
+        elif kind == "ipf":
             path, kind, ipf_warnings = self._open_ipf(path)
-        else:
-            ipf_warnings = []
-        if kind == "scp":
+        elif kind == "scp":
             path, kind, scp_original, scp_read_only, scp_warnings = self._open_scp(path)
-        else:
-            scp_original = None
-            scp_read_only = False
-            scp_warnings = []
-        # BIN is also used for FFS images.  Prefer ROM only when the contents
-        # carry a structurally valid Atari ROM header; .rom is explicit.
-        if kind == "ffs" and path.suffix.lower() == ".bin":
-            with path.open("rb") as source:
-                if parse_rom_header(source.read(DEFAULT_BANK_SIZE)):
+        custom_loader = False
+        try:
+            if kind == "rom":
+                # The raw ROM override says the caller wants the banked view
+                # of these bytes whatever they turn out to hold, which is how
+                # a TOS image is inspected chip by chip. Otherwise ``.rom``
+                # and ``.tos`` name a ROM outright and only the bytes can
+                # promote one to a mountable TOS ROM, so an image that is not
+                # yet linked, or is one half of a set, still opens.
+                if force_rom:
                     kind = "rom"
-        if kind == "rom":
-            try:
-                if self.identify_kind(path, "kickfs") == "kickfs":
-                    kind = "kickfs"
-            except DiskError:
-                pass
-        identified = kind == "unknown"
-        if identified:
-            kind = self.identify_kind(path)
+                elif path.suffix.lower() in ROM_ONLY_EXTENSIONS:
+                    kind = self._rom_kind(path) or "rom"
+                else:
+                    kind = self.identify_kind(path, "rom")
+            elif kind == "unknown":
+                kind = self.identify_kind(path)
+            elif kind in {"gemdos", "hd", "tosrom"}:
+                # ``.img`` and ``.bin`` are shared by a cartridge dump, a
+                # drive image and a bare volume, so the bytes settle which
+                # it is.
+                kind = self.identify_kind(path, kind)
+        except DiskError:
+            if not self._custom_loader_disk(path):
+                raise
+            kind = "unknown"
+            custom_loader = True
+        if kind == "gemdos" and self._custom_loader_disk(path):
+            kind = "unknown"
+            custom_loader = True
         session = ImageSession(
             id=image_id,
             name=name,
             kind=kind,
             path=path,
-            descriptor_name=descriptor_name,
-            descriptor_path=descriptor_path,
             target_hardware=self._target_hardware(target_hardware),
             hfe_original_path=hfe_original,
             hfe_version=hfe_header.version if hfe_header else None,
@@ -534,47 +609,78 @@ class DiskService(
             scp_read_only=scp_read_only,
             warnings=hfe_warnings + scp_warnings + ipf_warnings,
         )
-        if kind == "ffs":
-            self.refresh_ffs_capabilities(session)
-        if kind == "dms":
-            try:
-                session.dms = parse_dms(path.read_bytes())
-            except DMSError as exc:
-                raise DiskError(str(exc)) from exc
+        if custom_loader:
+            session.warnings.append(
+                "This disk boots its own loader and carries no GEMDOS filing "
+                "system, which is how a great many ST games were published. "
+                "There is nothing to list, but its sectors can be inspected, "
+                "converted between disk containers and written back to a "
+                "floppy unchanged."
+            )
+        if kind == "gemdos":
+            self.refresh_gemdos_capabilities(session)
+        elif kind == "hd":
+            self._note_partition_table(session)
+        elif kind in CONTAINER_KINDS:
+            # Parse the header now so an unreadable container is refused at
+            # open time rather than when the pane is first listed.
+            self._container(session)
         elif kind == "rom":
-            rom_options = rom_options or {}
-            try:
-                session.rom_platform = validate_platform(rom_options.get("platform"))
-                session.rom_layout = validate_layout(rom_options.get("layout"))
-            except RomError as exc:
-                raise DiskError(str(exc)) from exc
-            session.rom_component_names = [
-                self.safe_filename(name)
-                for name in rom_options.get("componentNames", [])
-                if str(name).strip()
-            ]
-            size = path.stat().st_size
-            if not size or size > MAX_ROM_SIZE:
-                raise DiskError("ROM images must contain between 1 byte and 64 MiB.")
-            if size % DEFAULT_BANK_SIZE:
-                session.warnings.append(
-                    f"The final ROM bank is partial ({size % DEFAULT_BANK_SIZE:,} bytes). "
-                    "It is preserved exactly; choose another bank size if this layout is intentional."
-                )
-        elif kind == "kickfs":
-            details = self.kickfs_details(session)
-            if details["readOnly"]:
-                session.warnings.extend(details["warnings"])
-        elif not identified:
-            detected_kind = self.identify_kind(path, kind)
-            if detected_kind != kind:
-                session.kind = detected_kind
-        self._normalise_hardfile_dat_size(session)
+            self._apply_rom_options(session, rom_options or {})
+        elif kind == "tosrom":
+            details = self.tosrom_details(session)
+            session.warnings.extend(details["warnings"])
         self._apply_target_hardware(session)
         with self._lock:
             self.sessions[image_id] = session
         self._persist_session(session)
         return session
+
+    def _apply_rom_options(self, session: ImageSession, rom_options: dict) -> None:
+        """Record how a raw ROM image is to be read, and check its size."""
+        try:
+            session.rom_platform = validate_platform(rom_options.get("platform"))
+            session.rom_layout = validate_layout(rom_options.get("layout"))
+        except RomError as exc:
+            raise DiskError(str(exc)) from exc
+        session.rom_component_names = [
+            self.safe_filename(name)
+            for name in rom_options.get("componentNames", [])
+            if str(name).strip()
+        ]
+        size = session.path.stat().st_size
+        if not size or size > MAX_ROM_SIZE:
+            raise DiskError("ROM images must contain between 1 byte and 64 MiB.")
+        if size % DEFAULT_BANK_SIZE:
+            session.warnings.append(
+                f"The final ROM bank is partial ({size % DEFAULT_BANK_SIZE:,} bytes). "
+                "It is preserved exactly; choose another bank size if this layout is intentional."
+            )
+
+    def _note_partition_table(self, session: ImageSession) -> None:
+        """Record what a drive's table says, so the pane can explain itself."""
+        try:
+            table = self.partition_table(session)
+        except DiskError as exc:
+            self._append_warning(session, f"The partition table could not be read: {exc}")
+            return
+        scheme = str(table.get("scheme") or "ahdi").upper()
+        count = len(table.get("partitions") or [])
+        self._append_warning(
+            session,
+            f"Opened a {scheme} hard disk with {count} partition"
+            f"{'s' if count != 1 else ''}.",
+        )
+        if table.get("byteSwapped"):
+            self._append_warning(
+                session,
+                "This image was taken through a byte-swapping IDE adapter: every "
+                "sector's byte pairs are reversed. The workbench reads through the "
+                "swap, so the contents are correct here even though a hex editor "
+                "shows the bytes transposed.",
+            )
+        for note in table.get("notes") or []:
+            self._append_warning(session, str(note))
 
     # Flux geometry policy is shared with the SCP container and unit tested
     # without HxCFE; see app/flux_containers.py.
@@ -613,14 +719,14 @@ class DiskService(
         except DiskError as exc:
             raise DiskError(
                 f"HxCFE decoded the {container.noun}, but the resulting sectors do not "
-                "contain a supported OFS or FFS filesystem. The "
+                "contain a GEMDOS filing system. The "
                 f"{container.display} container is valid, but its contents cannot be "
                 "browsed as an Atari disk image."
             ) from exc
         if kind not in BROWSEABLE_KINDS:
             raise DiskError(
                 f"HxCFE decoded the {container.noun} as {kind.upper()}, but only "
-                f"OFS- and FFS-formatted {container.display} images are browseable."
+                f"GEMDOS-formatted {container.display} images are browseable."
             )
         padded_tail = restore_omitted_tail_sector(raw, kind)
         working = raw.with_suffix(sector_image_suffix(kind, raw.stat().st_size, sides))
@@ -628,6 +734,14 @@ class DiskService(
         return working, kind, padded_tail, decode_info
 
     def _open_hfe(self, original: Path) -> tuple[Path, str, Path, HFEHeader, bool, list[str]]:
+        """Decode an HxC container into the ``.st`` the workbench browses.
+
+        HxCFE writes eighty-four tracks into an HFE whatever the image it was
+        given holds, so a track count above eighty is normal padding and is
+        not treated as damage. What does make the container read-only is an
+        advanced track feature the sector view cannot express, or a sector
+        the capture could not read.
+        """
         try:
             with original.open("rb") as source:
                 header = parse_hfe_header(source.read(512))
@@ -645,13 +759,18 @@ class DiskService(
             f"{'s' if header.sides != 1 else ''}, {header.bitrate or 'variable'} Kbit/s."
         ]
         if read_only:
-            reason = "advanced timing/track features" if header.advanced else f"{bad_sectors} unreadable sector(s)"
+            reason = (
+                "advanced timing/track features"
+                if header.advanced
+                else f"{bad_sectors} unreadable sector(s)"
+            )
             warnings.append(
                 f"This HFE contains {reason}. It is read-only to preserve data that a sector editor cannot represent."
             )
         return working, kind, original, header, read_only, warnings
 
     def _open_scp(self, original: Path) -> tuple[Path, str, Path, bool, list[str]]:
+        """Decode a SuperCard Pro capture, and decide whether it may be edited."""
         try:
             with original.open("rb") as source:
                 signature = source.read(3)
@@ -665,17 +784,17 @@ class DiskService(
         except DiskError as exc:
             raise DiskError(
                 "The SCP capture contains missing or inconsistent filesystem sectors. "
-                "HxCFE recovered an Atari filesystem header, but the complete directory "
+                "HxCFE recovered a GEMDOS boot sector, but the complete directory "
                 f"tree is not safe to browse: {exc}"
             ) from exc
         read_only = not self._scp_round_trips(working, original, kind)
         warnings = [
-            f"Opened SCP flux capture: HxCFE decoded an {kind.upper()} sector filesystem "
+            "Opened SCP flux capture: HxCFE decoded a GEMDOS sector filesystem "
             f"({working.stat().st_size:,} bytes)."
         ]
         if padded_tail:
             warnings.append(
-                "HxCFE omitted the blank final 256-byte sector from the capture. "
+                "HxCFE omitted the blank final sector from the capture. "
                 "Atari File Forge restored the declared floppy geometry before validation."
             )
         if "Invalid rpm or tracklen" in decode_info:
@@ -691,11 +810,11 @@ class DiskService(
         return working, kind, original, read_only, warnings
 
     def _open_ipf(self, original: Path) -> tuple[Path, str, list[str]]:
-        """Decode an SPS capture into the sectors an GEMDOS volume holds.
+        """Decode an SPS capture into the sectors a GEMDOS volume holds.
 
         The capture itself is kept beside the working image and never edited:
-        an IPF records timing and protection an ADF cannot express, so the
-        image the workbench opens is a reading of it rather than a copy.
+        an IPF records timing and protection a sector image cannot express, so
+        the image the workbench opens is a reading of it rather than a copy.
         """
         from .ipf import IPFError, read_ipf
 
@@ -703,9 +822,9 @@ class DiskService(
             report = read_ipf(original)
         except IPFError as exc:
             raise DiskError(str(exc)) from exc
-        working = original.with_suffix(".adf")
+        working = original.with_suffix(".st")
         if working == original:
-            working = original.with_name(f"{original.stem}-decoded.adf")
+            working = original.with_name(f"{original.stem}-decoded.st")
         working.write_bytes(report.sectors)
         warnings = [
             f"{original.name} was decoded from an SPS capture. "
@@ -738,201 +857,74 @@ class DiskService(
         finally:
             probe.unlink(missing_ok=True)
 
+    # ------------------------------------------------------------------
+    # Target hardware
+    # ------------------------------------------------------------------
+    #: What an image is being prepared for, and what that claim means.
+    TARGET_HARDWARE = {
+        "auto": "no particular medium",
+        "floppy": "a GEMDOS floppy",
+        "hd": "a partitioned hard disk",
+        "volume": "a bare partition image",
+        "tos": "a TOS ROM",
+    }
+
     @staticmethod
     def _target_hardware(value: str | None) -> str:
         profile = str(value or "auto").strip().lower()
-        if profile not in {
-            "auto",
-            "a500-ofs",
-            "a1200-ffs",
-            "hardfile",
-            "tos",
-        }:
-            raise DiskError("Unknown GEMDOS target hardware profile.")
+        if profile not in DiskService.TARGET_HARDWARE:
+            raise DiskError("Unknown Atari target hardware profile.")
         return profile
 
-    #: Which filing-system variants each Kickstart mounts without help.
-    #: Kickstart 1.3 has no FastFileSystem in ROM: an FFS volume needs
-    #: ``L:FastFileSystem`` on a bootable OFS disk before it will mount at all.
-    TARGET_FILESYSTEMS = {
-        "a500-ofs": ({"OFS"}, {"FFS"}, "Atari 500 or 2000 with Kickstart 1.3"),
-        "a1200-ffs": (
-            {"OFS", "FFS", "OFS-INTL", "FFS-INTL", "OFS-DC", "FFS-DC"},
-            set(),
-            "Atari 600 or 1200 with Kickstart 3.x",
-        ),
-        "tos": (
-            {"OFS", "FFS", "OFS-INTL", "FFS-INTL", "OFS-DC", "FFS-DC"},
-            set(),
-            "an TOS hard drive",
-        ),
-        "hardfile": (
-            {"OFS", "FFS", "OFS-INTL", "FFS-INTL", "OFS-DC", "FFS-DC"},
-            set(),
-            "a UAE hardfile",
-        ),
+    #: Which session kinds each target claim is true of.
+    TARGET_KINDS = {
+        "floppy": {"gemdos", "msa", "dim", "stx"},
+        "hd": {"hd"},
+        "volume": {"gemdos"},
+        "tos": {"tosrom"},
     }
 
     def _apply_target_hardware(self, session: ImageSession) -> None:
-        """Check and repair a volume for the machine it is destined for.
+        """Check a volume against the medium it is destined for.
 
-        Two things are worth checking before an image leaves the workbench,
-        because both produce a disk that looks fine here and fails on real
-        hardware. The first is the filing-system variant: a Kickstart 1.3
-        machine has no FastFileSystem in ROM, so an FFS floppy simply will not
-        mount. The second is the block-allocation bitmap's valid flag, which a
-        machine reads as "this volume was not shut down cleanly" and answers by
-        refusing to write to it.
-
-        Only the second is repaired. The filing system is reported, never
-        changed, because silently reformatting a volume would destroy exactly
-        the data the user is trying to move.
+        The check is a statement rather than a repair. What can go wrong is
+        a claim that does not match the image: a floppy target on a hard disk
+        image, or a partition larger than the TOS release the user named will
+        mount. Nothing is reformatted, because silently reformatting a volume
+        would destroy exactly the data the user is trying to move.
         """
-        if session.kind not in {"ffs", "ofs"} or session.target_hardware == "auto":
+        if session.target_hardware == "auto":
             return
-        profile = self.TARGET_FILESYSTEMS.get(session.target_hardware)
-        if profile is None:
-            return
-        supported, needs_handler, machine = profile
-        if session.target_hardware == "hardfile" and (
-            session.path.suffix.lower() not in {".hdf", ".hda"}
-            or session.descriptor_path is None
-        ):
-            raise DiskError(
-                "The UAE hardfile target requires a bare hard-drive image and "
-                "its matching GEO geometry sidecar."
-            )
-        if session.path.suffix.lower() in {".hdf", ".hda"} and session.descriptor_path is None:
-            raise DiskError(
-                "This hardfile target requires the HDA and its matching GEO to be "
-                "opened together, because a hardfile carries no geometry of its own."
-            )
-
-        try:
-            with self.ffs_mount(session) as mount:
-                volume_format = str(getattr(mount, "format", ""))
-                has_handler = mount.exists("L/FastFileSystem")
-                bitmap_repaired = self._finalise_hardfile_directories(session)
-        except DiskError as exc:
-            raise DiskError(f"This image is not compatible with {machine}: {exc}") from exc
-
-        if volume_format in needs_handler and not has_handler:
+        allowed = self.TARGET_KINDS.get(session.target_hardware, set())
+        if session.kind not in allowed:
             self._append_warning(
                 session,
-                f"This is a {volume_format} volume. {machine.capitalize()} has no "
-                "FastFileSystem in ROM, so it will not mount until "
-                "L/FastFileSystem and a Mountlist entry are present.",
-            )
-        elif volume_format not in supported:
-            self._append_warning(
-                session,
-                f"{machine.capitalize()} cannot mount a {volume_format} volume. "
-                "Copy the files to an OFS or FFS volume before using this image.",
-            )
-        if bitmap_repaired:
-            self._append_warning(
-                session,
-                f"Repaired {bitmap_repaired} block checksum"
-                f"{'s' if bitmap_repaired != 1 else ''} and revalidated the "
-                f"block-allocation bitmap for {machine}.",
-            )
-
-    @staticmethod
-    def _validate_created_hardfile_pair(session: ImageSession) -> None:
-        """Reject a newly created pair that an emulator or Atari cannot mount."""
-        descriptor_path = session.descriptor_path
-        if descriptor_path is None:
-            raise DiskError("The disk engine did not create the hardfile GEO sidecar.")
-        try:
-            declared = HARDFILE_DESCRIPTOR_SIZE(descriptor_path)
-            actual_size = session.path.stat().st_size
-        except OSError as exc:
-            raise DiskError("The new hardfile pair could not be verified.") from exc
-        if declared is None:
-            raise DiskError(
-                "The new GEO sidecar does not declare surfaces, sectors and cylinders."
-            )
-        if declared > HARDFILE_MAX_SIZE:
-            raise DiskError(
-                "The requested hardfile exceeds this build's "
-                f"{HARDFILE_MAX_SIZE // (1024 * 1024):,} MiB limit."
-            )
-        if declared != actual_size:
-            raise DiskError(
-                f"The GEO sidecar declares {declared:,} bytes but the HDA holds "
-                f"{actual_size:,}. A hardfile must match its geometry exactly."
-            )
-        if DiskService._volume_extent(session.path) is None:
-            raise DiskError(
-                "The new HDA does not contain a readable GEMDOS root block."
-            )
-
-    @staticmethod
-    def _canonicalise_created_hardfile_root(
-        session: ImageSession,
-        title: str,
-    ) -> None:
-        """Confirm the new volume's root block carries the requested name."""
-        try:
-            with session.path.open("rb") as image:
-                size = session.path.stat().st_size
-                root_block = root_block_number(size // HARDFILE_SECTOR_SIZE)
-                image.seek(root_block * HARDFILE_SECTOR_SIZE)
-                root = image.read(HARDFILE_SECTOR_SIZE)
-        except OSError as exc:
-            raise DiskError(
-                "The new hardfile root directory could not be verified."
-            ) from exc
-        if len(root) != HARDFILE_SECTOR_SIZE or int.from_bytes(root[0:4], "big") != 2:
-            raise DiskError("The disk engine created an invalid GEMDOS root block.")
-        offset = HARDFILE_SECTOR_SIZE - 80
-        length = min(root[offset], 30)
-        stored = root[offset + 1 : offset + 1 + length].decode("latin-1", "replace")
-        if stored != str(title or "")[:30]:
-            raise DiskError(
-                f"The new volume is named “{stored}” rather than “{title}”."
-            )
-
-    def _normalise_hardfile_dat_size(self, session: ImageSession) -> None:
-        """Keep an HDA exactly the size its GEO sidecar declares."""
-        if (
-            session.path.suffix.lower() not in {".hdf", ".hda"}
-            or session.descriptor_path is None
-        ):
-            return
-        geometry_size = self._hardfile_descriptor_size(session.descriptor_path)
-        if geometry_size is None:
-            self._append_warning(
-                session,
-                "The GEO geometry could not be read; the HDA size was left unchanged.",
+                f"This image was opened as {session.kind} but is marked for "
+                f"{self.TARGET_HARDWARE[session.target_hardware]}.",
             )
             return
-        actual = session.path.stat().st_size
-        if actual == geometry_size:
-            return
-        if actual > geometry_size and self._range_is_zero(session.path, geometry_size):
-            with session.path.open("r+b") as image:
-                image.truncate(geometry_size)
-            session.dirty = True
-            self._append_warning(
-                session,
-                f"Removed an all-zero {actual - geometry_size:,}-byte tail so the HDA "
-                "matches the capacity its GEO sidecar declares.",
-            )
-        elif actual > geometry_size:
-            self._append_warning(
-                session,
-                "The HDA holds non-zero data beyond the capacity its GEO sidecar "
-                "declares and was not truncated.",
-            )
-        else:
-            self._append_warning(
-                session,
-                f"The HDA is {geometry_size - actual:,} bytes shorter than its GEO "
-                "sidecar declares and was not padded, because filesystem data may "
-                "be missing.",
-            )
+        if session.target_hardware == "floppy":
+            size = session.path.stat().st_size
+            if size not in FLOPPY_SIZES:
+                self._append_warning(
+                    session,
+                    f"This volume is {size:,} bytes, which is not one of the floppy "
+                    "formats a TOS machine's drive can write.",
+                )
+        if session.target_hardware == "hd":
+            for partition in self.list_partitions(session):
+                if int(partition.get("sizeBytes") or 0) > TOS_PARTITION_LIMIT:
+                    self._append_warning(
+                        session,
+                        f"Partition {partition.get('name')} is "
+                        f"{int(partition['sizeBytes']) // MIB:,} MiB. TOS 1.04 mounts "
+                        f"at most {TOS_PARTITION_LIMIT // MIB} MiB per partition; "
+                        "later releases and replacement drivers go further.",
+                    )
 
+    # ------------------------------------------------------------------
+    # Saving and exporting
+    # ------------------------------------------------------------------
     @staticmethod
     def _optimise_sparse_file(path: Path) -> None:
         """Turn allocated zero ranges into holes without changing file bytes."""
@@ -954,129 +946,6 @@ class DiskService(
             # image remains valid on filesystems or platforms without it.
             return
 
-    @staticmethod
-    def _finalise_hardfile_directories(session: ImageSession) -> int:
-        """Repair block checksums and revalidate the allocation bitmap.
-
-        Every GEMDOS block ends with a checksum over its own longs, and the
-        root block carries a flag saying whether the block-allocation bitmap
-        can be trusted. A machine that finds either wrong refuses to write to
-        the volume and offers ``DiskDoctor`` instead. Both are recomputable
-        from the structures themselves, so they are repaired here rather than
-        left for the user to discover on real hardware.
-
-        Returns the number of blocks changed.
-        """
-        if session.kind not in {"ffs", "ofs"}:
-            return 0
-
-        from atarinut.filesystem.blocks import (
-            apply_checksum,
-            long_at,
-            verify_checksum,
-        )
-
-        repaired = 0
-        block_size = HARDFILE_SECTOR_SIZE
-        with session.lock, session.path.open("r+b") as image:
-            size = session.path.stat().st_size
-            total_blocks = size // block_size
-            root_block = root_block_number(total_blocks)
-            visited: set[int] = set()
-            pending = [root_block]
-            while pending:
-                number = pending.pop()
-                if number in visited or not 0 <= number < total_blocks:
-                    continue
-                visited.add(number)
-                image.seek(number * block_size)
-                block = bytearray(image.read(block_size))
-                if len(block) != block_size:
-                    continue
-                if long_at(block, 0) != 2:
-                    continue
-                if not verify_checksum(bytes(block)):
-                    apply_checksum(block)
-                    image.seek(number * block_size)
-                    image.write(bytes(block))
-                    repaired += 1
-                table_size = long_at(block, 12) or (block_size // 4 - 56)
-                if not 8 <= table_size <= block_size // 4:
-                    continue
-                for index in range(table_size):
-                    child = long_at(block, 24 + index * 4)
-                    if child:
-                        pending.append(child)
-                chain = long_at(block, block_size - 16)
-                if chain:
-                    pending.append(chain)
-
-            # The bitmap flag is the last thing to restore, so it is only set
-            # once every block it accounts for has been checked.
-            image.seek(root_block * block_size)
-            root = bytearray(image.read(block_size))
-            if len(root) == block_size and long_at(root, block_size - 200) != 0xFFFFFFFF:
-                root[block_size - 200 : block_size - 196] = b"\xff\xff\xff\xff"
-                apply_checksum(root)
-                image.seek(root_block * block_size)
-                image.write(bytes(root))
-                repaired += 1
-
-        if repaired:
-            session.dirty = True
-        return repaired
-
-    @staticmethod
-    def _advance_hardfile_disc_id(session: ImageSession) -> bool:
-        """Restamp a changed volume so a machine notices it was modified.
-
-        GEMDOS caches a mounted volume by its name and creation datestamp.
-        Writing a new modification datestamp into the root block is what makes
-        a real machine, and an emulator holding the image open, re-read the
-        volume instead of serving a stale cache.
-        """
-        from atarinut.file import datetime_to_datestamp
-        from atarinut.filesystem.blocks import apply_checksum, long_at, put_long
-
-        with session.lock:
-            source_mtime = session.path.stat().st_mtime_ns
-            if session.finalised_mtime_ns == source_mtime:
-                return False
-            block_size = HARDFILE_SECTOR_SIZE
-            with session.path.open("r+b") as image:
-                total_blocks = session.path.stat().st_size // block_size
-                root_block = root_block_number(total_blocks)
-                image.seek(root_block * block_size)
-                root = bytearray(image.read(block_size))
-                if len(root) != block_size or long_at(root, 0) != 2:
-                    raise DiskError("The volume root block could not be read.")
-                days, mins, ticks = datetime_to_datestamp(
-                    datetime.fromtimestamp(source_mtime / 1_000_000_000, timezone.utc)
-                )
-                # The stamp has to move forward, or a machine that already
-                # cached the volume will not notice the edit. Writing the file
-                # time alone is not enough, because an image edited within the
-                # same tick would carry the stamp it already had.
-                stored = tuple(long_at(root, block_size - 92 + step) for step in (0, 4, 8))
-                if (days, mins, ticks) <= stored:
-                    days, mins, ticks = stored
-                    ticks += 1
-                    if ticks >= 3000:
-                        ticks, mins = 0, mins + 1
-                    if mins >= 1440:
-                        mins, days = 0, days + 1
-                for back in (92, 40):
-                    base = block_size - back
-                    put_long(root, base, days)
-                    put_long(root, base + 4, mins)
-                    put_long(root, base + 8, ticks)
-                apply_checksum(root)
-                image.seek(root_block * block_size)
-                image.write(bytes(root))
-            session.dirty = True
-            session.finalised_mtime_ns = session.path.stat().st_mtime_ns
-            return True
-
     def prepare_download(
         self,
         session: ImageSession,
@@ -1084,46 +953,10 @@ class DiskService(
     ) -> Path:
         """Finalise an image so the downloaded bytes are hardware-ready."""
         report = progress_module.reporter(progress)
-        is_hardfile = bool(
-            session.descriptor_path and session.path.suffix.lower() in {".hdf", ".hda"}
-        )
-        if is_hardfile:
+        total = 2
+        report("Checking the image against its target medium", 0, total)
+        if session.kind == "hd":
             self._optimise_sparse_file(session.path)
-        if (
-            is_hardfile
-            and not session.dirty
-            and session.finalised_mtime_ns == session.path.stat().st_mtime_ns
-        ):
-            report("The previously validated hardware-ready pair is prepared", 1, 1)
-            return session.path
-        total = 5 if is_hardfile else 2
-        report("Applying the selected hardware profile", 0, total)
-        # A paired HDA receives the same directory validation immediately
-        # below. Avoid traversing a large directory tree twice during save.
-        if not is_hardfile:
-            self._apply_target_hardware(session)
-        if is_hardfile:
-            report("Checking HDA size against the GEO geometry", 1, total)
-            self._normalise_hardfile_dat_size(session)
-            report("Checking directory block checksums and the bitmap", 2, total)
-            repairs = self._finalise_hardfile_directories(session)
-            if repairs:
-                self._append_warning(
-                    session,
-                    f"Repaired {repairs} directory block checksum"
-                    f"{'s' if repairs != 1 else ''} and refreshed the volume bitmap.",
-                )
-            report("Restamping the volume so a machine re-reads it", 3, total)
-            if self._advance_hardfile_disc_id(session):
-                self._append_warning(
-                    session,
-                    "Advanced the volume datestamp and rebuilt its root checksum so "
-                    "a machine that already cached the volume notices the edit.",
-                )
-            report("Validating the final HDA and GEO pair", 4, total)
-            self._validate_created_hardfile_pair(session)
-            self._optimise_sparse_file(session.path)
-            report("The hardware-ready pair is prepared", total, total)
         if session.hfe_original_path:
             report("Encoding and verifying the HFE image", 1, total)
             output = self._prepare_hfe_download(session)
@@ -1134,8 +967,7 @@ class DiskService(
             output = self._prepare_scp_download(session)
             report("The hardware-ready image is prepared", total, total)
             return output
-        if not is_hardfile:
-            report("The hardware-ready image is prepared", total, total)
+        report("The hardware-ready image is prepared", total, total)
         return session.path
 
     def _prepare_hfe_download(self, session: ImageSession) -> Path:
@@ -1182,60 +1014,47 @@ class DiskService(
 
     @staticmethod
     def is_bare_hard_drive(session: ImageSession, size: int | None = None) -> bool:
-        """Whether this is one hard-drive-sized volume with no partition table.
+        """Whether this is one volume too large to be a floppy.
 
-        A ``.hdf`` carrying a Rigid Disk Block opens as ``kind == "hdf"`` and is
-        never this. What this recognises is the bare hardfile: a single volume
-        too large to be a floppy, which the host has to be told the geometry
-        for because the file itself declares none.
+        A partitioned drive opens as ``hd`` and is never this. What this
+        recognises is the bare volume: a single FAT filesystem at sector zero
+        that fills a hard disk, which TOS mounts through a driver rather than
+        through the floppy BIOS.
         """
-        if session.kind not in {"ffs", "ofs"}:
+        if session.kind != "gemdos":
             return False
-        if session.descriptor_path or session.path.suffix.lower() in {".hdf", ".hda", ".geo"}:
-            return True
         measured = session.path.stat().st_size if size is None else int(size)
-        return measured > 2 * 1024 * 1024
+        return measured not in FLOPPY_SIZES and measured > 2 * MIB
 
     def export_formats(self, session: ImageSession) -> list[dict]:
-        """List container formats this image's decoded sectors can be exported as.
+        """List the containers this image's sectors can be written back out as.
 
-        Export is independent of how the image was opened: an OFS/FFS image
-        can always be exported back to its canonical raw sector extension, and
-        additionally wrapped as HFE or SCP flux when HxCFE has a known blank
-        layout for its geometry, which is the double- and high-density
-        3.5-inch floppy.
+        Export is independent of how the image was opened. A GEMDOS volume can
+        always be written back as its own sector image, and a floppy-shaped one
+        can also be wrapped as an MSA or a DIM, or as HFE or SCP flux when
+        HxCFE has a loader for its geometry.
         """
-        if session.kind not in BROWSEABLE_KINDS | {"hdf"} or session.descriptor_path is not None:
+        if session.kind not in {"gemdos", "hd", "unknown"}:
             return []
         size = session.path.stat().st_size
-        native_extension = sector_image_suffix(session.kind, size).lstrip(".")
+        if session.kind == "unknown" and size not in FLOPPY_SIZES:
+            return []
+        native_extension = "img" if session.kind == "hd" else "st"
         formats = [{
             "format": "native",
             "extension": native_extension,
             "label": f"Native sector image (.{native_extension})",
         }]
-        # A hard drive can be written either way round. Which conversion is
-        # offered depends on which form it is in now, because converting a
-        # drive to the shape it already has is not a conversion.
-        if session.kind == "hdf":
+        if session.kind in {"gemdos", "unknown"} and size in FLOPPY_SIZES:
             formats.append({
-                "format": "hardfile",
-                "extension": "zip",
-                "label": "Bare hardfile and geometry sidecar (.hdf + .geo)",
+                "format": "msa",
+                "extension": "msa",
+                "label": "Magic Shadow Archiver image (.msa)",
             })
-        elif self.is_bare_hard_drive(session, size):
             formats.append({
-                "format": "rdb",
-                "extension": "hdf",
-                "label": "Partitioned drive with a Rigid Disk Block (.hdf)",
-            })
-        if size in FLOPPY_SIZES:
-            # An ADZ is the same sector image gzipped, which is how Atari
-            # floppies are usually distributed.
-            formats.append({
-                "format": "adz",
-                "extension": "adz",
-                "label": "Gzip-compressed sector image (.adz)",
+                "format": "dim",
+                "extension": "dim",
+                "label": "FastCopy Pro image (.dim)",
             })
         if is_flux_encodable(session.kind, size):
             formats.extend(
@@ -1249,34 +1068,19 @@ class DiskService(
         return formats
 
     def export_image(self, session: ImageSession, target_format: str) -> tuple[Path, str]:
-        """Convert this image's current decoded sectors to another compatible container."""
+        """Convert this image's current sectors to another compatible container."""
         with session.lock:
             available = {entry["format"] for entry in self.export_formats(session)}
             if target_format not in available:
                 raise DiskError(f"“{target_format}” is not an available export format for this image.")
             stem = self.safe_filename(Path(session.name).stem) or "image"
-            size = session.path.stat().st_size
             if target_format == "native":
-                extension = sector_image_suffix(session.kind, size).lstrip(".")
+                extension = "img" if session.kind == "hd" else "st"
                 output = session.path.parent / f"{stem}-export.{extension}"
                 shutil.copyfile(session.path, output)
                 return output, output.name
-            if target_format == "rdb":
-                return self._export_with_rigid_disk(session, stem)
-            if target_format == "hardfile":
-                return self._export_bare_hardfile(session, stem)
-            if target_format == "adz":
-                output = session.path.parent / f"{stem}-export.adz"
-                output.unlink(missing_ok=True)
-                # No timestamp or original name is stored, so the same disk
-                # always compresses to the same bytes and two exports can be
-                # compared directly.
-                with session.path.open("rb") as sectors, output.open("wb") as raw:
-                    with gzip.GzipFile(
-                        filename="", mode="wb", fileobj=raw, mtime=0
-                    ) as compressed:
-                        shutil.copyfileobj(sectors, compressed)
-                return output, output.name
+            if target_format in {"msa", "dim"}:
+                return self._export_container(session, stem, target_format)
             container = FLUX_CONTAINERS[target_format]
             output = session.path.parent / f"{stem}-export{container.extension}"
             self._flux.encode_and_verify(
@@ -1291,128 +1095,39 @@ class DiskService(
             )
             return output, output.name
 
-    def _export_with_rigid_disk(self, session: ImageSession, stem: str) -> tuple[Path, str]:
-        """Wrap a bare volume in a Rigid Disk Block so a drive describes itself.
+    def _export_container(
+        self, session: ImageSession, stem: str, target_format: str
+    ) -> tuple[Path, str]:
+        """Wrap the current sectors as an MSA or a DIM.
 
-        A hardfile holds one volume and nothing else, so the machine reading it
-        has to be told the geometry. Giving it an RDB puts that description
-        inside the file, which is what lets `HDToolBox` and an emulator mount
-        it without being configured first.
-
-        The volume's own bytes are copied across unchanged. What the export
-        adds is the reserved cylinder in front of them, so the result is larger
-        than the source by exactly that much.
+        Both containers store whole tracks, so the shape of the disk has to be
+        known before one can be written. It is read from the boot sector's own
+        parameter block, with the file size as a cross-check, which is what
+        makes a single-sided or eleven-sector disk come out the shape it went
+        in rather than the shape the size alone suggests.
         """
-        try:
-            from atarinut.filesystem.blocks import BlockReader
-            from atarinut.filesystem.rdb import write_rigid_disk
-        except ImportError as exc:  # pragma: no cover - packaging failure
-            raise DiskError("The Atarinut Rigid Disk Block API is unavailable.") from exc
+        from .dim import DIMError, st_to_dim
+        from .msa import MSAError, st_to_msa
 
-        source_size = session.path.stat().st_size
-        volume_blocks = source_size // HARDFILE_SECTOR_SIZE
-        if volume_blocks < 2:
-            raise DiskError("This image is too small to describe as a hard drive.")
-        heads, sectors = 16, 63
-        blocks_per_cylinder = heads * sectors
-        # One cylinder for the RDB itself, then whole cylinders for the volume.
-        partition_cylinders = max(1, -(-volume_blocks // blocks_per_cylinder))
-        total_blocks = (1 + partition_cylinders) * blocks_per_cylinder
-
-        output = session.path.parent / f"{stem}-export.hdf"
-        output.unlink(missing_ok=True)
-        with output.open("wb") as target:
-            target.truncate(total_blocks * HARDFILE_SECTOR_SIZE)
-        dos_type = session.path.read_bytes()[:4] if source_size >= 4 else b"DOS\x03"
-        if not dos_type.startswith(b"DOS"):
-            dos_type = b"DOS\x03"
-        reader = BlockReader(output, writable=True)
-        try:
-            disk = write_rigid_disk(
-                reader,
-                [{
-                    "name": self._rdb_device_name(session),
-                    "dosType": dos_type,
-                    "cylinders": partition_cylinders,
-                    "bootable": True,
-                    "bootPriority": 0,
-                }],
-                heads=heads,
-                sectors=sectors,
+        data = session.path.read_bytes()
+        geometry = resolve_geometry(len(data), data[:512])
+        if geometry is None:
+            raise DiskError(
+                "The shape of this disk could not be established from its boot "
+                "sector or its size, so it cannot be written as a track-based "
+                "container."
             )
-            partition = disk.partitions[0]
-            with session.path.open("rb") as volume:
-                for index in range(volume_blocks):
-                    block = volume.read(HARDFILE_SECTOR_SIZE)
-                    if len(block) < HARDFILE_SECTOR_SIZE:
-                        block = block.ljust(HARDFILE_SECTOR_SIZE, b"\x00")
-                    reader.write_block(partition.start_block + index, block)
-        except DiskError:
-            raise
-        except Exception as exc:
-            output.unlink(missing_ok=True)
-            raise DiskError(self._friendly_engine_error(str(exc))) from exc
-        finally:
-            reader.close()
+        try:
+            payload = (
+                st_to_msa(data, geometry)
+                if target_format == "msa"
+                else st_to_dim(data, geometry)
+            )
+        except (MSAError, DIMError) as exc:
+            raise DiskError(str(exc)) from exc
+        output = session.path.parent / f"{stem}-export.{target_format}"
+        output.write_bytes(payload)
         return output, output.name
-
-    def _export_bare_hardfile(self, session: ImageSession, stem: str) -> tuple[Path, str]:
-        """Lift one partition out of a drive as a hardfile and its sidecar.
-
-        The partition's blocks are copied out verbatim. The geometry the RDB
-        declared for it is written beside them as a ``.geo``, because once the
-        partition table is gone that description has nowhere else to live, and
-        the two files are only usable together.
-        """
-        try:
-            from atarinut.filesystem.blocks import BlockReader
-            from atarinut.filesystem.rdb import read_rigid_disk
-        except ImportError as exc:  # pragma: no cover - packaging failure
-            raise DiskError("The Atarinut Rigid Disk Block API is unavailable.") from exc
-        from .hardfile_geometry import format_geometry
-
-        index = self.selected_partition(session)
-        reader = BlockReader(session.path, writable=False)
-        try:
-            disk = read_rigid_disk(reader)
-            if not disk.partitions:
-                raise DiskError("This drive declares no partitions to export.")
-            if index >= len(disk.partitions):
-                index = 0
-            partition = disk.partitions[index]
-            device = str(partition.name or f"DH{index}")
-            data_path = session.path.parent / f"{stem}-{self.safe_filename(device)}.hdf"
-            data_path.unlink(missing_ok=True)
-            with data_path.open("wb") as target:
-                for offset in range(partition.total_blocks):
-                    target.write(reader.read_block(partition.start_block + offset))
-        except DiskError:
-            raise
-        except Exception as exc:
-            raise DiskError(self._friendly_engine_error(str(exc))) from exc
-        finally:
-            reader.close()
-
-        cylinders = partition.high_cylinder - partition.low_cylinder + 1
-        descriptor = format_geometry(
-            surfaces=partition.surfaces,
-            blocks_per_track=partition.blocks_per_track,
-            cylinders=cylinders,
-            block_size=partition.block_size,
-        )
-        archive_path = session.path.parent / f"{stem}-hardfile.zip"
-        archive_path.unlink(missing_ok=True)
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.write(data_path, f"Hardfile0/{data_path.name}")
-            archive.writestr(f"Hardfile0/{data_path.stem}.geo", descriptor)
-        data_path.unlink(missing_ok=True)
-        return archive_path, archive_path.name
-
-    @staticmethod
-    def _rdb_device_name(session: ImageSession) -> str:
-        """A legal RDB device name for a volume that never had one."""
-        candidate = re.sub(r"[^A-Za-z0-9]", "", Path(session.name).stem).upper()[:30]
-        return candidate or "DH0"
 
     def mark_saved(self, session: ImageSession) -> None:
         """Record that the current working bytes have been prepared for download."""
@@ -1428,12 +1143,7 @@ class DiskService(
         with target.open("wb") as output:
             try:
                 source_fd = stream.fileno()
-                while os.sendfile(
-                    output.fileno(),
-                    source_fd,
-                    None,
-                    COPY_BUFFER_SIZE,
-                ):
+                while os.sendfile(output.fileno(), source_fd, None, COPY_BUFFER_SIZE):
                     pass
                 return
             except (AttributeError, io.UnsupportedOperation, OSError):
@@ -1494,73 +1204,64 @@ class DiskService(
                 "truncated": len(rows) > limit,
                 "summary": f"{len(rows)} ROM bank(s) of {session.rom_bank_size:,} bytes",
             }
-        if session.kind == "kickfs":
+        if session.kind == "tosrom":
             listing = self.list_directory(session, "")
             rows = listing["entries"]
             return {
                 "entries": [{
                     "path": row["path"],
                     "name": row["name"],
-                    "type": "Kickstart ROM file",
+                    "type": "TOS ROM segment",
                     "size": row["length"],
-                    "detail": f"{format_protection(row['protection'])} · {row['attr']}",
+                    "detail": str(row.get("detail") or ""),
                 } for row in rows[:limit]],
                 "total": len(rows),
                 "truncated": len(rows) > limit,
-                "summary": f"{len(rows)} file(s) in {listing['title']} Kickstart ROM",
+                "summary": f"{len(rows)} segment(s) in {listing['title']}",
             }
-        if session.kind == "dms":
-            dms = self._dms(session)
-            entries = [
-                {
-                    "path": "$",
-                    "name": item.name,
-                    "type": "file",
-                    "size": len(item.data),
-                    "detail": "complete" if item.complete else "incomplete",
-                }
-                for item in dms.files[:limit]
-            ]
+        if session.kind in CONTAINER_KINDS:
+            members = self.container_members(session)
             return {
-                "entries": entries,
-                "total": len(dms.files),
-                "truncated": len(dms.files) > limit,
-                "summary": f"{len(dms.files)} reconstructed DMS track(s)",
+                "entries": [
+                    {
+                        "path": "",
+                        "name": member["name"],
+                        "type": "track",
+                        "size": member["length"],
+                        "detail": "complete" if member["complete"] else "incomplete",
+                    }
+                    for member in members[:limit]
+                ],
+                "total": len(members),
+                "truncated": len(members) > limit,
+                "summary": f"{len(members)} track(s) in a {CONTAINER_KINDS[session.kind]}",
             }
 
         entries: list[dict] = []
-        pending: list[tuple[str, int | None]] = [("", None)]
-        visited: set[tuple[str, int | None]] = set()
+        pending: list[str] = [""]
+        visited: set[str] = set()
         truncated = False
         while pending:
-            path, side = pending.pop(0)
-            identity = (path.casefold(), side)
-            if identity in visited:
+            path = pending.pop(0)
+            if path.casefold() in visited:
                 continue
-            visited.add(identity)
-            listing = self.list_directory(session, path, side)
-            prefix = f"Side {side}" if side is not None else path
+            visited.add(path.casefold())
+            listing = self.list_directory(session, path)
             for row in listing["entries"]:
                 if len(entries) >= limit:
                     truncated = True
                     break
                 name = str(row.get("name") or "Untitled")
-                item_path = (
-                    atari_paths.join(path, name)
-                )
+                item_path = atari_paths.join(path, name)
                 entries.append({
-                    "path": prefix,
+                    "path": path,
                     "name": name,
                     "type": row.get("type", "file"),
-                    "size": row.get("size"),
-                    "detail": (
-                        f"load {row.get('loadHex')} · exec {row.get('executeHex')}"
-                        if row.get("loadHex") or row.get("executeHex")
-                        else ""
-                    ),
+                    "size": row.get("length"),
+                    "detail": str(row.get("attributes") or ""),
                 })
-                if session.kind in {"ffs", "ofs"} and row.get("type") == "dir":
-                    pending.append((item_path, None))
+                if self.mountable(session) and row.get("type") == "dir":
+                    pending.append(item_path)
             if truncated:
                 break
         return {
@@ -1570,6 +1271,31 @@ class DiskService(
             "summary": f"{len(entries)} visible object(s)" + (" or more" if truncated else ""),
         }
 
+    # ------------------------------------------------------------------
+    # Creating blank media
+    # ------------------------------------------------------------------
+    @staticmethod
+    def parse_capacity(text: object, default: int) -> int:
+        """Read a capacity a person typed, such as ``32MB`` or ``512M``."""
+        raw = str(text or "").strip().lower().replace(" ", "").replace("ib", "b")
+        if not raw:
+            return default
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)(k|kb|m|mb|g|gb)?", raw)
+        if not match:
+            raise DiskError(
+                "A capacity is a number with an optional unit, such as 32MB or 512MB."
+            )
+        amount = float(match.group(1))
+        scale = {
+            None: 1, "k": 1024, "kb": 1024,
+            "m": MIB, "mb": MIB,
+            "g": 1024 * MIB, "gb": 1024 * MIB,
+        }[match.group(2)]
+        value = int(amount * scale)
+        if value <= 0:
+            raise DiskError("A capacity must be greater than zero.")
+        return value
+
     def create_blank(
         self,
         format_name: str,
@@ -1578,358 +1304,355 @@ class DiskService(
         target_hardware: str = "auto",
         options: dict | None = None,
     ) -> ImageSession:
-        hfe_formats = {
-            "hfe-adf": "adf",
-            "hfe-adf-hd": "adf-hd",
-            "hfe-ffs": "ffs",
-            "hfe-ffs-intl": "ffs-intl",
-            "hfe-ffs-dc": "ffs-dc",
-            "hfe-ffs-hd": "ffs-hd",
-        }
-        target_hardware = self._blank_target_hardware(
-            format_name,
-            target_hardware,
-        )
-        native_format = hfe_formats.get(format_name, format_name)
-        # ``ofs`` names the filing system rather than a format, and ``adz`` is
-        # a compressed ADF; both are accepted as spellings of a plain
-        # double-density OFS floppy.
-        native_format = {"ofs": "adf", "adz": "adf"}.get(native_format, native_format)
-        # Every floppy variant is the same 880 KiB or 1.76 MiB of blocks; only
-        # the DOS type in the boot block differs, which is exactly how a real
-        # machine distinguishes them.
-        formats = {
-            "adf": ("blank.adf", ["--variant", "OFS", "--geometry", "dd"]),
-            "adf-intl": ("blank.adf", ["--variant", "OFS-INTL", "--geometry", "dd"]),
-            "adf-dc": ("blank.adf", ["--variant", "OFS-DC", "--geometry", "dd"]),
-            "adf-hd": ("blank.adf", ["--variant", "OFS-INTL", "--geometry", "hd"]),
-            "ffs": ("blank.adf", ["--variant", "FFS", "--geometry", "dd"]),
-            "ffs-intl": ("blank.adf", ["--variant", "FFS-INTL", "--geometry", "dd"]),
-            "ffs-dc": ("blank.adf", ["--variant", "FFS-DC", "--geometry", "dd"]),
-            "ffs-hd": ("blank.adf", ["--variant", "FFS-INTL", "--geometry", "hd"]),
-            "ffs-hd-dc": ("blank.adf", ["--variant", "FFS-DC", "--geometry", "hd"]),
-            "hardfile": (
-                "hardfile.hdf",
-                [
-                    "--variant", "FFS-INTL",
-                    "--geometry", f"capacity={capacity or '20MB'}",
-                    "--geometry-sidecar",
-                ],
-            ),
-            "ffs-hard": (
-                "HardDisk.hdf",
-                [
-                    "--filesystem", "rdb",
-                    "--partitions", "1",
-                    "--variant", "FFS-INTL",
-                    "--geometry", f"capacity={capacity or '100MB'}",
-                ],
-            ),
-            "ffs-physical": (
-                "physical-drive.raw",
-                ["--variant", "FFS-INTL", "--geometry", f"capacity={capacity or '100MB'}"],
-            ),
-        }
-        if native_format == "kickfs":
-            options = options or {}
-            # ``capacity`` is the pane's floppy or drive size field. It only
-            # applies to a ROM when it names a ROM size, so anything else
-            # falls through to the default rather than failing the create.
-            requested_capacity = str(capacity or "").strip().lower().replace("ib", "").replace(" ", "")
-            if requested_capacity not in {"256k", "512k", "1m", "262144", "524288", "1048576", "1024k"}:
-                requested_capacity = ""
-            geometry = (
-                str(options.get("geometry") or requested_capacity or "256k")
-                .lower()
-                .replace("ib", "")
-                .replace(" ", "")
+        """Create a new empty image of one of the shapes TOS can read."""
+        options = dict(options or {})
+        format_name = str(format_name or "").strip().lower()
+        image_id = uuid.uuid4().hex
+        folder = self.work_dir / image_id
+        folder.mkdir()
+        try:
+            if format_name in HFE_FORMATS:
+                session = self._create_blank_hfe(
+                    image_id, folder, format_name, title, options
+                )
+            elif format_name in FLOPPY_FORMATS:
+                session = self._create_blank_floppy(
+                    image_id, folder, format_name, title, options
+                )
+            elif format_name == "hd":
+                session = self._create_blank_hard_disk(
+                    image_id, folder, title, capacity, options
+                )
+            elif format_name == "volume":
+                session = self._create_blank_volume(
+                    image_id, folder, title, capacity
+                )
+            elif format_name in {"rom", "cartridge"}:
+                session = self._create_blank_rom(
+                    image_id, folder, format_name, title, options
+                )
+            else:
+                raise DiskError(
+                    "Unknown blank image format. Choose a floppy format such as "
+                    "ds-720k, an HFE wrapper, hd, volume, rom or cartridge."
+                )
+            session.target_hardware = self._target_hardware(
+                self._blank_target_hardware(format_name, target_hardware)
             )
-            geometry = {
-                "256k": "256k", "262144": "256k",
-                "512k": "512k", "524288": "512k",
-                "1m": "1m", "1024k": "1m", "1048576": "1m",
-            }.get(geometry, geometry)
-            if geometry not in {"256k", "512k", "1m"}:
-                raise DiskError("A ROM image is 256 KiB, 512 KiB or 1 MiB.")
-            kickfs_title = str(title or "FORGE").strip()
-            if not kickfs_title or len(kickfs_title) > 20:
-                raise DiskError("A created ROM title can contain 1 to 20 characters.")
-            copyright_text = str(
-                options.get("copyright") or f"{kickfs_title}.library 1.0 (2026)"
-            ).strip()
-            if not copyright_text:
-                raise DiskError("A resident identification string cannot be empty.")
-            if len(copyright_text) > 120:
-                raise DiskError("A resident identification string can hold at most 120 characters.")
-            try:
-                version = int(str(options.get("version", 1)), 0)
-            except ValueError as exc:
-                raise DiskError("A ROM version must be from 0 to 65535.") from exc
-            if not 0 <= version <= 0xFFFF:
-                raise DiskError("A ROM version must be from 0 to 65535.")
-            image_id = uuid.uuid4().hex
-            folder = self.work_dir / image_id
-            folder.mkdir()
-            path = folder / f"{self.safe_filename(kickfs_title) or 'forge'}.rom"
-            try:
-                self._run([
-                    "create", "--filesystem", "kickfs", "--geometry", geometry,
-                    "--title", kickfs_title, str(path),
-                ])
-                from atarinut.kickfs.kickfs import set_copyright, set_version
-                data = set_version(path.read_bytes(), version)
-                data = set_copyright(data, copyright_text)
-                path.write_bytes(data)
-                session = ImageSession(
-                    image_id, path.name, "kickfs", path, dirty=True,
-                    target_hardware=self._target_hardware(target_hardware),
-                )
-            except Exception as exc:
-                shutil.rmtree(folder, ignore_errors=True)
-                if isinstance(exc, DiskError):
-                    raise
-                raise DiskError(f"The ROM image could not be created: {exc}") from exc
-        elif native_format == "rom":
-            options = options or {}
-            try:
-                bank_size = validate_bank_size(int(options.get("bankSize", DEFAULT_BANK_SIZE)))
-                total_size = int(options.get("totalSize", bank_size))
-            except (TypeError, ValueError, RomError) as exc:
-                raise DiskError(str(exc) or "Choose valid ROM dimensions.") from exc
-            if total_size < 1 or total_size > MAX_ROM_SIZE:
-                raise DiskError("ROM images must contain between 1 byte and 64 MiB.")
-            erase_byte = int(options.get("eraseByte", 0xFF)) & 0xFF
-            image_id = uuid.uuid4().hex
-            folder = self.work_dir / image_id
-            folder.mkdir()
-            path = folder / f"{self.safe_filename(title) or 'blank'}.rom"
-            try:
-                template = str(options.get("template") or "blank")
-                first = (
-                    make_expansion_rom(bank_size, title, erase_byte)
-                    if template == "kickstart"
-                    else bytes((erase_byte,)) * min(bank_size, total_size)
-                )
-                with path.open("wb") as image:
-                    image.write(first[:total_size])
-                    if total_size > len(first):
-                        chunk = bytes((erase_byte,)) * min(COPY_BUFFER_SIZE, total_size - len(first))
-                        remaining = total_size - len(first)
-                        while remaining:
-                            part = chunk[:remaining]
-                            image.write(part)
-                            remaining -= len(part)
-                session = ImageSession(
-                    image_id, path.name, "rom", path, dirty=True,
-                    rom_bank_size=bank_size,
-                    rom_erase_byte=erase_byte,
-                    rom_platform=validate_platform(options.get("platform")),
-                    rom_layout=validate_layout(options.get("layout")),
-                    rom_component_names=[
-                        self.safe_filename(name)
-                        for name in options.get("componentNames", [])
-                        if name
-                    ],
-                )
-            except Exception:
-                shutil.rmtree(folder, ignore_errors=True)
-                raise
-        else:
-            try:
-                filename, extra = formats[native_format]
-            except KeyError as exc:
-                raise DiskError("Unknown blank image format.") from exc
-            image_id = uuid.uuid4().hex
-            folder = self.work_dir / image_id
-            folder.mkdir()
-            path = folder / filename
-            try:
-                self._run(["create", *extra, "--title", title[:30], str(path)])
-                # The engine writes the sidecar as ``name.hda.geo``, which is
-                # the spelling every emulator looks for. The bare
-                # ``name.geo`` form is accepted too, for images prepared by
-                # hand.
-                generated_descriptor = Path(str(path) + ".geo")
-                if not generated_descriptor.is_file():
-                    generated_descriptor = path.with_suffix(".geo")
-                # ``.hdf`` is what every Atari emulator calls a hard-drive
-                # file, whether or not it carries a partition table, so both
-                # kinds of drive are written under that extension. A drive is
-                # told from a bare hardfile by reading its Rigid Disk Block,
-                # not by its name.
-                output_names = {
-                    "ffs-hard": "HardDrive.hdf",
-                    "ffs-physical": "physical-drive.raw",
-                }
-                if native_format in output_names:
-                    output_path = folder / output_names[native_format]
-                    path.replace(output_path)
-                    path = output_path
-                    generated_descriptor.unlink(missing_ok=True)
-                descriptor_path = (
-                    generated_descriptor
-                    if native_format == "hardfile" and generated_descriptor.is_file()
-                    else None
-                )
-                if native_format == "hardfile" and descriptor_path is None:
-                    raise DiskError(
-                        "The disk engine did not create the Hardfile GEO descriptor."
-                    )
-                session = ImageSession(
-                    image_id,
-                    path.name,
-                    self.identify_kind(path, self.detect_kind(path.name)),
-                    path,
-                    descriptor_name=descriptor_path.name if descriptor_path else None,
-                    descriptor_path=descriptor_path,
-                    dirty=True,
-                    target_hardware=self._target_hardware(target_hardware),
-                )
-                self._normalise_hardfile_dat_size(session)
-                if native_format == "hardfile":
-                    self._canonicalise_created_hardfile_root(session, title[:12])
-                    self._validate_created_hardfile_pair(session)
-                self._apply_target_hardware(session)
-                if native_format == "hardfile":
-                    self._optimise_sparse_file(session.path)
-                if format_name in hfe_formats:
-                    original = folder / f"{self.safe_filename(title) or 'blank'}.hfe"
-                    # The flux layout follows from the blank image's geometry,
-                    # so creation uses the same rule as opening and saving.
-                    self._flux.encode_from_sectors(
-                        path, HFE, original, kind=session.kind
-                    )
-                    header = parse_hfe_header(original.read_bytes()[:512])
-                    session.name = original.name
-                    session.hfe_original_path = original
-                    session.hfe_version = header.version
-                    session.warnings.append(
-                        f"Created an editable HFE {header.version} container around {path.suffix[1:].upper()}."
-                    )
-            except Exception:
-                shutil.rmtree(folder, ignore_errors=True)
-                raise
-        if session.kind in {"ffs", "ofs"}:
-            self.refresh_ffs_capabilities(session)
+        except Exception:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        if session.kind == "gemdos":
+            self.refresh_gemdos_capabilities(session)
         with self._lock:
             self.sessions[session.id] = session
         self._persist_session(session)
         return session
 
-    @staticmethod
-    def _blank_target_hardware(
-        format_name: str,
-        requested: str | None,
-    ) -> str:
-        """Apply only target profiles that are meaningful for a new format."""
-        forced = {
-            "hardfile": "hardfile",
-            "ffs-hard": "tos",
-            "ffs-physical": "tos",
-        }
-        if format_name in forced:
-            return forced[format_name]
-        # Every floppy is the same disk on every Atari, so the machine a new
-        # one is meant for stays the user's choice.
-        selectable_floppies = {
-            "adf",
-            "adf-intl",
-            "adf-dc",
-            "adf-hd",
-            "ffs",
-            "ffs-intl",
-            "ffs-dc",
-            "ffs-hd",
-            "ffs-hd-dc",
-            "hfe-adf",
-            "hfe-adf-hd",
-            "hfe-ffs",
-            "hfe-ffs-intl",
-            "hfe-ffs-dc",
-            "hfe-ffs-hd",
-        }
-        # A floppy can be aimed at a Kickstart 1.3 machine or a Kickstart 3.x
-        # one, which is what decides whether an FFS volume mounts without help.
-        # The hard-drive profiles are not choices a floppy can make.
-        floppy_profiles = {"auto", "a500-ofs", "a1200-ffs"}
-        if format_name == "kickfs" or format_name in selectable_floppies:
-            requested = str(requested or "auto")
-            return requested if requested in floppy_profiles else "auto"
-        return "auto"
-
-    @staticmethod
-    def _ofs_title(data: bytes) -> str:
-        """Read a volume's disk name out of a raw ADF image."""
-        from .ofs_compat import BLOCK_SIZE
-
-        if len(data) < BLOCK_SIZE * 4:
-            return ""
-        total = len(data) // BLOCK_SIZE
-        candidate = root_block_number(total)
-        # A volume written by another tool may round the midpoint the other
-        # way, so its neighbours are tried before giving up on the name.
-        for block in (candidate, candidate - 1, candidate + 1):
-            if not 0 <= block < total:
-                continue
-            offset = block * BLOCK_SIZE
-            root = data[offset : offset + BLOCK_SIZE]
-            if len(root) != BLOCK_SIZE:
-                continue
-            if int.from_bytes(root[0:4], "big") != 2:
-                continue
-            if int.from_bytes(root[BLOCK_SIZE - 4 :], "big", signed=True) != 1:
-                continue
-            name_offset = BLOCK_SIZE - 80
-            length = min(root[name_offset], 30)
-            return (
-                root[name_offset + 1 : name_offset + 1 + length]
-                .decode("latin-1", "replace")
-                .strip()
-            )
-        return ""
-
-    def set_ffs_source_name(
-        self,
-        session: ImageSession,
-        path: str,
-        source_name: str,
+    def _format_floppy_image(
+        self, path: Path, geometry_name: str, label: str, *, bootable: bool
     ) -> None:
-        session.ffs_source_names[str(path)] = str(source_name).replace(
-            "\\",
-            "/",
-        )[-500:]
+        """Write an empty FAT12 volume of a named floppy geometry."""
+        try:
+            from atarinut.filesystem import format_volume, named_geometry, reader_for
+        except ImportError as exc:  # pragma: no cover - packaging failure
+            raise DiskError("The Atarinut format API is unavailable.") from exc
+        geometry = named_geometry(geometry_name)
+        with path.open("wb") as image:
+            image.truncate(geometry.size_bytes)
+        reader = reader_for(path, writable=True)
+        try:
+            format_volume(
+                reader, label=label, geometry=geometry, bootable=bootable
+            )
+        except Exception as exc:
+            raise DiskError(self._friendly_engine_error(str(exc))) from exc
+        finally:
+            reader.close()
+
+    @staticmethod
+    def _volume_label(title: str) -> str:
+        """Fold a requested title into the eleven characters a label holds."""
+        try:
+            from atarinut.filesystem import validate_label
+        except ImportError:  # pragma: no cover - packaging failure
+            return str(title or "")[:11]
+        candidate = "".join(
+            character
+            for character in str(title or "").upper()
+            if character.isalnum() or character in "!#$%&'()-@^_`{}~ "
+        ).strip()[:11]
+        try:
+            return validate_label(candidate)
+        except Exception:
+            return ""
+
+    def _create_blank_floppy(
+        self, image_id: str, folder: Path, geometry_name: str, title: str, options: dict
+    ) -> ImageSession:
+        """Create one empty floppy image of a named geometry."""
+        label = self._volume_label(title)
+        path = folder / f"{self.safe_filename(title) or 'blank'}.st"
+        self._format_floppy_image(
+            path, geometry_name, label, bootable=bool(options.get("bootable"))
+        )
+        session = ImageSession(image_id, path.name, "gemdos", path, dirty=True)
+        if options.get("bootable"):
+            session.warnings.append(
+                "The boot sector is executable and its checksum is set to 0x1234, so "
+                "a TOS machine will run it. It contains no loader yet."
+            )
+        return session
+
+    def _create_blank_hfe(
+        self, image_id: str, folder: Path, format_name: str, title: str, options: dict
+    ) -> ImageSession:
+        """Create a blank floppy and wrap it as an HxC flux container.
+
+        The sectors are written to a ``.st`` first because that suffix is how
+        HxCFE selects the ST loader, and the loader is what reads the BIOS
+        parameter block and settles the geometry it encodes. A blank image
+        without a correct parameter block would be wrapped at the wrong shape.
+        """
+        geometry_name = HFE_FORMATS[format_name]
+        session = self._create_blank_floppy(
+            image_id, folder, geometry_name, title, options
+        )
+        original = folder / f"{self.safe_filename(title) or 'blank'}.hfe"
+        self._flux.encode_from_sectors(session.path, HFE, original, kind=session.kind)
+        header = parse_hfe_header(original.read_bytes()[:512])
+        session.name = original.name
+        session.hfe_original_path = original
+        session.hfe_version = header.version
+        session.warnings.append(
+            f"Created an editable HFE {header.version} container around a "
+            f"{geometry_name} floppy."
+        )
+        return session
+
+    def _partition_plan(
+        self, total_bytes: int, label: str, options: dict
+    ) -> list[dict]:
+        """Divide a new drive into partitions TOS can mount.
+
+        Four equal partitions is the default because that is what AHDI's own
+        root sector holds without chaining, and each is capped at 256 MiB so
+        the drive works under TOS 1.04 as well as later releases. A drive
+        larger than the four capped partitions cover simply leaves the
+        remainder unallocated rather than silently building something the
+        target machine cannot mount.
+        """
+        try:
+            count = int(options.get("partitions", 4))
+        except (TypeError, ValueError) as exc:
+            raise DiskError("The number of partitions must be a whole number.") from exc
+        if not 1 <= count <= 14:
+            raise DiskError("A drive can hold from one to fourteen partitions.")
+        usable = total_bytes - 512
+        share = min(TOS_PARTITION_LIMIT, (usable // count) & ~511)
+        if share < 64 * 1024:
+            raise DiskError(
+                f"{count} partitions leave too little room on a "
+                f"{total_bytes // MIB:,} MiB drive."
+            )
+        base = (label or "DISK")[:10] or "DISK"
+        return [
+            {
+                "label": base if count == 1 else f"{base}{index}"[:11],
+                "size_bytes": share,
+                "bootable": index == 0,
+            }
+            for index in range(count)
+        ]
+
+    def _create_blank_hard_disk(
+        self, image_id: str, folder: Path, title: str, capacity: str | None, options: dict
+    ) -> ImageSession:
+        """Create a partitioned hard-disk image and format every partition."""
+        try:
+            from atarinut.filesystem import create_partitioned_image
+        except ImportError as exc:  # pragma: no cover - packaging failure
+            raise DiskError("The Atarinut partitioning API is unavailable.") from exc
+        scheme = str(options.get("scheme") or "ahdi").strip().lower()
+        if scheme not in PARTITION_SCHEMES:
+            raise DiskError("A new hard disk uses either the AHDI or the MBR scheme.")
+        total = self.parse_capacity(capacity or options.get("size"), 32 * MIB)
+        if total < MIB:
+            raise DiskError("A hard-disk image is at least 1 MiB.")
+        label = self._volume_label(title)
+        plan = self._partition_plan(total, label, options)
+        path = folder / f"{self.safe_filename(title) or 'harddisk'}.img"
+        try:
+            disk = create_partitioned_image(
+                path,
+                total,
+                plan,
+                bootable=bool(options.get("bootable", True)),
+                scheme=scheme,
+            )
+        except Exception as exc:
+            raise DiskError(self._friendly_engine_error(str(exc))) from exc
+        session = ImageSession(image_id, path.name, "hd", path, dirty=True, partition=0)
+        session.warnings.append(
+            f"Created a {scheme.upper()} hard disk of {total // MIB:,} MiB with "
+            f"{len(disk.partitions)} partition{'s' if len(disk.partitions) != 1 else ''}."
+        )
+        for note in disk.notes:
+            session.warnings.append(str(note))
+        self._optimise_sparse_file(path)
+        return session
+
+    def _create_blank_volume(
+        self, image_id: str, folder: Path, title: str, capacity: str | None
+    ) -> ImageSession:
+        """Create one bare FAT16 volume with no partition table above it.
+
+        This is what a driver hands TOS when a drive holds a single filesystem
+        starting at sector zero. It has no table, so the geometry has to come
+        from the boot sector, which is what the engine writes here.
+        """
+        try:
+            from atarinut.filesystem import (
+                format_volume,
+                partition_geometry,
+                reader_for,
+            )
+        except ImportError as exc:  # pragma: no cover - packaging failure
+            raise DiskError("The Atarinut format API is unavailable.") from exc
+        total = self.parse_capacity(capacity, 32 * MIB)
+        if total < MIB:
+            raise DiskError("A bare volume image is at least 1 MiB.")
+        total -= total % 512
+        label = self._volume_label(title)
+        path = folder / f"{self.safe_filename(title) or 'volume'}.img"
+        with path.open("wb") as image:
+            image.truncate(total)
+        reader = reader_for(path, writable=True)
+        try:
+            geometry = partition_geometry(total // 512, label=label)
+            volume = format_volume(reader, label=label, geometry=geometry)
+            notes = list(volume.notes)
+        except Exception as exc:
+            raise DiskError(self._friendly_engine_error(str(exc))) from exc
+        finally:
+            reader.close()
+        session = ImageSession(image_id, path.name, "gemdos", path, dirty=True)
+        session.warnings.append(
+            f"Created a bare {geometry.format} volume of {total // MIB:,} MiB with "
+            f"{geometry.sector_size:,}-byte logical sectors."
+        )
+        session.warnings.extend(str(note) for note in notes)
+        self._optimise_sparse_file(path)
+        return session
+
+    def _create_blank_rom(
+        self, image_id: str, folder: Path, format_name: str, title: str, options: dict
+    ) -> ImageSession:
+        """Create a blank banked ROM, or a structurally valid cartridge."""
+        erase_byte = int(options.get("eraseByte", 0xFF)) & 0xFF
+        if format_name == "cartridge":
+            bank_size = 128 * 1024
+            total_size = bank_size
+            template = "cartridge"
+        else:
+            try:
+                bank_size = validate_bank_size(int(options.get("bankSize", DEFAULT_BANK_SIZE)))
+                total_size = int(options.get("totalSize", bank_size))
+            except (TypeError, ValueError, RomError) as exc:
+                raise DiskError(str(exc) or "Choose valid ROM dimensions.") from exc
+            template = str(options.get("template") or "blank")
+            if template == "cartridge" and bank_size > 128 * 1024:
+                raise DiskError("A cartridge ROM bank is at most 128 KiB.")
+        if total_size < 1 or total_size > MAX_ROM_SIZE:
+            raise DiskError("ROM images must contain between 1 byte and 64 MiB.")
+        path = folder / f"{self.safe_filename(title) or 'blank'}.rom"
+        try:
+            first = (
+                make_cartridge_rom(bank_size, title, erase_byte)
+                if template == "cartridge"
+                else bytes((erase_byte,)) * min(bank_size, total_size)
+            )
+        except RomError as exc:
+            raise DiskError(str(exc)) from exc
+        with path.open("wb") as image:
+            image.write(first[:total_size])
+            remaining = total_size - len(first)
+            chunk = bytes((erase_byte,)) * min(COPY_BUFFER_SIZE, max(0, remaining))
+            while remaining > 0:
+                part = chunk[:remaining]
+                image.write(part)
+                remaining -= len(part)
+        return ImageSession(
+            image_id, path.name, "rom", path, dirty=True,
+            rom_bank_size=bank_size,
+            rom_erase_byte=erase_byte,
+            rom_platform=validate_platform(
+                options.get("platform") or ("cartridge" if template == "cartridge" else "tos")
+            ),
+            rom_layout=validate_layout(options.get("layout")),
+            rom_component_names=[
+                self.safe_filename(name)
+                for name in options.get("componentNames", [])
+                if name
+            ],
+        )
+
+    @staticmethod
+    def _blank_target_hardware(format_name: str, requested: str | None) -> str:
+        """Apply only target profiles that are meaningful for a new format."""
+        if format_name == "hd":
+            return "hd"
+        if format_name == "volume":
+            return "volume"
+        if format_name in {"rom", "cartridge"}:
+            return "auto"
+        # Every floppy is the same disk on every ST, so the machine a new one
+        # is meant for is not a choice the format makes.
+        requested = str(requested or "auto")
+        return requested if requested in {"auto", "floppy"} else "floppy"
+
+    # ------------------------------------------------------------------
+    # Session bookkeeping
+    # ------------------------------------------------------------------
+    def set_source_name(self, session: ImageSession, path: str, source_name: str) -> None:
+        session.source_names[str(path)] = str(source_name).replace("\\", "/")[-500:]
         self._persist_session(session)
 
-    def set_distribution_name(
-        self,
-        session: ImageSession,
-        source_name: str,
-    ) -> None:
+    def set_distribution_name(self, session: ImageSession, source_name: str) -> None:
         session.distribution_name = str(source_name).replace("\\", "/")[-500:]
         self._persist_session(session)
 
     def _mark_mutated(self, session: ImageSession) -> None:
-        """Record that this image has been edited since it was opened."""
+        """Record that this image has been edited since it was opened.
+
+        The volume's own description is re-read as well. A write can change
+        the label, the free cluster count or the boot sector's executable
+        word sum, and a report that still showed the values from before the
+        edit would be describing an image that no longer exists.
+        """
         session.dirty = True
         session.hfe_export_path = None
+        session.scp_export_path = None
         session.content_kind_cache.clear()
+        if self.mountable(session):
+            self.refresh_gemdos_capabilities(session)
 
     def resolve(self, session: ImageSession) -> Path:
         """Return the working file the engine should be pointed at."""
         return session.path
 
     @staticmethod
-    def inner_for(session: ImageSession, inner: str, side: int | None) -> str:
-        if session.kind == "kickfs":
-            return "" if inner in {"", "$"} else inner
-        if not session.path.name.lower().endswith(".adz"):
-            return inner
-        drive = 2 if side == 2 else 0
-        if inner == "":
-            return f":{drive}"
-        if inner in atari_paths.ROOT_TOKENS:
-            return f":{drive}.$"
-        return f":{drive}.{inner}"
+    def inner_for(session: ImageSession, inner: str, side: int | None = None) -> str:
+        """Return the inner path the engine should be given.
+
+        ``side`` is accepted because callers still pass it and is ignored: a
+        GEMDOS volume is one filesystem whether the disk it sits on is
+        recorded on one side or two.
+        """
+        del side
+        if session.kind == "tosrom":
+            return "" if atari_paths.is_root(inner) else str(inner)
+        return atari_paths.normalise(inner)
 
     @staticmethod
     def compound(path: Path, inner: str | None = None) -> str:
@@ -1970,7 +1693,7 @@ class DiskService(
             return None
         key = (
             side, str(path).casefold(), length,
-            int(row.get("protection") or 0), str(row.get("filetype") or ""),
+            str(row.get("attributes") or ""), str(row.get("filetype") or ""),
         )
         cached = session.content_kind_cache.get(key)
         if cached:
@@ -1984,49 +1707,60 @@ class DiskService(
         session.content_kind_cache[key] = kind
         return kind
 
+    # ------------------------------------------------------------------
+    # Listing
+    # ------------------------------------------------------------------
     def partition_index(self, session: ImageSession) -> dict:
-        """List a hard drive's partitions in the same shape as a directory.
+        """List a hard disk's partitions in the same shape as a directory.
 
         A drive that has not had a partition chosen shows its partition table,
-        which is what a machine sees before it mounts anything. Each row is
-        presented as a drawer so the pane can be opened into exactly as a
-        directory is, and carries the device name, filing system and boot flag
-        the RDB declares.
+        which is what TOS sees before it mounts anything. Each row is presented
+        as a folder so the pane can be opened into exactly as a directory is,
+        and carries the drive letter, the three-letter identifier or MBR type
+        code, and the boot flag the table declares.
         """
-        partitions = self.list_partitions(session)
+        table = self.partition_table(session)
+        partitions = list(table.get("partitions") or [])
         rows = [
             {
                 "name": str(partition.get("device") or partition.get("name") or f"Partition {index}"),
                 "type": "dir",
-                "protection": 0,
-                "comment": "",
+                "attributes": "",
+                "attributeBits": 0,
+                "attr": "bootable" if partition.get("bootable") else "",
                 "filetype": "",
                 "datestamp": "",
                 "length": int(partition.get("sizeBytes") or 0),
-                "attr": "bootable" if partition.get("bootable") else "",
-                "format": str(partition.get("format") or ""),
+                "label": str(partition.get("label") or ""),
+                "id": str(partition.get("id") or ""),
+                "typeCode": partition.get("typeCode"),
+                "startSector": int(partition.get("startSector") or 0),
+                "sizeSectors": int(partition.get("sizeSectors") or 0),
+                "byteSwapped": bool(partition.get("byteSwapped")),
                 "bootable": bool(partition.get("bootable")),
+                "gemdos": bool(partition.get("gemdos")),
                 "partition": index,
             }
             for index, partition in enumerate(partitions)
         ]
+        scheme = str(table.get("scheme") or "ahdi").upper()
+        description = (
+            f"{scheme} table · {len(rows)} partition{'s' if len(rows) != 1 else ''}"
+        )
+        if table.get("byteSwapped"):
+            description += " · byte-swapped image"
         return {
             "entries": rows,
             "title": session.name,
-            "description": (
-                f"{len(rows)} RDB partition{'s' if len(rows) != 1 else ''}"
-            ),
+            "description": description,
             "path": "",
+            "scheme": str(table.get("scheme") or "ahdi"),
+            "byteSwapped": bool(table.get("byteSwapped")),
+            "hdSize": int(table.get("hdSize") or 0),
         }
 
-    def _list_ffs_mount(self, mount, inner: str, session: ImageSession) -> dict:
-        """Return the same stable row schema as ``disc ls --as json``."""
-        try:
-            from atarinut.file import format_access_text
-            from atarinut.filesystem import AtariMetadata, Datestamped
-        except ImportError as exc:
-            raise DiskError("The Atarinut FFS listing API is unavailable.") from exc
-
+    def _list_gemdos_mount(self, mount, inner: str, session: ImageSession) -> dict:
+        """Return the same stable row schema as ``python -m atarinut ls --as json``."""
         target = inner or ""
         if not mount.exists(target):
             raise DiskError(f"Path not found: {target}")
@@ -2034,61 +1768,65 @@ class DiskService(
             raise DiskError(f"{target} is not a directory.")
 
         rows: list[dict] = []
-        for child in sorted(mount.iter_entries(target), key=lambda entry: natural_name_key(entry.name)):
-            # A drawer carries the same header fields a file does, so both
-            # report their protection bits, comment and datestamp.
-            protection = 0
-            attr = ""
-            comment = ""
-            datestamp = ""
-            if isinstance(mount, AtariMetadata):
-                metadata = mount.atari_meta(child.path)
-                protection = int(metadata.protection or 0)
-                comment = str(metadata.comment or "")
-                if metadata.access is not None:
-                    attr = format_access_text(metadata.access)
-            if isinstance(mount, Datestamped):
-                value = mount.datestamp(child.path)
-                if value is not None:
-                    datestamp = value.isoformat(sep="T", timespec="milliseconds")
-            if child.is_dir:
-                rows.append({
-                    "name": child.name,
-                    "type": "dir",
-                    "protection": protection,
-                    "comment": comment,
-                    "datestamp": datestamp,
-                    "length": sum(1 for _entry in mount.iter_entries(child.path)),
-                    "attr": attr,
-                })
-                continue
-
+        for child in sorted(
+            mount.iter_entries(target), key=lambda entry: natural_name_key(entry.name)
+        ):
+            bits = int(child.attributes or 0)
+            attributes = format_attributes(bits)
+            stamp = child.datestamp
+            datestamp = (
+                stamp.isoformat(sep="T", timespec="milliseconds") if stamp else ""
+            )
             row = {
                 "name": child.name,
-                "type": "file",
-                "protection": protection,
-                "comment": comment,
+                "path": str(child.path),
+                "type": "dir" if child.is_dir else "file",
+                "attributes": attributes,
+                "attributeBits": bits,
+                "attr": attributes,
                 "datestamp": datestamp,
                 "length": int(child.length),
-                "attr": attr,
+                "filetype": "" if child.is_dir else (mount.filetype(child.path) or ""),
             }
-            content_kind = self._listing_content_kind(
-                session, None, str(child.path), row,
-                lambda child_path=str(child.path): mount.read_bytes(child_path),
-            )
-            if content_kind:
-                row["contentKind"] = content_kind
+            if child.is_dir:
+                # A directory entry's length field is meaningless on a FAT
+                # volume, so the useful number is how many entries it holds.
+                # A damaged entry that points outside the volume must not
+                # stop the rest of its parent being listed, which is exactly
+                # the state a cracked or partly overwritten game disk is
+                # often found in.
+                try:
+                    row["length"] = sum(1 for _entry in mount.iter_entries(child.path))
+                except Exception as exc:
+                    row["length"] = 0
+                    row["damaged"] = self._friendly_engine_error(str(exc))
+            if not child.is_dir:
+                content_kind = self._listing_content_kind(
+                    session, None, str(child.path), row,
+                    lambda child_path=str(child.path): mount.read_bytes(child_path),
+                )
+                if content_kind:
+                    row["contentKind"] = content_kind
             rows.append(row)
 
         capacity = DiskService._capacity_from_mount(mount)
         free = capacity.get("free")
-        return {
+        listing = {
             "entries": rows,
             "title": str(getattr(mount, "title", "") or session.name),
             "description": f"Free: {free:,} bytes" if isinstance(free, int) else "",
             "path": target,
             "capacity": capacity,
         }
+        if not atari_paths.split(target):
+            # Only the root directory has a fixed entry count, because it is a
+            # fixed area written at format time. A subdirectory is an ordinary
+            # cluster chain and grows as long as there are free clusters.
+            limit = (session.gemdos_capabilities or {}).get("directoryEntryLimit")
+            if isinstance(limit, int) and limit > 0:
+                listing["directoryEntryLimit"] = limit
+                listing["directoryEntriesUsed"] = len(rows)
+        return listing
 
     def browse_directory(
         self,
@@ -2097,24 +1835,22 @@ class DiskService(
         side: int | None = None,
     ) -> dict:
         """List one directory and return its capacity without a second mount."""
-        if session.kind == "rom":
-            listing = self.list_directory(session, "")
-            listing["capacity"] = self.capacity(session)
-            return listing
-        if session.kind == "kickfs":
-            listing = self.list_directory(session, "")
-            listing["capacity"] = self.capacity(session)
-            return listing
+        del side
         if self.mountable(session):
-            with self.ffs_mount(session) as mount:
-                return self._list_ffs_mount(mount, atari_paths.normalise(inner or ""), session)
-        listing = self.list_directory(session, inner, side)
-        listing["capacity"] = self.capacity(session)
+            with self.gemdos_mount(session, writable=False) as mount:
+                return self._list_gemdos_mount(
+                    mount, atari_paths.normalise(inner or ""), session
+                )
+        listing = self.list_directory(session, inner)
+        listing.setdefault("capacity", self.capacity(session))
         return listing
 
-    def list_directory(self, session: ImageSession, inner: str, side: int | None = None) -> dict:
+    def list_directory(
+        self, session: ImageSession, inner: str, side: int | None = None
+    ) -> dict:
+        del side
         if session.kind == "rom":
-            if inner not in {"", "$"}:
+            if not atari_paths.is_root(inner):
                 raise DiskError("ROM images contain banks, not directories.")
             rows = self.list_rom_banks(session)
             partial = session.path.stat().st_size % session.rom_bank_size
@@ -2122,301 +1858,154 @@ class DiskService(
                 f"{len(rows)} bank{'s' if len(rows) != 1 else ''} × {session.rom_bank_size:,} bytes"
                 + (f" · final bank has {partial:,} bytes" if partial else "")
             )
-            return {"entries": rows, "title": session.name, "description": description, "path": "$"}
-        if session.kind == "kickfs":
-            if inner not in {"", "$"}:
-                raise DiskError("Kickstart ROM is flat and does not contain directories.")
-            rows = []
-            with self.kickfs_mount(session) as mount:
-                for entry in mount.iter_entries(""):
-                    metadata = mount.atari_meta(entry.name)
-                    access = int(metadata.access or 0)
+            return {"entries": rows, "title": session.name, "description": description, "path": ""}
+        if session.kind == "tosrom":
+            return self._list_tosrom(session, inner)
+        if session.kind == "iso":
+            return self.iso_listing(session, inner)
+        if session.kind in CONTAINER_KINDS:
+            return self._list_container(session, inner)
+        if session.kind == "hd" and session.partition is None:
+            return self.partition_index(session)
+        if self.mountable(session):
+            with self.gemdos_mount(session, writable=False) as mount:
+                return self._list_gemdos_mount(
+                    mount, atari_paths.normalise(inner or ""), session
+                )
+        raise DiskError("This image does not contain a directory that can be listed.")
+
+    def _list_tosrom(self, session: ImageSession, inner: str) -> dict:
+        """List the segments a TOS ROM is made of.
+
+        A TOS ROM is not a directory tree. What the workbench shows is the
+        parts the header and the dispatch table identify, which is as close to
+        a listing as a linked ROM image has.
+        """
+        if not atari_paths.is_root(inner):
+            raise DiskError("A TOS ROM is flat and does not contain directories.")
+        rows = []
+        with self.tosrom_mount(session) as mount:
+            for entry in mount.iter_entries(""):
+                row = {
+                    "name": entry.name,
+                    "path": entry.name,
+                    "type": "file",
+                    "attributes": "r-----",
+                    "attributeBits": 0x01,
+                    "attr": "r-----",
+                    "filetype": "",
+                    "datestamp": "",
+                    "length": int(entry.length or 0),
+                    "readOnly": True,
+                }
+                content_kind = self._listing_content_kind(
+                    session, None, entry.name, row,
+                    lambda name=entry.name: mount.read_bytes(name),
+                )
+                if content_kind:
+                    row["contentKind"] = content_kind
+                rows.append(row)
+            title = str(mount.title or session.name)
+        details = self.tosrom_details(session)
+        return {
+            "entries": rows,
+            "title": title,
+            "description": (
+                f"TOS ROM {session.path.stat().st_size // 1024} KiB · "
+                f"{len(rows)} segment{'s' if len(rows) != 1 else ''} · "
+                f"version {details['version']}"
+            ),
+            "path": "",
+        }
+
+    def _list_container(self, session: ImageSession, inner: str) -> dict:
+        """List the tracks an MSA, DIM or Pasti container holds."""
+        if not atari_paths.is_root(inner):
+            raise DiskError("A disk container holds tracks, not directories.")
+        rows = []
+        for member in self.container_members(session):
+            row = {
+                "name": member["name"],
+                "type": "file",
+                "attributes": "r-----",
+                "attributeBits": 0x01,
+                "attr": "r-----",
+                "filetype": "",
+                "datestamp": "",
+                "length": int(member["length"]),
+                "packedLength": int(member.get("packedLength") or 0),
+                "complete": bool(member["complete"]),
+                "track": member["track"],
+                "side": member["side"],
+            }
+            rows.append(row)
+        complete = sum(1 for row in rows if row["complete"])
+        return {
+            "entries": rows,
+            "title": session.name,
+            "description": (
+                f"{CONTAINER_KINDS[session.kind]} · {len(rows)} track"
+                f"{'s' if len(rows) != 1 else ''} · {complete} complete"
+            ),
+            "path": "",
+        }
+
+    def list_volume_files(
+        self, session: ImageSession, side: int | None = None
+    ) -> list[dict]:
+        """Return every file on a mounted volume, directories walked through.
+
+        One mount rather than one engine call per directory: the whole tree is
+        walked in process, which is what makes scanning a full hard-disk
+        partition take a moment rather than minutes.
+        """
+        del side
+        if not self.mountable(session):
+            raise DiskError("Open a GEMDOS volume before listing its files.")
+        files: list[dict] = []
+        with self.gemdos_mount(session, writable=False) as mount:
+            pending = [""]
+            while pending:
+                directory = pending.pop()
+                for entry in sorted(
+                    mount.iter_entries(directory),
+                    key=lambda item: natural_name_key(item.name),
+                ):
+                    path = str(entry.path)
+                    if entry.is_dir:
+                        pending.append(path)
+                        continue
+                    meta = mount.atari_meta(path)
+                    bits = int(meta.attributes or 0)
+                    stamp = meta.datestamp
                     row = {
                         "name": entry.name,
-                        "path": entry.name,
                         "type": "file",
-                        "protection": int(metadata.protection or 0),
-                        "comment": str(metadata.comment or ""),
-                        "filetype": "",
-                        "datestamp": "",
-                        "length": int(entry.length or 0),
-                        "attr": "RUN" if access & 0x40 else "LOAD",
-                        "runOnly": bool(access & 0x40),
+                        "attributes": format_attributes(bits),
+                        "attributeBits": bits,
+                        "attr": format_attributes(bits),
+                        "filetype": mount.filetype(path) or "",
+                        "datestamp": (
+                            stamp.isoformat(sep="T", timespec="milliseconds")
+                            if stamp
+                            else ""
+                        ),
+                        "length": int(entry.length),
+                        "prefix": atari_paths.parent(path),
+                        "path": path,
                     }
                     content_kind = self._listing_content_kind(
-                        session, None, entry.name, row,
-                        lambda name=entry.name: mount.read_bytes(name),
+                        session, None, path, row,
+                        lambda path=path: mount.read_bytes(path),
                     )
                     if content_kind:
                         row["contentKind"] = content_kind
-                    rows.append(row)
-                title = str(mount.title or session.name)
-            details = self.kickfs_details(session)
-            return {
-                "entries": rows,
-                "title": title,
-                "description": (
-                    f"Kickstart ROM {session.path.stat().st_size // 1024} KiB · "
-                    f"{len(rows)} file{'s' if len(rows) != 1 else ''} · "
-                    f"version {details['version']}"
-                ),
-                "path": "$",
-            }
-        if session.kind == "iso":
-            return self.iso_listing(session, inner)
-        if session.kind == "dms":
-            dms = self._dms(session)
-            if inner not in {"", "$"}:
-                raise DiskError("DMS archives do not contain directories.")
-            entries = []
-            for item in dms.files:
-                row = {
-                    "name": item.name,
-                    "type": "file",
-                    # A DMS track carries no GEMDOS metadata; what it does
-                    # carry is DiskMasher's own pair of checksums.
-                    "unpackedChecksum": item.unpacked_crc,
-                    "packedChecksum": item.packed_crc,
-                    "filetype": "",
-                    "datestamp": "",
-                    "length": len(item.data),
-                    "attr": "R/" if item.complete else "R/?",
-                    "blocks": item.blocks,
-                    "complete": item.complete,
-                }
-                content_kind = metadata_kind(item.name, None) or analyse_content(item.data, item.name)[0]
-                if content_kind:
-                    row["contentKind"] = content_kind
-                entries.append(row)
-            return {
-                "entries": entries,
-                "title": session.name,
-                "description": f"DMS {dms.version} · {len(dms.files)} DMS tracks",
-                "path": "$",
-            }
-        if session.kind == "hdf" and session.partition is None:
-            return self.partition_index(session)
-        if self.mountable(session):
-            with self.ffs_mount(session) as mount:
-                return self._list_ffs_mount(mount, atari_paths.normalise(inner or ""), session)
-        disk_path = self.resolve(session)
-        # An empty path is the volume root, on OFS exactly as on FFS: an
-        # GEMDOS root block holds a hash table whatever the DOS type is.
-        requested_inner = "" if inner is None else inner
-        resolved_inner = self.inner_for(session, requested_inner, side)
-        result = self._run_json(["ls", "--as", "json", self.compound(disk_path, resolved_inner)])
-        report = result["reports"]["entries"]
-        rows = report["rows"]
-        if session.kind == "ofs":
-            rows = self._restore_ofs_catalogue_names(
-                self.compound(disk_path, resolved_inner),
-                rows,
-                session,
-                side,
-            )
-        return {
-            "entries": rows,
-            "title": report["metadata"].get("title", session.name),
-            "description": report["metadata"].get("description", ""),
-            "path": requested_inner,
-        }
-
-    @staticmethod
-    def validate_ofs_prefix(prefix: str) -> str:
-        """Validate and normalise a directory path inside an GEMDOS volume.
-
-        GEMDOS drawers nest, so a destination is a full path rather than a
-        single catalogue letter. Every component is checked against the same
-        name policy that applies to a file, because a drawer that a real
-        machine cannot name is no more useful than a file it cannot name.
-        """
-        path = atari_paths.normalise(prefix)
-        for part in atari_paths.split(path):
-            if len(part) > 30:
-                raise DiskError(
-                    f"“{part}” is longer than the 30 characters an Atari name can hold."
-                )
-            if any(character in ":/\\" for character in part):
-                raise DiskError("An Atari name cannot contain : / or \\.")
-        return path
-
-    def move_ofs_items(
-        self,
-        session: ImageSession,
-        items: list[dict],
-        side: int | None = None,
-    ) -> list[dict]:
-        """Move files between drawers in one request."""
-        if not self.mountable(session):
-            raise DiskError("Drawer moves are available only inside a mounted volume.")
-        if not isinstance(items, list) or not items:
-            raise DiskError("Choose at least one file to move.")
-        checked: list[dict] = []
-        for item in items:
-            source = atari_paths.normalise(item.get("source"))
-            destination = atari_paths.normalise(item.get("destination"))
-            if not source or not destination:
-                raise DiskError("Both a source and a destination path are required.")
-            self.validate_ofs_prefix(atari_paths.parent(source))
-            self.validate_ofs_prefix(atari_paths.parent(destination))
-            self.validate_leaf_name(session, atari_paths.leaf(destination))
-            checked.append({"source": source, "destination": destination})
-        self.require_writable_geometry(session)
-        with session.lock:
-            disk_path = self.resolve(session)
-            for item in checked:
-                self._run([
-                    "mv",
-                    self.compound(
-                        disk_path,
-                        self.inner_for(session, item["source"], side),
-                    ),
-                    self.inner_for(session, item["destination"], side),
-                ])
-            self._mark_mutated(session)
-        self.move_editor_projects(session, checked, side)
-        return checked
-
-    def list_ofs_catalogue_files(
-        self,
-        session: ImageSession,
-        side: int | None = None,
-    ) -> list[dict]:
-        """Return every file from the populated OFS prefix groups.
-
-        An OFS catalogue is flat even though its one-character prefixes are
-        presented as folders in the workbench.  Asking ``disc ls`` to list
-        the root and then starting it again for every prefix was particularly
-        noticeable while importing a floppy into a large FFS image.  Mount
-        the already-identified floppy once and walk that small catalogue in
-        process instead.
-        """
-        if session.kind != "ofs":
-            raise DiskError("Open an GEMDOS image before listing its files.")
-        try:
-            from atarinut.disc.mount import resolve_mount
-            from atarinut.file import format_access_text
-            from atarinut.filesystem import AtariMetadata
-        except ImportError as exc:
-            raise DiskError("The Atarinut OFS catalogue API is unavailable.") from exc
-
-        disk_path = self.resolve(session)
-        # Resolve the drive/catalogue root rather than ``$`` itself so OFS
-        # exposes every one-character prefix, not just the default group.
-        root = self.inner_for(session, "", side)
-        files: list[dict] = []
-        try:
-            with session.lock, resolve_mount(self.compound(disk_path, root)) as resolved:
-                mount = resolved.mount
-                pending = [resolved.path]
-                while pending:
-                    directory = pending.pop()
-                    for entry in mount.iter_entries(directory):
-                        if entry.is_dir:
-                            pending.append(str(entry.path))
-                            continue
-                        path = str(entry.path)
-                        prefix = atari_paths.parent(path)
-                        protection = 0
-                        comment = ""
-                        attr = ""
-                        if isinstance(mount, AtariMetadata):
-                            metadata = mount.atari_meta(path)
-                            protection = int(metadata.protection or 0)
-                            comment = str(metadata.comment or "")
-                            if metadata.access is not None:
-                                attr = format_access_text(metadata.access)
-                        files.append({
-                            "name": entry.name,
-                            "type": "file",
-                            "protection": protection,
-                            "comment": comment,
-                            "filetype": "",
-                            "datestamp": "",
-                            "length": int(entry.length),
-                            "attr": attr,
-                            "prefix": prefix,
-                            "path": path,
-                        })
-                        content_kind = self._listing_content_kind(
-                            session, side, path, files[-1],
-                            lambda path=path: mount.read_bytes(path),
-                        )
-                        if content_kind:
-                            files[-1]["contentKind"] = content_kind
-        except Exception:
-            # Retain the command-backed path for unusual third-party variants
-            # and for a useful engine error on damaged images. Drawers nest, so
-            # this walks the whole volume rather than one level.
-            files.clear()
-            pending = [""]
-            visited: set[str] = set()
-            while pending:
-                directory = pending.pop()
-                if directory.casefold() in visited or len(files) > 100_000:
-                    continue
-                visited.add(directory.casefold())
-                for row in self.list_directory(session, directory, side)["entries"]:
-                    path = atari_paths.join(directory, str(row["name"]))
-                    if row.get("type") in {"dir", "directory"}:
-                        pending.append(path)
-                        continue
-                    files.append({**row, "prefix": directory, "path": path})
+                    files.append(row)
         return files
 
-    def _restore_ofs_catalogue_names(
-        self,
-        compound_path: str,
-        rows: list[dict],
-        session: ImageSession,
-        side: int | None,
-    ) -> list[dict]:
-        """Restore literal dots and classify files in the same OFS mount."""
-        try:
-            from atarinut.disc.mount import resolve_mount
-
-            with resolve_mount(compound_path) as resolved:
-                mount = resolved.mount
-                directory = resolved.path
-                prefix = f"{directory}{atari_paths.SEPARATOR}" if directory else ""
-                names: dict[tuple[str, int, int, int], list[tuple[str, str]]] = {}
-                for entry in mount.iter_entries(directory):
-                    if entry.is_dir:
-                        continue
-                    path = str(entry.path)
-                    literal_name = path[len(prefix) :] if path.startswith(prefix) else path
-                    metadata = mount.atari_meta(path)
-                    key = (
-                        atari_paths.leaf(literal_name).casefold(),
-                        int(metadata.protection or 0),
-                        int(entry.length or 0),
-                    )
-                    names.setdefault(key, []).append((literal_name, path))
-
-                restored = []
-                for row in rows:
-                    key = (
-                        str(row.get("name", "")).casefold(),
-                        int(row.get("protection") or 0),
-                        int(row.get("length") or 0),
-                    )
-                    matches = names.get(key)
-                    candidate = dict(row)
-                    source_path = str(row.get("name") or "")
-                    if matches:
-                        literal_name, source_path = matches.pop(0)
-                        candidate["name"] = literal_name
-                    content_kind = self._listing_content_kind(
-                        session, side, source_path, candidate,
-                        lambda source_path=source_path: mount.read_bytes(source_path),
-                    )
-                    if content_kind:
-                        candidate["contentKind"] = content_kind
-                    restored.append(candidate)
-                return restored
-        except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
-            return rows
-
+    # ------------------------------------------------------------------
+    # Reporting
+    # ------------------------------------------------------------------
     def stat(self, session: ImageSession) -> dict:
         disk_path = self.resolve(session)
         return self._run_json(["stat", "--as", "json", str(disk_path)])
@@ -2433,10 +2022,12 @@ class DiskService(
                 "used": used,
                 "free": len(rows) - used,
             }
-        if session.kind == "dms":
+        if session.kind in CONTAINER_KINDS:
             return {
                 "available": False,
-                "reason": "DMS images do not have a fixed free-space capacity.",
+                "reason": (
+                    "A disk container holds a fixed set of tracks and has no free space."
+                ),
             }
         if session.kind == "iso":
             # A CD is full by definition and cannot be written to, so the
@@ -2451,10 +2042,11 @@ class DiskService(
                 "free": 0,
                 "detail": "read-only CD image",
             }
-        if session.kind == "kickfs":
-            return self.kickfs_details(session)["capacity"]
-        if session.kind == "hdf" and session.partition is None:
-            partitions = self.list_partitions(session)
+        if session.kind == "tosrom":
+            return self.tosrom_details(session)["capacity"]
+        if session.kind == "hd" and session.partition is None:
+            table = self.partition_table(session)
+            partitions = table.get("partitions") or []
             allocated = sum(int(item.get("sizeBytes") or 0) for item in partitions)
             total = session.path.stat().st_size
             return {
@@ -2468,34 +2060,15 @@ class DiskService(
                 ),
             }
         if self.mountable(session):
-            with self.ffs_mount(session) as mount:
+            with self.gemdos_mount(session, writable=False) as mount:
                 return self._capacity_from_mount(mount)
-
-        reports = self.stat(session).get("reports", {})
-        rows = [
-            row
-            for report in reports.values()
-            for row in report.get("rows", [])
-            if isinstance(row, dict)
-            and isinstance(row.get("size"), int)
-            and isinstance(row.get("free"), int)
-        ]
-        if not rows:
-            return {
-                "available": False,
-                "reason": "This filesystem does not report free-space capacity.",
-            }
-        total = sum(max(0, row["size"]) for row in rows)
-        free = min(total, sum(max(0, row["free"]) for row in rows))
         return {
-            "available": total > 0,
-            "unit": "bytes",
-            "total": total,
-            "used": total - free,
-            "free": free,
+            "available": False,
+            "reason": "This filesystem does not report free-space capacity.",
         }
 
     def validate(self, session: ImageSession) -> str:
+        """Check the structures on this image and report what was found."""
         if session.kind == "rom":
             rows = self.list_rom_banks(session)
             recognised = sum(bool(row["header"]) for row in rows)
@@ -2506,26 +2079,43 @@ class DiskService(
                     f"final bank is partial ({partial:,} bytes)"
                 )
             return f"ROM bytes are readable · {len(rows)} complete bank(s) · {recognised} Atari-family header(s)"
-        if session.kind == "dms":
-            dms = self._dms(session)
-            suffix = f" · {len(dms.warnings)} warning(s)" if dms.warnings else ""
-            return f"Valid DMS {dms.version} · {len(dms.files)} reconstructed file(s){suffix}"
-        if session.kind == "kickfs":
-            details = self.kickfs_details(session)
-            state = "plain and writable" if not details["readOnly"] else (
-                "incomplete and read-only" if not details["complete"] else "composite and read-only"
-            )
+        if session.kind in CONTAINER_KINDS:
+            members = self.container_members(session)
+            incomplete = [member for member in members if not member["complete"]]
+            if incomplete:
+                return (
+                    f"{CONTAINER_KINDS[session.kind]} · {len(members)} track(s) · "
+                    f"{len(incomplete)} incomplete"
+                )
+            return f"Valid {CONTAINER_KINDS[session.kind]} · {len(members)} complete track(s)"
+        if session.kind == "tosrom":
+            details = self.tosrom_details(session)
+            state = "complete" if details["complete"] else "incomplete"
             return (
-                f"Valid Kickstart ROM · all block CRCs passed · {details['fileCount']} file(s) · "
+                f"Valid TOS ROM · version {details['version']} · "
+                f"{details['fileCount']} segment(s) · "
                 f"{session.path.stat().st_size // 1024} KiB · {state}"
             )
-        disk_path = self.resolve(session)
-        self._run(["validate", str(disk_path)])
-        return "No structural errors found"
+        if session.kind == "hd" and session.partition is None:
+            table = self.partition_table(session)
+            notes = list(table.get("notes") or [])
+            if notes:
+                return " · ".join(notes)
+            return "No structural errors found"
+        if self.mountable(session):
+            with self.gemdos_mount(session, writable=False) as mount:
+                problems = list(mount.validate())
+            if problems:
+                return " · ".join(str(problem) for problem in problems)
+            return "No structural errors found"
+        raise DiskError("This image does not contain a filing system to validate.")
 
+    # ------------------------------------------------------------------
+    # Mutation
+    # ------------------------------------------------------------------
     def mutate(self, session: ImageSession, args: list[str], side: int | None = None) -> None:
-        if session.kind == "dms":
-            raise DiskError("DMS archives are read-only; convert the DMS to ADF or ADZ before editing files.")
+        """Run one engine command against the working image."""
+        del side
         self.require_writable_geometry(session)
         with session.lock:
             disk_path = self.resolve(session)
@@ -2533,39 +2123,42 @@ class DiskService(
             for part in args:
                 if part.startswith("{image}:"):
                     inner = part[len("{image}:") :]
-                    expanded.append(self.compound(disk_path, self.inner_for(session, inner, side)))
+                    expanded.append(self.compound(disk_path, self.inner_for(session, inner)))
                 else:
                     expanded.append(part.replace("{image}", str(disk_path)))
             self._run(expanded)
             self._mark_mutated(session)
 
-    def make_directory(
-        self,
-        session: ImageSession,
-        path: str,
-        side: int | None = None,
-    ) -> None:
-        """Create one drawer without re-identifying the whole image.
+    @staticmethod
+    def validate_directory_path(prefix: str) -> str:
+        """Validate and normalise a directory path inside a GEMDOS volume.
 
-        Every GEMDOS volume nests drawers, OFS included, so this works
-        wherever the workbench can mount a writable volume.
+        GEMDOS folders nest, so a destination is a full path rather than a
+        single name. Every component is checked against the same 8.3 rules
+        that apply to a file, because a folder a real machine cannot name is
+        no more useful than a file it cannot name.
         """
+        from .filename_policy import target_name_policy
+
+        path = atari_paths.normalise(prefix)
+        policy = target_name_policy("gemdos")
+        for part in atari_paths.split(path):
+            policy.validate(part)
+        return path
+
+    def make_directory(
+        self, session: ImageSession, path: str, side: int | None = None
+    ) -> None:
+        """Create one folder, building the chain above it if it is missing."""
+        del side
         self.require_writable_geometry(session)
-        if self.mountable(session):
-            with self.ffs_mount(session) as mount:
-                mount.make_directory(path, parents=True, exist_ok=False)
-            self._mark_mutated(session)
-            return
-        try:
-            from atarinut.disc.mount import resolve_mount
-        except ImportError as exc:
-            raise DiskError("The Atarinut directory API is unavailable.") from exc
-        disk_path = self.resolve(session)
-        with session.lock, resolve_mount(f"{disk_path}:", writable=True) as resolved:
-            resolved.mount.make_directory(
-                self.inner_for(session, path, side), parents=True, exist_ok=False
-            )
-            resolved.mount.flush()
+        if not self.mountable(session):
+            raise DiskError("Folders can only be created inside a mounted GEMDOS volume.")
+        target = self.validate_directory_path(path)
+        if not target:
+            raise DiskError("Enter a name for the new folder.")
+        with self.gemdos_mount(session) as mount:
+            mount.make_directory(target, parents=True, exist_ok=False)
         self._mark_mutated(session)
 
     def set_access(
@@ -2575,160 +2168,92 @@ class DiskService(
         writable: bool,
         side: int | None = None,
     ) -> list[str]:
-        """Set Atari access on several objects in one writable mount."""
-        if session.kind == "dms":
-            raise DiskError("DMS archives do not carry editable file access.")
+        """Set or clear the read-only attribute on several entries at once.
+
+        GEMDOS has one bit that stops a file being changed or deleted, and
+        that bit is what "locked" means here. The other five attribute bits
+        are left exactly as they were, because a lock is not a statement about
+        whether a file is hidden or has been archived.
+        """
+        del side
         self.require_writable_geometry(session)
         targets = list(dict.fromkeys(str(path or "").strip() for path in paths))
         if not targets:
             raise DiskError("Choose at least one file or directory to update.")
+        self.require_mounted_volume(session)
+        if not self.mountable(session):
+            raise DiskError("Attributes can only be set inside a mounted GEMDOS volume.")
         try:
-            from atarinut.disc.mount import resolve_mount
-            from atarinut.file import Access, AtariMeta
-            from atarinut.filesystem import AtariMetadata
+            from atarinut.file import Access
         except ImportError as exc:
-            raise DiskError("The Atarinut access API is unavailable.") from exc
+            raise DiskError("The Atarinut attribute API is unavailable.") from exc
 
-        if session.kind == "kickfs":
-            with self.kickfs_mount(session, writable=True) as mount:
-                original = session.path.read_bytes()
-                try:
-                    for target in targets:
-                        if not mount.exists(target):
-                            raise DiskError(f"“{target}” no longer exists.")
-                    for target in targets:
-                        meta = mount.atari_meta(target)
-                        current = Access(meta.access) if meta.access is not None else Access(0)
-                        access = current & ~Access.X if writable else current | Access.X
-                        mount.set_atari_meta(
-                            target,
-                            AtariMeta(
-                                comment=meta.comment,
-                                datestamp=meta.datestamp,
-                                filetype=meta.filetype,
-                                access=int(access),
-                            ),
-                        )
-                except Exception:
-                    session.path.write_bytes(original)
-                    raise
-            self._mark_mutated(session)
-            return targets
-
-        with session.lock:
-            disk_path = self.resolve(session)
-            root = self.compound(disk_path, self.inner_for(session, "", side))
-            self.require_mounted_volume(session)
-            mount_context = (
-                self.ffs_mount(session)
-                if self.mountable(session)
-                else resolve_mount(root, writable=True)
-            )
-            with mount_context as opened:
-                mount = opened if self.mountable(session) else opened.mount
-                if not isinstance(mount, AtariMetadata):
-                    raise DiskError("This filesystem does not carry Atari access bits.")
-                resolved_targets = [self.inner_for(session, path, side) for path in targets]
-                for target in resolved_targets:
-                    if not mount.exists(target):
-                        raise DiskError(f"“{target}” no longer exists.")
-                for target in resolved_targets:
-                    meta = mount.atari_meta(target)
-                    current = Access(meta.access) if meta.access is not None else Access(0)
-                    access = current & ~Access.L if writable else current | Access.L
-                    mount.set_atari_meta(
-                        target,
-                        AtariMeta(
-                            comment=meta.comment,
-                            datestamp=meta.datestamp,
-                            filetype=meta.filetype,
-                            access=int(access),
-                        ),
-                    )
-            self._mark_mutated(session)
+        with session.lock, self.gemdos_mount(session) as mount:
+            resolved = [self.inner_for(session, path) for path in targets]
+            for target in resolved:
+                if not mount.exists(target):
+                    raise DiskError(f"“{target}” no longer exists.")
+            for target in resolved:
+                current = Access(int(mount.atari_meta(target).attributes or 0))
+                mount.set_access(target, current.with_locked(not writable))
+        self._mark_mutated(session)
         return targets
 
     def set_file_metadata(
         self,
         session: ImageSession,
         path: str,
-        protection: str,
+        attributes: str = "",
         comment: str = "",
         side: int | None = None,
         datestamp: str | None = None,
     ) -> dict:
-        """Update an entry's protection bits, comment and datestamp.
+        """Update an entry's attribute byte and datestamp.
 
-        These are the things GEMDOS lets a person change about a file
+        These are the two things GEMDOS lets a person change about a file
         without rewriting it. There is no load or execution address to change:
-        an GEMDOS load file carries its own relocation information, so where
-        it goes in memory is decided when it is run.
+        a GEMDOS program carries its own relocation table, so where it goes in
+        memory is decided when TOS runs it.
 
-        ``datestamp`` is normally left alone, because editing a file's comment
-        is not a reason to claim the file changed. A caller reproducing a
-        recorded image passes the datestamp it recorded, so the result matches
-        the image it is meant to reproduce rather than the moment it was
-        rebuilt.
+        ``datestamp`` is normally left alone, because changing an attribute is
+        not a reason to claim the file's contents changed. A caller
+        reproducing a recorded image passes the datestamp it recorded, so the
+        result matches the image it is meant to reproduce rather than the
+        moment it was rebuilt.
+
+        ``comment`` is accepted and ignored: a GEMDOS directory entry has
+        nowhere to put one.
         """
-        if session.kind in {"rom", "dms"}:
-            raise DiskError("This view does not contain editable file catalogue addresses.")
+        del comment, side
+        if session.kind in {"rom", "tosrom"} or session.kind in CONTAINER_KINDS:
+            raise DiskError("This view does not contain editable directory entries.")
         self.require_writable_geometry(session)
+        if not self.mountable(session):
+            raise DiskError("Metadata can only be edited inside a mounted GEMDOS volume.")
         try:
             from atarinut.file import AtariMeta
-            from atarinut.filesystem import AtariMetadata
         except ImportError as exc:
-            raise DiskError("The Atarinut catalogue metadata API is unavailable.") from exc
-        parsed_protection = self._protection_value(protection)
-        new_comment = " ".join(str(comment or "").split())[:79]
+            raise DiskError("The Atarinut directory metadata API is unavailable.") from exc
+        parsed = attribute_value(attributes)
         requested_datestamp = self._parse_datestamp(datestamp)
 
-        def update(mount, target: str) -> dict:
-            if not isinstance(mount, AtariMetadata):
-                raise DiskError("This filesystem does not carry GEMDOS protection bits.")
+        with session.lock, self.gemdos_mount(session) as mount:
+            target = self.inner_for(session, path)
             if not mount.exists(target):
                 raise DiskError(f"“{target}” no longer exists.")
             stat = mount.stat(target)
-            if stat.is_dir:
-                # A drawer has protection bits and a comment of its own, so
-                # both are editable; only its length is meaningless.
-                pass
             current = mount.atari_meta(target)
             moment = requested_datestamp or current.datestamp
             mount.set_atari_meta(
-                target,
-                AtariMeta(
-                    protection=parsed_protection,
-                    comment=new_comment,
-                    datestamp=moment,
-                ),
+                target, AtariMeta(attributes=parsed, datestamp=moment)
             )
-            return {
-                "protection": parsed_protection,
-                "comment": new_comment,
+            metadata = {
+                "attributes": format_attributes(parsed),
+                "attributeBits": parsed,
                 "datestamp": moment,
                 "length": int(stat.length or 0),
             }
-
-        if session.kind == "kickfs":
-            with self.kickfs_mount(session, writable=True) as mount:
-                metadata = update(mount, path)
-            self._mark_mutated(session)
-            return metadata
-
-        try:
-            from atarinut.disc.mount import resolve_mount
-        except ImportError as exc:
-            raise DiskError("The Atarinut filesystem mount API is unavailable.") from exc
-        with session.lock:
-            if self.mountable(session):
-                with self.ffs_mount(session) as mount:
-                    metadata = update(mount, path)
-            else:
-                disk_path = self.resolve(session)
-                root = self.compound(disk_path, self.inner_for(session, "", side))
-                with resolve_mount(root, writable=True) as resolved:
-                    metadata = update(resolved.mount, self.inner_for(session, path, side))
-            self._mark_mutated(session)
+        self._mark_mutated(session)
         return metadata
 
     @staticmethod
@@ -2742,127 +2267,62 @@ class DiskService(
         except ValueError:
             return None
 
-    @staticmethod
-    def _protection_value(value: object) -> int:
-        """Parse a protection long a person supplied.
-
-        One rule everywhere a protection value arrives from a person: Atari
-        hexadecimal, with an optional ``&`` or ``0x`` prefix. An empty box is
-        rejected rather than written as zero, because zero is itself a
-        meaningful value (everything permitted) and silently choosing it would
-        destroy the very metadata the editor exists to preserve.
-        """
-        letters = parse_protection(value)
-        if letters is not None:
-            return letters
-        text = str(value or "").strip()
-        if re.fullmatch(r"(?:&|0x)?[0-9a-fA-F]{1,8}", text):
-            return int(re.sub(r"^(?:&|0x)", "", text, flags=re.IGNORECASE), 16)
-        raise DiskError(
-            "A protection value is either the eight letters List prints, such "
-            "as ----rwed, or one to eight hexadecimal digits written &05 or 0x05."
-        )
-
     def put(
         self,
         session: ImageSession,
         destination: str,
         host_path: Path,
-        protection: str | None = None,
+        attributes: str | None = None,
         comment: str | None = None,
         filetype: str | None = None,
         side: int | None = None,
+        datestamp: str | None = None,
     ) -> None:
         """Import one host file with the metadata GEMDOS actually records.
 
-        A host file arrives with no protection bits, comment or Workbench icon
-        type of its own. Whatever the caller could establish -- from an ``.inf``
-        sidecar, from an Atari-written ZIP, or from the source volume in an
-        image-to-image copy -- is applied here; anything it could not is left
-        at the filing system's own default rather than invented.
+        A host file arrives with no attribute byte of its own. Whatever the
+        caller could establish, from an attribute sidecar, from an
+        Atari-written ZIP, or from the source volume in an image-to-image
+        copy, is applied here; anything it could not is left at the filing
+        system's own default rather than invented.
+
+        ``datestamp`` is normally left alone, so a newly written file carries
+        the moment it was written. A caller reproducing a recorded image
+        passes the datestamp it recorded instead.
+
+        ``comment`` and ``filetype`` are accepted and ignored: a GEMDOS
+        directory entry records neither.
         """
+        del comment, filetype, side
         if session.kind == "rom":
             self.put_rom_bank(session, host_path.read_bytes())
             return
-        if session.kind == "dms":
-            raise DiskError("Files cannot be added directly to a DMS archive.")
         self.require_writable_geometry(session)
-        if session.kind == "kickfs":
-            destination = self.validate_leaf_name(session, destination)
-            try:
-                from atarinut.file import AtariMeta
-            except ImportError as exc:
-                raise DiskError("The Atarinut Kickstart ROM metadata API is unavailable.") from exc
-            if filetype:
-                raise DiskError("A ROM archive stores protection bits, not Workbench icon types.")
-            with self.kickfs_mount(session, writable=True) as mount:
-                original = session.path.read_bytes()
-                try:
-                    mount.write_bytes(destination, host_path.read_bytes())
-                    current = mount.atari_meta(destination)
-                    mount.set_atari_meta(
-                        destination,
-                        AtariMeta(
-                            protection=(
-                                self._protection_value(protection)
-                                if protection
-                                else current.protection
-                            ),
-                            comment=str(comment or current.comment),
-                            datestamp=current.datestamp,
-                        ),
-                    )
-                except Exception:
-                    session.path.write_bytes(original)
-                    raise
-            self._mark_mutated(session)
-            return
-        if self.mountable(session):
-            # Every component of the destination must be a legal Atari name,
-            # including the drawers above the file.
-            self.validate_ofs_prefix(atari_paths.parent(destination))
+        if not self.mountable(session):
+            raise DiskError("Files can only be added to a mounted GEMDOS volume.")
+        self.validate_directory_path(atari_paths.parent(destination))
         self.validate_leaf_name(session, atari_paths.leaf(destination))
-        if self.mountable(session):
-            try:
-                from atarinut.file import AtariMeta
-                from atarinut.file.filetypes import parse_filetype
-            except ImportError as exc:
-                raise DiskError("The Atarinut import API is unavailable.") from exc
-            with self.ffs_mount(session) as mount:
-                mount.write_bytes(destination, host_path.read_bytes())
-                current = mount.atari_meta(destination)
-                mount.set_atari_meta(
-                    destination,
-                    AtariMeta(
-                        protection=(
-                            self._protection_value(protection)
-                            if protection
-                            else current.protection
-                        ),
-                        comment=str(comment or current.comment),
-                        datestamp=current.datestamp,
+        try:
+            from atarinut.file import AtariMeta
+        except ImportError as exc:
+            raise DiskError("The Atarinut import API is unavailable.") from exc
+        requested_datestamp = self._parse_datestamp(datestamp)
+        with self.gemdos_mount(session) as mount:
+            target = self.inner_for(session, destination)
+            mount.write_bytes(target, host_path.read_bytes())
+            current = mount.atari_meta(target)
+            mount.set_atari_meta(
+                target,
+                AtariMeta(
+                    attributes=(
+                        attribute_value(attributes)
+                        if attributes
+                        else int(current.attributes)
                     ),
-                )
-                if filetype:
-                    mount.set_filetype(destination, parse_filetype(filetype))
-            self._mark_mutated(session)
-            return
-        args = ["put"]
-        if protection:
-            args += ["--protection", f"0x{self._protection_value(protection):X}"]
-        if comment:
-            args += ["--comment", str(comment)]
-        if filetype:
-            args += ["--filetype", filetype]
-        # The engine's ``put`` takes the host file first and the image path
-        # second, in the order a shell copy is written.
-        args += [
-            str(host_path),
-            self.compound(self.resolve(session), self.inner_for(session, destination, side)),
-        ]
-        with session.lock:
-            self._run(args)
-            self._mark_mutated(session)
+                    datestamp=requested_datestamp or current.datestamp,
+                ),
+            )
+        self._mark_mutated(session)
 
     def put_host_tree(
         self,
@@ -2877,23 +2337,15 @@ class DiskService(
         """Import a reviewed host folder in one writable filesystem mount.
 
         Each item contains a validated target path relative to
-        ``destination_dir`` and a local temporary ``hostPath``.  Keeping the
+        ``destination_dir`` and a local temporary ``hostPath``. Keeping the
         complete batch in one mount avoids reopening and checkpointing a large
-        FFS image for every small file.
+        image for every small file.
         """
-        if session.kind == "dms":
-            raise DiskError("Open a writable disk before importing a host folder.")
+        del side
         self.require_writable_geometry(session)
-        is_kickfs = session.kind == "kickfs"
-        if preserve_directories and is_kickfs:
-            raise DiskError(
-                "A ROM's module list is flat. Import the selected files without "
-                "preserving host folders."
-            )
-        if not is_kickfs:
-            # Every GEMDOS volume nests, so a host tree can be preserved on
-            # any of them. Only the names have to be legal.
-            destination_dir = self.validate_ofs_prefix(destination_dir)
+        if not self.mountable(session):
+            raise DiskError("Open a writable GEMDOS volume before importing a host folder.")
+        destination_dir = self.validate_directory_path(destination_dir)
         if not items:
             raise DiskError("No relevant files were selected for import.")
 
@@ -2904,15 +2356,9 @@ class DiskService(
             parts = [part for part in relative.split("/") if part]
             if not parts or any(part in {".", ".."} for part in parts):
                 raise DiskError("A selected folder contains an invalid relative path.")
-            if is_kickfs and len(parts) != 1:
-                raise DiskError(
-                    "A ROM's module list is flat, so an import must use flat target names."
-                )
             for part in parts:
                 self.validate_leaf_name(session, part)
-            destination = (
-                parts[0] if is_kickfs else atari_paths.join(destination_dir, "/".join(parts))
-            )
+            destination = atari_paths.join(destination_dir, "\\".join(parts))
             key = destination.casefold()
             if key in seen:
                 raise DiskError(f"More than one selected file maps to {destination}.")
@@ -2920,90 +2366,67 @@ class DiskService(
             plans.append({**item, "parts": parts, "destination": destination})
 
         try:
-            from atarinut.disc.mount import resolve_mount
             from atarinut.file import AtariMeta
         except ImportError as exc:
             raise DiskError("The Atarinut folder import API is unavailable.") from exc
 
-        with session.lock:
-            disk_path = self.resolve(session)
-            root = self.compound(disk_path, self.inner_for(session, "", side))
-            if not is_kickfs:
-                self.require_mounted_volume(session)
-            mount_context = (
-                self.kickfs_mount(session, writable=True)
-                if is_kickfs
-                else
-                self.ffs_mount(session)
-                if self.mountable(session)
-                else resolve_mount(root, writable=True)
-            )
-            with mount_context as opened:
-                mount = opened if (self.mountable(session)) or is_kickfs else opened.mount
-                original_kickfs = session.path.read_bytes() if is_kickfs else None
-                conflicts: list[str] = []
-                directories: set[str] = set()
-                if preserve_directories:
-                    for plan in plans:
-                        for depth in range(1, len(plan["parts"])):
-                            directories.add(
-                                atari_paths.SEPARATOR.join(
-                                    [*atari_paths.split(destination_dir), *plan["parts"][:depth]]
-                                )
-                            )
-                for directory in sorted(
-                    directories, key=lambda value: (value.count("/"), value.casefold())
-                ):
-                    if mount.exists(directory) and not mount.stat(directory).is_dir:
-                        raise DiskError(f"{directory} is an ordinary file, so a folder cannot be created there.")
+        with session.lock, self.gemdos_mount(session) as mount:
+            conflicts: list[str] = []
+            directories: set[str] = set()
+            if preserve_directories:
                 for plan in plans:
-                    destination = plan["destination"]
-                    if mount.exists(destination):
-                        if mount.stat(destination).is_dir:
-                            raise DiskError(f"{destination} is a directory, so a file cannot replace it.")
-                        conflicts.append(destination)
-                if conflicts and not replace:
-                    return {"imported": [], "conflicts": conflicts}
-                for directory in sorted(
-                    directories, key=lambda value: (value.count("/"), value.casefold())
-                ):
-                    mount.make_directory(directory, parents=True, exist_ok=True)
-                imported: list[str] = []
-
-                try:
-                    for plan in plans:
-                        parent = atari_paths.parent(plan["destination"])
-                        if parent and not mount.exists(parent):
-                            mount.make_directory(parent, parents=True, exist_ok=True)
-                        mount.write_bytes(
-                            plan["destination"], Path(plan["hostPath"]).read_bytes()
-                        )
-                        metadata = plan.get("metadata") or {}
-                        if metadata.get("protection") or metadata.get("comment"):
-                            current = mount.atari_meta(plan["destination"])
-                            supplied = metadata.get("protection")
-                            mount.set_atari_meta(
-                                plan["destination"],
-                                AtariMeta(
-                                    protection=(
-                                        self._protection_value(supplied)
-                                        if supplied
-                                        else current.protection
-                                    ),
-                                    comment=str(
-                                        metadata.get("comment") or current.comment
-                                    ),
-                                    datestamp=current.datestamp,
-                                ),
+                    for depth in range(1, len(plan["parts"])):
+                        directories.add(
+                            atari_paths.SEPARATOR.join(
+                                [*atari_paths.split(destination_dir), *plan["parts"][:depth]]
                             )
-                        if metadata.get("filetype") and hasattr(mount, "set_filetype"):
-                            mount.set_filetype(plan["destination"], metadata["filetype"])
-                        imported.append(plan["destination"])
-                except Exception:
-                    if original_kickfs is not None:
-                        session.path.write_bytes(original_kickfs)
-                    raise
-            self._mark_mutated(session)
+                        )
+            ordered = sorted(
+                directories, key=lambda value: (atari_paths.depth(value), value.casefold())
+            )
+            for directory in ordered:
+                if mount.exists(directory) and not mount.stat(directory).is_dir:
+                    raise DiskError(
+                        f"{directory} is an ordinary file, so a folder cannot be created there."
+                    )
+            for plan in plans:
+                destination = plan["destination"]
+                if mount.exists(destination):
+                    if mount.stat(destination).is_dir:
+                        raise DiskError(
+                            f"{destination} is a directory, so a file cannot replace it."
+                        )
+                    conflicts.append(destination)
+            if conflicts and not replace:
+                return {"imported": [], "conflicts": conflicts}
+            for directory in ordered:
+                mount.make_directory(directory, parents=True, exist_ok=True)
+            imported: list[str] = []
+            for plan in plans:
+                parent = atari_paths.parent(plan["destination"])
+                if parent and not mount.exists(parent):
+                    mount.make_directory(parent, parents=True, exist_ok=True)
+                mount.write_bytes(
+                    plan["destination"], Path(plan["hostPath"]).read_bytes()
+                )
+                metadata = plan.get("metadata") or {}
+                supplied = metadata.get("attributes", metadata.get("access"))
+                stamp = self._parse_datestamp(metadata.get("datestamp"))
+                if supplied not in (None, "") or stamp is not None:
+                    current = mount.atari_meta(plan["destination"])
+                    mount.set_atari_meta(
+                        plan["destination"],
+                        AtariMeta(
+                            attributes=(
+                                attribute_value(supplied)
+                                if supplied not in (None, "")
+                                else int(current.attributes)
+                            ),
+                            datestamp=stamp or current.datestamp,
+                        ),
+                    )
+                imported.append(plan["destination"])
+        self._mark_mutated(session)
         return {"imported": imported, "conflicts": []}
 
     def copy(
@@ -3016,15 +2439,15 @@ class DiskService(
         source_side: int | None = None,
         target_side: int | None = None,
     ) -> None:
-        if target.kind == "dms":
-            raise DiskError("DMS archives are read-only conversion sources.")
+        """Copy one entry, or one tree, from any open image into another."""
+        del source_side, target_side
         if source.kind == "rom" or target.kind == "rom":
             if recursive:
                 raise DiskError("ROM banks are byte images and cannot contain directories.")
             data = (
                 self.rom_bank_bytes(source, source_inner)
                 if source.kind == "rom"
-                else self.read_file(source, source_inner, source_side)
+                else self.read_file(source, source_inner)
             )
             if target.kind == "rom":
                 requested_bank = None
@@ -3038,73 +2461,79 @@ class DiskService(
                 temp_path = self.work_dir / f"rom-copy-{uuid.uuid4().hex}"
                 temp_path.write_bytes(data)
                 try:
-                    self.put(target, target_inner, temp_path, side=target_side)
+                    self.put(target, target_inner, temp_path)
                 finally:
                     temp_path.unlink(missing_ok=True)
             return
         self.require_writable_geometry(target)
-        if target.kind in {"ofs", "ffs"}:
-            self.validate_ofs_prefix(atari_paths.parent(target_inner))
-        self.validate_leaf_name(
-            target,
-            target_inner if target.kind == "kickfs" else atari_paths.leaf(target_inner),
-        )
-        if source.kind == "dms":
-            dms_file = self._dms_file(source, source_inner)
-            temp_path = self.work_dir / f"dms-copy-{uuid.uuid4().hex}"
-            temp_path.write_bytes(dms_file.data)
+        if not self.mountable(target):
+            raise DiskError("Files can only be copied into a mounted GEMDOS volume.")
+        self.validate_directory_path(atari_paths.parent(target_inner))
+        self.validate_leaf_name(target, atari_paths.leaf(target_inner))
+        if not self.mountable(source):
+            # A read-only view: a CD, a TOS ROM or a container track. Copy the
+            # bytes through a host temporary, which is what those views expose.
+            data = self.read_file(source, source_inner)
+            temp_path = self.work_dir / f"copy-{uuid.uuid4().hex}"
+            temp_path.write_bytes(data)
             try:
-                self.put(target, target_inner, temp_path, side=target_side)
+                self.put(target, target_inner, temp_path)
             finally:
                 temp_path.unlink(missing_ok=True)
             return
-        source_path = self.resolve(source)
-        target_path = self.resolve(target)
-        if target.kind in {"ffs", "ofs"}:
-            try:
-                from atarinut.disc.mount import resolve_mount
-            except ImportError as exc:
-                raise DiskError("The Atarinut direct-copy API is unavailable.") from exc
-
-            def copy_between_mounts(source_mount, target_mount) -> None:
-                self._copy_between_ffs_mounts(
-                    source_mount,
-                    target_mount,
-                    source_inner,
-                    target_inner,
-                    recursive=recursive,
-                    destination_slash=False,
-                )
-
-            with self._locked_sessions(source, target):
-                if source.kind in {"ffs", "ofs"}:
-                    if source.id == target.id:
-                        with self.ffs_mount(target) as mount:
-                            copy_between_mounts(mount, mount)
-                    else:
-                        with self.ffs_mount(source) as source_mount:
-                            with self.ffs_mount(target) as target_mount:
-                                copy_between_mounts(source_mount, target_mount)
-                else:
-                    source_root = self.inner_for(source, "$", source_side)
-                    with resolve_mount(self.compound(source_path, source_root)) as source_resolved:
-                        with self.ffs_mount(target) as target_mount:
-                            copy_between_mounts(source_resolved.mount, target_mount)
-            target.dirty = True
-            target.hfe_export_path = None
-            return
-        args = ["cp", "--no-wildcards"]
-        if recursive:
-            args.append("--recursive")
-        args += [
-            self.compound(source_path, self.inner_for(source, source_inner, source_side)),
-            self.compound(target_path, self.inner_for(target, target_inner, target_side)),
-        ]
         with self._locked_sessions(source, target):
-            self._run(args)
+            if source.id == target.id:
+                with self.gemdos_mount(target) as mount:
+                    self._copy_between_mounts(
+                        mount, mount, source_inner, target_inner, recursive=recursive
+                    )
+            else:
+                with self.gemdos_mount(source, writable=False) as source_mount:
+                    with self.gemdos_mount(target) as target_mount:
+                        self._copy_between_mounts(
+                            source_mount,
+                            target_mount,
+                            source_inner,
+                            target_inner,
+                            recursive=recursive,
+                        )
             self._mark_mutated(target)
 
-    def replace_blank_ofs_image(
+    def _copy_between_mounts(
+        self,
+        source_mount,
+        target_mount,
+        source_inner: str,
+        target_inner: str,
+        *,
+        recursive: bool,
+        destination_slash: bool = False,
+    ) -> None:
+        """Copy one path between two mounted volumes, metadata included.
+
+        The copy descriptors are built by the engine's own bulk-copy helpers
+        and then reordered into the source's storage order, so the tree lands
+        in the destination laid out the way it was laid out on the source
+        rather than interleaved with whatever was written between files.
+        """
+        from .atarinut_internals import collect_copy_items
+
+        items = collect_copy_items(
+            source_mount,
+            atari_paths.normalise(source_inner),
+            dst_mount=target_mount,
+            dst_bare=atari_paths.normalise(target_inner),
+            dst_slash=destination_slash,
+            recursive=recursive,
+            wildcards=False,
+        )
+        for item in in_storage_order(source_mount, items):
+            if item.get("kind") == "mkdir":
+                ensure_directory_chain(target_mount, str(item["dst"]))
+            else:
+                write_copy_item(target_mount, str(item["dst"]), item, True)
+
+    def replace_blank_image(
         self,
         target: ImageSession,
         source: ImageSession,
@@ -3112,20 +2541,26 @@ class DiskService(
         *,
         target_path: str,
     ) -> bool:
-        """Install an ADF into a blank ADF without losing its title or catalogue."""
+        """Install a floppy image into an empty one of the same or larger size.
+
+        Copying file by file into a blank disk of the same shape is slower and
+        loses the source's own boot sector. When the destination is genuinely
+        empty and no smaller than the source, replacing its bytes outright is
+        both faster and more faithful.
+        """
         if (
-            target.kind != "ofs"
-            or source.kind != "ofs"
-            or target_path not in atari_paths.ROOT_TOKENS
-            or target.path.suffix.lower() != ".adf"
-            or source.path.suffix.lower() != ".adf"
+            target.kind != "gemdos"
+            or source.kind != "gemdos"
+            or not atari_paths.is_root(target_path)
+            or target.path.suffix.lower() != ".st"
+            or source.path.suffix.lower() != ".st"
             or self.list_directory(target, "")["entries"]
         ):
             return False
         target_size = target.path.stat().st_size
         if source.path.stat().st_size > target_size:
             return False
-        replacement = target.path.parent / f".online-replacement-{uuid.uuid4().hex}.adf"
+        replacement = target.path.parent / f".online-replacement-{uuid.uuid4().hex}.st"
         try:
             with self._locked_sessions(source, target):
                 self._copy_local_file(source.path, replacement)
@@ -3142,14 +2577,14 @@ class DiskService(
         return True
 
     @staticmethod
-    def _collect_ofs_catalogue_items(
+    def _collect_volume_items(
         source_mount,
         destination: str,
         file_item: Callable,
     ) -> list[dict]:
-        """Collect every file on a volume, ready to be written under one drawer.
+        """Collect every file on a volume, ready to be written under one folder.
 
-        The whole tree is walked rather than only its root, because an Atari
+        The whole tree is walked rather than only its root, because a GEMDOS
         volume nests. Directory descriptors are emitted before the files that
         need them, so the destination is built top-down and never has to guess
         at a parent.
@@ -3179,51 +2614,12 @@ class DiskService(
         return items
 
     @staticmethod
-    def _repair_ffs_loader_items(items: list[dict]) -> tuple[list[str], list[str]]:
-        """Make copied loaders work from the drawer they have been installed to.
-
-        Software written for a floppy names its files through ``DF0:``. Copied
-        to a hard drive that reference is wrong, and the failure looks like a
-        corrupt disk rather than a path problem. Every script in the batch is
-        checked, and the ones that can be repaired without changing their
-        length are repaired in place.
-
-        Returns the changes made and the warnings for the ones that could not
-        be. Each item that changed is marked with ``loaderRepairs`` so the
-        caller knows which files still need writing.
-        """
-        repairs: list[str] = []
-        warnings: list[str] = []
-        for item in items:
-            data = item.get("data")
-            if not isinstance(data, (bytes, bytearray)) or not data:
-                continue
-            if b"\0" in data[:512]:
-                continue
-            printable = sum(
-                1 for byte in data[:512] if 9 <= byte <= 13 or 32 <= byte <= 126
-            )
-            if printable / max(1, len(data[:512])) < 0.9:
-                continue
-            text = bytes(data).decode("latin-1")
-            replaced = re.sub(r"(?i)\bDF[0-3]:", lambda match: " " * len(match.group(0)), text)
-            if replaced == text:
-                continue
-            name = str(item.get("sourceName") or item.get("dst") or "a copied file")
-            item["data"] = replaced.encode("latin-1", "replace")
-            item["loaderRepairs"] = True
-            repairs.append(
-                f"removed the floppy device prefix from {name} so it runs from its own drawer"
-            )
-        return repairs, warnings
-
-    @staticmethod
     def _is_empty_directory(mount, path: str) -> bool:
-        """True when a path exists, is a drawer, and holds nothing.
+        """True when a path exists, is a folder, and holds nothing.
 
         An empty destination can be reused without asking. A populated one
         cannot, because reusing it would merge two unrelated disks into the
-        same drawer, so the two cases are told apart before anything is
+        same folder, so the two cases are told apart before anything is
         written rather than after.
         """
         try:
@@ -3235,106 +2631,7 @@ class DiskService(
         except Exception:
             return False
 
-    @staticmethod
-    def _relocate_ofs_boot_script(data: bytes, destination: str) -> bytes:
-        """Point a startup script at the drawer it has been installed into.
-
-        A script written for a floppy names its files from the volume root. On
-        a hard drive those files are one drawer down, so every root reference
-        has to gain the drawer in front of it. Device prefixes are removed for
-        the same reason: ``DF0:`` is not where the software lives any more.
-
-        Only whole path references are rewritten, and the result is returned
-        rather than written, so the caller decides whether the change is worth
-        making.
-        """
-        import re as _re
-
-        prefix = atari_paths.normalise(destination)
-        if not prefix:
-            return data
-        text = data.decode("latin-1", "replace")
-
-        def replace(match: "_re.Match[str]") -> str:
-            quote, device, path = match.group(1), match.group(2), match.group(3)
-            del device
-            return f"{quote}{prefix}/{path}" if path else f"{quote}{prefix}"
-
-        # ``"DF0:Game"``, ``"SYS:Game"`` and a bare leading ``:`` all mean the
-        # volume root, which is exactly what has moved.
-        relocated = _re.sub(
-            r'(["\s])(?:(DF[0-3]|DH[0-9]|SYS):|:)([A-Za-z0-9_.\-/]*)',
-            replace,
-            text,
-        )
-        return relocated.encode("latin-1", "replace")
-
-    @staticmethod
-    def _write_ffs_copy_item(
-        target_mount,
-        destination: str,
-        item: dict,
-        fallback: Callable,
-    ) -> None:
-        """Write file data and its catalogue metadata in one update."""
-        navigate = getattr(target_mount, "_navigate", None)
-        if navigate is None or target_mount.exists(destination):
-            fallback(target_mount, destination, item, False)
-            return
-        # A copy descriptor may name a file several drawers deep, so the chain
-        # above it is built before the write rather than assumed.
-        parent = atari_paths.parent(destination)
-        if parent and not target_mount.exists(parent):
-            target_mount.make_directory(parent, parents=True, exist_ok=True)
-
-        from atarinut.file import Access
-
-        access_value = int(item.get("access") or 0)
-        target = navigate(destination)
-        target.write_bytes(
-            item["data"],
-            access=Access(access_value),
-            comment=str(item.get("comment") or ""),
-        )
-        # write_bytes applies the filing system's own defaults beyond the lock
-        # bit, so one chmod is still needed to match the source's complete
-        # protection mask.
-        target.chmod(access_value)
-        filetype = item.get("filetype")
-        if filetype is not None:
-            target_mount.set_filetype(destination, filetype)
-        datestamp = item.get("datestamp")
-        if datestamp is not None:
-            target_mount.set_datestamp(destination, datestamp)
-
-    @staticmethod
-    def _set_ffs_directory_title(mount, path: str, title: str) -> None:
-        """Store the source disk title so later menu scans retain useful metadata."""
-        try:
-            target = mount._navigate(path)
-            if getattr(target, "supports_title", False):
-                target.title = str(title or "")[:19]
-        except (AttributeError, OSError, RuntimeError, ValueError):
-            pass
-
-    @staticmethod
-    def _unique_import_name(name: str, used: set[str], limit: int) -> str:
-        cleaned = re.sub(r"[^A-Za-z0-9!_-]", "_", atari_paths.leaf(name)) or "FILE"
-        base = cleaned[:limit]
-        candidate = base
-        number = 1
-        while candidate.casefold() in used:
-            suffix = str(number)
-            candidate = f"{base[: limit - len(suffix)]}{suffix}"
-            number += 1
-        used.add(candidate.casefold())
-        return candidate
-
-    @staticmethod
-    def _ffs_import_name(name: str, used: set[str]) -> str:
-        return DiskService._unique_import_name(name, used, 10)
-
-    def extract_image_to_ffs_directory(
+    def extract_image_to_directory(
         self,
         source: ImageSession,
         target: ImageSession,
@@ -3345,7 +2642,7 @@ class DiskService(
         create_directory: bool = True,
     ) -> str:
         with self._locked_sessions(source, target):
-            return self._extract_image_to_ffs_directory(
+            return self._extract_image_to_directory(
                 source,
                 target,
                 target_parent,
@@ -3354,7 +2651,8 @@ class DiskService(
                 create_directory=create_directory,
             )
 
-    def _extract_image_to_ffs_directory(
+
+    def _extract_image_to_directory(
         self,
         source: ImageSession,
         target: ImageSession,
@@ -3365,44 +2663,42 @@ class DiskService(
         create_directory: bool = True,
     ) -> str:
         report = progress_module.reporter(progress)
-        if target.kind not in {"ffs", "ofs"}:
-            raise DiskError("Disk images can only be expanded into an FFS destination.")
+        if not self.mountable(target):
+            raise DiskError("Disk images can only be expanded into a mounted GEMDOS volume.")
         self.require_writable_geometry(target)
-        target_parent = target_parent or "$"
+        target_parent = self.validate_directory_path(target_parent)
         if create_directory:
             directory_name = self.validate_leaf_name(target, directory_name or "")
-            target_directory = (
-                atari_paths.join(target_parent, directory_name)
-                if target_parent not in atari_paths.ROOT_TOKENS
-                else directory_name
-            )
+            target_directory = atari_paths.join(target_parent, directory_name)
         else:
             # Resolve the destination before taking a rollback copy. This also
             # rejects stale browser paths without modifying the image.
-            self.list_directory(target, target_parent, None)
+            self.list_directory(target, target_parent)
             target_directory = target_parent
-        ofs_rows: dict[int | None, list[dict]] = {}
-        if source.kind == "ofs":
-            if self.is_two_volume_image(source):
-                ofs_rows[0] = self.list_ofs_catalogue_files(source, 0)
-                ofs_rows[2] = self.list_ofs_catalogue_files(source, 2)
-                source_has_files = bool(ofs_rows[0] or ofs_rows[2])
-            else:
-                ofs_rows[None] = self.list_ofs_catalogue_files(source, None)
-                source_has_files = bool(ofs_rows[None])
-            if not source_has_files:
-                raise DiskError(
-                    "The OFS disk image is empty. Nothing was extracted."
-                )
-        elif source.kind in {"ffs", "ofs"} and not self.list_directory(source, "")["entries"]:
+
+        rebuilt: ImageSession | None = None
+        if source.kind in CONTAINER_KINDS:
+            # A container is a whole floppy, so the honest extraction is to
+            # rebuild the disk it was made from and copy that volume's files.
+            # Treating its tracks as files would present raw cylinders as
+            # though they were software.
+            report("Rebuilding the disk from its container tracks", 0, None)
+            rebuilt, _rows = self.convert_container(source, "st")
+            source = rebuilt
+        if not self.mountable(source):
             raise DiskError(
-                "The FFS disk image is empty. Nothing was extracted."
+                "This image does not contain a GEMDOS volume that can be extracted."
             )
+        if not self.list_directory(source, "")["entries"]:
+            if rebuilt is not None:
+                self.discard_session(rebuilt)
+            raise DiskError("The source disk image is empty. Nothing was extracted.")
+
         if create_directory:
-            # Check and create through one trusted mount.  This avoids two
-            # complete FFS opens before an import can begin.
-            with self.ffs_mount(target) as target_mount:
-                if not target_mount.exists(target_parent):
+            # Check and create through one trusted mount. This avoids two
+            # complete opens before an import can begin.
+            with self.gemdos_mount(target) as target_mount:
+                if target_parent and not target_mount.exists(target_parent):
                     raise DiskError(f"Path not found: {target_parent}")
                 if target_mount.exists(target_directory):
                     raise DiskError(
@@ -3421,99 +2717,13 @@ class DiskService(
             rollback_path = target.path.parent / f".import-rollback-{uuid.uuid4().hex}"
             self._copy_local_file(target.path, rollback_path)
         try:
-            if source.kind == "dms":
-                # A DMS is a whole floppy, so the honest extraction is to
-                # rebuild the disk it was made from and copy that volume's
-                # files. Treating its tracks as files would present raw
-                # cylinders as though they were software.
-                report("Rebuilding the disk from its DMS tracks", 0, None)
-                rebuilt, _tracks = self.convert_dms(source, "adf")
-                try:
-                    self._copy_image_listing_to_ffs(
-                        rebuilt, None, target, target_directory, report,
-                    )
-                    self.carry_boot_option(rebuilt, target, target_directory)
-                finally:
-                    self.discard_session(rebuilt)
-            elif source.kind == "ofs" and self.is_two_volume_image(source):
-                first = ofs_rows[0]
-                second = ofs_rows[2]
-                if first and second:
-                    for side, rows in ((0, first), (2, second)):
-                        number = side // 2 + 1
-                        report(f"Extracting volume {number}", side // 2, 2)
-                        volume_directory = atari_paths.join(
-                            target_directory, f"Volume{number}"
-                        )
-                        self.make_directory(target, volume_directory)
-                        self._copy_rows_to_ffs(
-                            source, side, rows, target, volume_directory, report
-                        )
-                        report(f"Extracted volume {number}", number, 2)
-                else:
-                    side = 0 if first else 2
-                    self._copy_rows_to_ffs(
-                        source, side, first or second, target, target_directory, report
-                    )
-            else:
-                if source.kind == "ofs":
-                    self._copy_image_listing_to_ffs(
-                        source,
-                        None,
-                        target,
-                        target_directory,
-                        report,
-                        rows=ofs_rows[None],
-                    )
-                else:
-                    self._copy_image_listing_to_ffs(
-                        source, None, target, target_directory, report
-                    )
-            if source.kind in {"ofs", "dms", "ffs"}:
-                # Extraction into the root can keep the source's boot option,
-                # which is what lets the image start itself. carry_boot_option
-                # declines any other destination, because a boot option names
-                # $.Startup-Sequence and would otherwise point at a file that is not there.
-                self.carry_boot_option(source, target, target_directory)
-                report("Checking copied loaders for FFS command conflicts", None, None)
-                loader_repairs, loader_warnings = self._repair_copied_ffs_loaders(
-                    target,
-                    target_directory,
-                )
-                for warning in loader_warnings:
-                    self._append_warning(target, f"{target_directory}: {warning}")
-                for repair in loader_repairs:
-                    self._append_warning(
-                        target,
-                        f"{target_directory}: FFS compatibility change made: {repair}.",
-                    )
-                if loader_repairs:
-                    report(
-                        f"Repaired {len(loader_repairs)} FFS loader command conflict(s)",
-                        None,
-                        None,
-                    )
-                profile = target.hardware_profile or {}
-                addons = {str(item).casefold() for item in profile.get("addons", [])}
-                if profile.get("accelerated") or any(
-                    item.startswith("acc-") or item == "pistorm" for item in addons
-                ):
-                    self._append_warning(
-                        target,
-                        f"{target_directory}: the selected hardware profile fits a CPU accelerator. "
-                        "Many OCS and ECS games depend on 68000 timing or write directly to the custom "
-                        "chips, and must be run with the accelerator and its Fast RAM disabled unless the "
-                        "software explicitly supports them.",
-                    )
+            self._copy_volume_to_directory(source, target, target_directory, report)
+            self.carry_boot_option(source, target, target_directory)
         except Exception:
             if create_directory:
                 try:
-                    self._run([
-                        "rm",
-                        "--force",
-                        "--recursive",
-                        self.compound(target.path, target_directory),
-                    ])
+                    with self.gemdos_mount(target) as target_mount:
+                        target_mount.remove(target_directory, recursive=True, force=True)
                 except Exception:
                     pass
             elif rollback_path and rollback_path.is_file():
@@ -3525,122 +2735,75 @@ class DiskService(
         finally:
             if rollback_path:
                 rollback_path.unlink(missing_ok=True)
-        target.dirty = True
-        target.hfe_export_path = None
+            if rebuilt is not None:
+                self.discard_session(rebuilt)
+        self._mark_mutated(target)
         return target_directory
 
-    def _copy_image_listing_to_ffs(
+    def _copy_volume_to_directory(
         self,
         source: ImageSession,
-        source_side: int | None,
         target: ImageSession,
         target_directory: str,
-        progress: progress_module.Progress | None = None,
-        *,
-        rows: list[dict] | None = None,
+        report,
     ) -> None:
-        if rows is None:
-            rows = (
-                self.list_ofs_catalogue_files(source, source_side)
-                if source.kind in {"ofs", "hdf"}
-                else self.list_directory(source, "$", source_side)["entries"]
-            )
-        self._copy_rows_to_ffs(
-            source, source_side, rows, target, target_directory, progress
-        )
-
-    def _copy_rows_to_ffs(
-        self,
-        source: ImageSession,
-        source_side: int | None,
-        rows: list[dict],
-        target: ImageSession,
-        target_directory: str,
-        progress: progress_module.Progress | None = None,
-    ) -> None:
-        report = progress_module.reporter(progress)
-        if not rows:
-            return
-        source_path = self.resolve(source)
-        report("Copying the complete disk catalogue in one batch", 0, len(rows))
-        if target.kind in {"ffs", "ofs"} and source.kind in {"ofs", "hdf"}:
-            from atarinut.disc.mount import resolve_mount
-            source_root = self.inner_for(source, "$", source_side)
-            with self._locked_sessions(source, target):
-                with resolve_mount(self.compound(source_path, source_root)) as source_resolved:
-                    copy_items = self._collect_ofs_catalogue_items(
-                        source_resolved.mount,
-                        target_directory,
-                        file_copy_item,
-                    )
-                    copy_items = in_storage_order(source_resolved.mount, copy_items)
-                with self.ffs_mount(target) as target_mount:
-                    for item in copy_items:
-                        if item["kind"] == "mkdir":
-                            ensure_directory_chain(target_mount, item["dst"])
-                        else:
-                            self._write_ffs_copy_item(
-                                target_mount,
-                                str(item["dst"]),
-                                item,
-                                write_copy_item,
-                            )
-            target.dirty = True
-            target.hfe_export_path = None
-            report("Copied the complete disk catalogue", len(rows), len(rows))
-            return
-        if target.kind in {"ffs", "ofs"} and source.kind in {"ffs", "ofs"}:
-            def copy_between_mounts(source_mount, target_mount) -> None:
-                self._copy_between_ffs_mounts(
-                    source_mount,
-                    target_mount,
-                    "$",
-                    target_directory,
-                    recursive=True,
-                    destination_slash=True,
+        """Copy every file on one volume into a folder on another."""
+        report("Copying the complete disk catalogue in one batch", 0, None)
+        with self._locked_sessions(source, target):
+            with self.gemdos_mount(source, writable=False) as source_mount:
+                items = self._collect_volume_items(
+                    source_mount, target_directory, file_copy_item
                 )
+                items = in_storage_order(source_mount, items)
+            with self.gemdos_mount(target) as target_mount:
+                for item in items:
+                    if item.get("kind") == "mkdir":
+                        ensure_directory_chain(target_mount, str(item["dst"]))
+                    else:
+                        write_copy_item(target_mount, str(item["dst"]), item, True)
+        report("Copied the complete disk catalogue", len(items), len(items))
 
-            with self._locked_sessions(source, target):
-                if source.id == target.id:
-                    with self.ffs_mount(target) as mount:
-                        copy_between_mounts(mount, mount)
-                else:
-                    with self.ffs_mount(source) as source_mount:
-                        with self.ffs_mount(target) as target_mount:
-                            copy_between_mounts(source_mount, target_mount)
-            target.dirty = True
-            target.hfe_export_path = None
-            report("Copied the complete disk catalogue", len(rows), len(rows))
-            return
-        source_pattern = "*"
-        self._run(
-            [
-                "cp",
-                "--recursive",
-                self.compound(
-                    source_path,
-                    self.inner_for(source, source_pattern, source_side),
-                ),
-                self.compound(target.path, target_directory),
-            ]
-        )
-        report("Copied the complete disk catalogue", len(rows), len(rows))
-
+    # ------------------------------------------------------------------
+    # Reading
+    # ------------------------------------------------------------------
     def read_file(self, session: ImageSession, inner: str, side: int | None = None) -> bytes:
+        del side
         if session.kind == "rom":
             return self.rom_bank_bytes(session, inner)
         if session.kind == "iso":
             return self.iso_file(session, inner)
-        if session.kind == "dms":
-            return self._dms_file(session, inner).data
-        if session.kind == "kickfs":
-            with self.kickfs_mount(session) as mount:
-                return mount.read_bytes(inner)
+        if session.kind in CONTAINER_KINDS:
+            return self._container_track_bytes(session, inner)
+        if session.kind == "tosrom":
+            with self.tosrom_mount(session) as mount:
+                return mount.read_bytes(self.inner_for(session, inner))
         if self.mountable(session):
-            with self.ffs_mount(session) as mount:
-                return mount.read_bytes(inner)
-        disk_path = self.resolve(session)
-        return self._run(["get", "--meta-format", "none", self.compound(disk_path, self.inner_for(session, inner, side)), "-"], binary=True)
+            with self.gemdos_mount(session, writable=False) as mount:
+                return mount.read_bytes(self.inner_for(session, inner))
+        raise DiskError("This image does not contain a file that can be read.")
+
+    def _container_track_bytes(self, session: ImageSession, inner: str) -> bytes:
+        """Return the sectors of one track from an MSA, DIM or Pasti container.
+
+        A container stores whole tracks, and where a track sits in the disk it
+        describes is decided by the geometry rather than by the order the
+        tracks happen to be stored in. The honest way to read one is therefore
+        to rebuild the disk and take the track out of it, which is also what
+        makes a Pasti track come back with its unreadable sectors filled the
+        same way the conversion fills them.
+        """
+        member = self._container_member(session, inner)
+        rebuilt, _rows = self.convert_container(session, "st")
+        try:
+            sectors = rebuilt.path.read_bytes()
+            geometry = resolve_geometry(len(sectors), sectors[:512])
+            if geometry is None:
+                raise DiskError("The shape of this container could not be established.")
+            index = int(member["track"]) * geometry.sides + int(member["side"])
+            offset = index * geometry.track_size
+            return sectors[offset : offset + geometry.track_size]
+        finally:
+            self.discard_session(rebuilt)
 
     def file_metadata(
         self,
@@ -3648,55 +2811,44 @@ class DiskService(
         inner: str,
         side: int | None = None,
     ) -> dict:
-        """Return portable Atari metadata for one exported loose file."""
+        """Return portable GEMDOS metadata for one exported loose file."""
+        del side
         if session.kind == "rom":
             data = self.rom_bank_bytes(session, inner)
-            return {"protection": 0, "comment": "", "access": 0, "length": len(data)}
-        if session.kind == "dms":
-            item = self._dms_file(session, inner)
+            return {"attributes": 0, "access": 0, "length": len(data)}
+        if session.kind in CONTAINER_KINDS:
+            member = self._container_member(session, inner)
             return {
-                "protection": 0,
-                "comment": "",
-                "access": 0,
-                "length": len(item.data),
-                "unpackedChecksum": item.unpacked_crc,
-                "packedChecksum": item.packed_crc,
+                "attributes": 0x01,
+                "access": 0x01,
+                "length": int(member["length"]),
+                "complete": bool(member["complete"]),
             }
-        if session.kind == "kickfs":
-            with self.kickfs_mount(session) as mount:
+        if session.kind == "tosrom":
+            with self.tosrom_mount(session) as mount:
                 stat = mount.stat(inner)
-                metadata = mount.atari_meta(inner)
                 return {
-                    "protection": int(metadata.protection or 0),
-                    "comment": str(metadata.comment or ""),
-                    "access": int(metadata.access or 0),
+                    "attributes": 0x01,
+                    "access": 0x01,
                     "length": int(stat.length or 0),
                 }
-        try:
-            from atarinut.disc.mount import resolve_mount
-        except ImportError as exc:
-            raise DiskError("The Atarinut metadata API is unavailable.") from exc
-        if self.mountable(session):
-            with self.ffs_mount(session) as mount:
-                stat = mount.stat(inner)
-                metadata = mount.atari_meta(inner)
-                return {
-                    "protection": int(metadata.protection or 0),
-                    "comment": str(metadata.comment or ""),
-                    "access": int(metadata.access or 0),
-                    "length": int(stat.length or 0),
-                }
-        disk_path = self.resolve(session)
-        root = self.compound(disk_path, self.inner_for(session, "", side))
-        with session.lock, resolve_mount(root) as resolved:
-            target = self.inner_for(session, inner, side)
-            stat = resolved.mount.stat(target)
-            metadata = resolved.mount.atari_meta(target)
+        if not self.mountable(session):
+            raise DiskError("This image does not contain readable directory metadata.")
+        with self.gemdos_mount(session, writable=False) as mount:
+            target = self.inner_for(session, inner)
+            stat = mount.stat(target)
+            meta = mount.atari_meta(target)
+            bits = int(meta.attributes or 0)
             return {
-                "protection": int(metadata.protection or 0),
-                "comment": str(metadata.comment or ""),
-                "access": int(metadata.access or 0),
+                "attributes": bits,
+                "attributesText": format_attributes(bits),
+                "access": bits,
                 "length": int(stat.length or 0),
+                "datestamp": (
+                    meta.datestamp.isoformat(sep="T", timespec="milliseconds")
+                    if meta.datestamp
+                    else ""
+                ),
             }
 
     def export_file(
@@ -3706,54 +2858,36 @@ class DiskService(
         side: int | None = None,
     ) -> Path:
         """Export an image file without buffering its contents in application RAM."""
+        del side
         target = self.work_dir / f"download-{uuid.uuid4().hex}"
-        if session.kind == "rom":
-            target.write_bytes(self.rom_bank_bytes(session, inner))
-            return target
-        if session.kind == "dms":
-            target.write_bytes(self._dms_file(session, inner).data)
-            return target
-        if session.kind == "kickfs":
-            with self.kickfs_mount(session) as mount:
-                target.write_bytes(mount.read_bytes(inner))
-            return target
-        if self.mountable(session):
-            with self.ffs_mount(session) as mount:
-                target.write_bytes(mount.read_bytes(inner))
-            return target
-        disk_path = self.resolve(session)
         try:
-            self._run(
-                [
-                    "get",
-                    "--meta-format",
-                    "none",
-                    self.compound(
-                        disk_path,
-                        self.inner_for(session, inner, side),
-                    ),
-                    str(target),
-                ]
-            )
+            target.write_bytes(self.read_file(session, inner))
         except Exception:
             target.unlink(missing_ok=True)
             raise
         return target
 
-    def compact(self, session: ImageSession, order: str | None = None) -> None:
-        if session.kind == "kickfs":
-            raise DiskError("Kickstart ROM is rebuilt into storage order after every edit and does not need compaction.")
-        if session.kind == "dms":
-            raise DiskError("DMS archives cannot be compacted; convert to a disk image first.")
+    def compact(self, session: ImageSession) -> None:
+        """Defragment a volume so its files occupy consecutive clusters.
+
+        FAT allows a file's clusters to be anywhere, and a disk written and
+        deleted over time ends up with files threaded through each other. That
+        costs a real machine seek time on every read, so the volume is rewritten
+        with each file's clusters consecutive.
+        """
         self.require_writable_geometry(session)
-        disk_path = self.resolve(session)
-        args = ["compact"]
-        if order:
-            args += ["--order", order]
-        args.append(str(disk_path))
-        with session.lock:
-            self._run(args)
-            self._mark_mutated(session)
+        if not self.mountable(session):
+            raise DiskError("Only a mounted GEMDOS volume can be defragmented.")
+        with session.lock, self.gemdos_mount(session) as mount:
+            mount.defragment()
+        self._mark_mutated(session)
+
+    def free_map(self, session: ImageSession) -> list[bool]:
+        """Return one flag per cluster, True where the cluster is free."""
+        if not self.mountable(session):
+            raise DiskError("Only a mounted GEMDOS volume reports a free-space map.")
+        with self.gemdos_mount(session, writable=False) as mount:
+            return list(mount.free_map())
 
     @staticmethod
     def _friendly_engine_error(message: str) -> str:

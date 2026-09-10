@@ -32,11 +32,31 @@ const paneView = load("app/static/pane-view.js", "AtariPaneView");
 const transferPlanning = load("app/static/transfer-planning.js", "AtariTransferPlanning");
 
 test("workspace pane state has one canonical initial shape", () => {
-  const pane = workspace.newPaneState({ kind: "hdf", doubleSided: false });
-  assert.equal(pane.path, "$");
+  const pane = workspace.newPaneState({ kind: "hd", doubleSided: false });
+  // A GEMDOS volume root is the empty path, written C:\ when a drive
+  // letter is known.
+  assert.equal(pane.path, "");
   assert.equal(pane.menuDetectionPending, true);
   assert.deepEqual(Array.from(pane.selection), []);
   assert.equal(pane.windowState, null);
+});
+
+test("workspace paths follow the GEMDOS grammar and accept a forward slash on input", () => {
+  assert.deepEqual(Array.from(workspace.splitPath("C:\\GAMES\\ELITE")), ["GAMES", "ELITE"]);
+  assert.deepEqual(Array.from(workspace.splitPath("GAMES/ELITE")), ["GAMES", "ELITE"]);
+  assert.deepEqual(Array.from(workspace.splitPath("C:\\")), []);
+  assert.deepEqual(Array.from(workspace.splitPath("$")), []);
+  assert.equal(workspace.fullPath("GAMES", "ELITE.PRG"), "GAMES\\ELITE.PRG");
+  assert.equal(workspace.fullPath("", "AUTO"), "AUTO");
+  assert.equal(workspace.parentPath("GAMES\\ELITE\\DATA"), "GAMES\\ELITE");
+  assert.equal(workspace.parentPath("AUTO"), "");
+  assert.equal(workspace.drivePath("c", "GAMES\\ELITE"), "C:\\GAMES\\ELITE");
+  assert.equal(workspace.drivePath("A", ""), "A:\\");
+  assert.equal(workspace.restoredGemdosPath({ path: "$" }), "");
+  assert.equal(workspace.isGemdosPane({ image: { kind: "gemdos" } }), true);
+  assert.equal(workspace.isGemdosPane({ image: { kind: "hd" }, partition: 0 }), true);
+  assert.equal(workspace.isGemdosPane({ image: { kind: "hd" }, partition: null }), false);
+  assert.equal(workspace.normalisePage("$0007"), "7");
 });
 
 test("pane window geometry supports sides, corners and constrained free placement", () => {
@@ -58,78 +78,131 @@ test("workspace selection helpers preserve unique stable keys", () => {
   assert.equal(pane.selected, null);
 });
 
-test("file visuals classify Atari content consistently before rendering", () => {
-  const pane = workspace.newPaneState({ kind: "ofs" });
-  assert.equal(visuals.entryIcon(pane, { name: "Startup-Sequence" }, "file", false, false).kind, "script");
-  assert.equal(visuals.entryIcon(pane, { name: "Game.bas" }, "file", false, false).kind, "basic");
-  assert.equal(visuals.entryIcon(pane, { name: "Game", filetype: 3 }, "file", false, false).kind, "binary");
-  assert.equal(visuals.entryIcon(pane, { name: "Kickstart", filetype: 7 }, "file", false, false).kind, "rom");
-  assert.equal(visuals.entryIcon(pane, { name: "Manual.guide" }, "file", false, false).kind, "text");
-  assert.equal(visuals.entryIcon(pane, { name: "Game.lha" }, "file", true, false).kind, "archive");
+test("file visuals classify ST content consistently before rendering", () => {
+  const pane = workspace.newPaneState({ kind: "gemdos" });
+  const kindOf = (name, archive = false) => visuals.entryIcon(pane, { name }, "file", archive, false).kind;
+  assert.equal(kindOf("DESKTOP.INF"), "script");
+  assert.equal(kindOf("NEWDESK.INF"), "script");
+  assert.equal(kindOf("EMUDESK.INF"), "script");
+  assert.equal(kindOf("MINT.CNF"), "script");
+  assert.equal(kindOf("AHDI.SYS"), "script");
+  assert.equal(kindOf("GAME.GFA"), "basic");
+  assert.equal(kindOf("GAME.BAS"), "basic");
+  assert.equal(kindOf("GAME.LST"), "basic");
+  assert.equal(kindOf("GAME.PRG"), "binary");
+  assert.equal(visuals.entryIcon(pane, { name: "GAME.PRG" }, "file", false, false).label, "GEMDOS program");
+  assert.equal(kindOf("READ.ME"), "text");
+  assert.equal(kindOf("MANUAL.TXT"), "text");
+  assert.equal(kindOf("GAME.ZIP", true), "archive");
+  assert.equal(kindOf("DISK.MSA"), "archive");
+  assert.equal(kindOf("DISK.ST"), "archive");
+  assert.equal(kindOf("PICTURE.PI1"), "file");
+  assert.equal(visuals.entryIcon(pane, { name: "PICTURE.PI1" }, "file", false, false).label, "Picture");
+  assert.equal(visuals.entryIcon(pane, { name: "TUNE.SNDH" }, "file", false, false).label, "Music or sample");
+  assert.equal(visuals.entryIcon(pane, { name: "DESKTOP.RSC" }, "file", false, false).label, "System or resource file");
+  assert.equal(visuals.entryIcon(pane, { name: "AUTO" }, "dir", false, false).kind, "folder");
+  assert.ok(visuals.scriptNamePattern.test("DESKTOP.INF"));
+  assert.ok(visuals.scriptNamePattern.test("anything.cnf"));
 });
 
-test("import planning applies filesystem limits without UI state", () => {
-  // An GEMDOS entry holds 30 characters on OFS and FFS alike, and a full
-  // stop is an ordinary character in a name.
-  const ofsRule = imports.targetNameRule({ image: { kind: "ofs" } }, "Read.Me");
-  assert.equal(ofsRule.suggested, "Read.Me");
-  assert.equal(ofsRule.valid, true);
-  assert.equal(ofsRule.limit, 30);
-  const longRule = imports.targetNameRule({ image: { kind: "ofs" } }, "A".repeat(40));
+test("import planning applies GEMDOS 8.3 limits without UI state", () => {
+  const rule = imports.targetNameRule({ image: { kind: "gemdos" } }, "READ.ME");
+  assert.equal(rule.suggested, "READ.ME");
+  assert.equal(rule.valid, true);
+  assert.equal(rule.limit, 12);
+  assert.equal(rule.label, "GEMDOS 8.3");
+  // Lower case is written upper case, so a host name is adjusted but not
+  // truncated.
+  const lower = imports.targetNameRule({ image: { kind: "gemdos" } }, "Elite.prg");
+  assert.equal(lower.valid, false);
+  assert.equal(lower.suggested, "ELITE.PRG");
+  assert.equal(lower.truncated, false);
+  // A long stem is cut to eight characters and a long extension to three.
+  const longRule = imports.targetNameRule({ image: { kind: "gemdos" } }, "A descriptive filename.document");
   assert.equal(longRule.valid, false);
-  assert.equal(longRule.suggested.length, 30);
-  // A long-filename variant raises the limit, and the server says so.
-  const bigRule = imports.targetNameRule({
-    image: { kind: "ffs", filesystemCapabilities: { nameLimit: 107 } },
-  }, "A descriptive GEMDOS filename");
-  assert.equal(bigRule.suggested, "A descriptive GEMDOS filename");
-  assert.equal(bigRule.limit, 107);
-  // The separator and the volume marker are the characters a name cannot hold.
-  const slashRule = imports.targetNameRule({ image: { kind: "ffs" } }, "Games/Elite");
-  assert.equal(slashRule.suggested, "Elite");
-  const unicodeRule = imports.targetNameRule({
-    image: { kind: "ffs", filenamePolicies: { file: { limit: 30, forbidden: ":/\\", latin1: true } } },
-  }, "Elite🙂");
-  assert.equal(unicodeRule.valid, false);
-  assert.equal(unicodeRule.suggested, "Elite_");
-  assert.equal(imports.targetNameRule({ image: { kind: "ffs" } }, " Café ").valid, false);
-  // An 880 KiB volume holds 1758 blocks and OFS stores 488 bytes in each, so
-  // a file just over half a volume forces a second disk.
-  const disks = imports.allocateFilesToOfsDisks([
-    { name: "One", length: 1000 * 488 },
-    { name: "Two", length: 1000 * 488 },
-  ], "adf");
+  assert.equal(longRule.suggested, "A_DESCRI.DOC");
+  assert.equal(longRule.truncated, true);
+  // Only the last full stop separates the extension; earlier ones cannot
+  // be stored.
+  assert.equal(imports.targetNameRule({ image: { kind: "gemdos" } }, "OS-V3.5.TXT").suggested, "OS-V3_5.TXT");
+  // The forbidden characters and a space are replaced.
+  assert.equal(imports.targetNameRule({ image: { kind: "gemdos" } }, "Games/Elite").suggested, "ELITE");
+  assert.equal(imports.targetNameRule({ image: { kind: "gemdos" } }, "a b:c*d?e.txt").suggested, "A_B_C_D_.TXT");
+  assert.equal(imports.targetNameRule({ image: { kind: "gemdos" } }, "Elite🙂").suggested, "ELITE_");
+  assert.equal(imports.targetNameRule({ image: { kind: "gemdos" } }, "CAFÉ.TXT").valid, true);
+  // Unique names carry a numeric suffix inside the eight characters.
+  const unique = imports.uniqueGemdosNames([
+    { name: "LongFilename1.txt", path: "Pack/LongFilename1.txt" },
+    { name: "LongFilename2.txt", path: "Pack/LongFilename2.txt" },
+    { name: "longfilename3.txt", path: "Pack/longfilename3.txt" },
+  ]);
+  assert.deepEqual(Array.from(unique, item => item.targetName), ["LONGFILE.TXT", "LONGFIL1.TXT", "LONGFIL2.TXT"]);
+  assert.equal(unique[0].prefix, "Pack");
+});
+
+test("import planning fills TOS floppies by cluster and root entry count", () => {
+  // A 720 KiB disk has 711 data clusters of 1 KiB once the boot sector,
+  // two FATs and the root directory are taken off.
+  const disks = imports.allocateFilesToDisks([
+    { name: "ONE", length: 400 * 1024 },
+    { name: "TWO", length: 400 * 1024 },
+  ], "720k");
   assert.equal(disks.length, 2);
-  const together = imports.allocateFilesToOfsDisks([
-    { name: "One", length: 100 },
-    { name: "Two", length: 200 },
-  ], "adf");
+  const together = imports.allocateFilesToDisks([
+    { name: "ONE", length: 100 },
+    { name: "TWO", length: 200 },
+  ], "720k");
   assert.equal(together.length, 1);
   assert.equal(together[0].files.length, 2);
+  // The same pair fits one 880 KiB disk.
+  assert.equal(imports.allocateFilesToDisks([{ name: "ONE", length: 400 * 1024 }, { name: "TWO", length: 400 * 1024 }], "880k").length, 1);
+  // A 1.44 MiB disk holds more clusters and 224 root entries.
+  assert.equal(imports.allocateFilesToDisks([{ name: "BIG", length: 1400 * 1024 }], "1440k").length, 1);
+  assert.throws(() => imports.allocateFilesToDisks([{ name: "BIG", length: 800 * 1024 }], "720k"), /too large/);
+  const many = imports.allocateFilesToDisks(Array.from({ length: 113 }, (_unused, index) => ({ name: `F${index}`, length: 10 })), "720k");
+  assert.equal(many.length, 2);
 });
 
-test("protection from a sidecar is accepted in either written form", () => {
-  // The eight letters List prints are kept verbatim, because that is the form
-  // a person can check at a glance.
-  assert.equal(imports.normaliseProtection("----r-e-"), "----r-e-");
-  // A raw long is normalised so one written value means one number.
-  assert.equal(imports.normaliseProtection("&05"), "0x05");
-  assert.equal(imports.normaliseProtection("0x05"), "0x05");
+test("attributes from a sidecar are accepted in either written form", () => {
+  // The six letters are kept verbatim, because that is the form a person
+  // can check at a glance.
+  assert.equal(imports.normaliseAttributes("-----a"), "-----a");
+  assert.equal(imports.normaliseAttributes("r---da"), "r---da");
+  // A raw byte is normalised so one written value means one number.
+  assert.equal(imports.normaliseAttributes("$20"), "0x20");
+  assert.equal(imports.normaliseAttributes("0x20"), "0x20");
+  assert.equal(imports.normaliseAttributes("&H01"), "0x01");
   // Anything else is reported as absent rather than guessed at.
-  assert.equal(imports.normaliseProtection("read-only"), "");
+  assert.equal(imports.normaliseAttributes("read-only"), "");
 });
 
-test("protection bits round trip through their inverted low four", () => {
-  // ----rwed is a fully permitted file, which stores zero in the low bits.
-  assert.equal(metadata.formatProtection(0), "----rwed");
-  // 0x05 denies writing and deleting, which is how a locked file reads.
-  assert.equal(metadata.formatProtection(0x05), "----r-e-");
-  assert.deepEqual({ ...metadata.protectionFlags(0x10) }, {
-    h: false, s: false, p: false, a: true, r: true, w: true, e: true, d: true,
-  });
-  assert.equal(metadata.protectionValue(metadata.protectionFlags(0x95)), 0x95);
-  assert.equal(metadata.protectionHex(metadata.protectionFlags(0x05)), "0x00000005");
-  assert.equal(metadata.parseProtection("&10"), 0x10);
+test("the GEMDOS attribute byte round trips through six plain letters", () => {
+  assert.equal(metadata.ATTRIBUTE_LETTERS, "rhsvda");
+  // A normal file with the archive bit set.
+  assert.equal(metadata.formatAttributes(0x20), "-----a");
+  // A read-only hidden system file, the state of a TOS boot file.
+  assert.equal(metadata.formatAttributes(0x07), "rhs---");
+  assert.equal(metadata.formatAttributes(0), "------");
+  assert.deepEqual({ ...metadata.attributeFlags(0x10) }, { r: false, h: false, s: false, v: false, d: true, a: false });
+  assert.equal(metadata.attributeValue("r---da"), 0x31);
+  assert.equal(metadata.attributeValue(metadata.attributeFlags(0x25)), 0x25);
+  assert.equal(metadata.attributeHex(metadata.attributeFlags(0x01)), "0x01");
+  assert.equal(metadata.attributeHex("-----a"), "0x20");
+  assert.equal(metadata.parseAttributes("$20"), 0x20);
+  assert.equal(metadata.parseAttributes("32"), 0x20);
+  assert.equal(metadata.parseAttributes("-----a"), 0x20);
+  assert.equal(metadata.parseAttributes("nonsense"), null);
+});
+
+test("GEMDOS date and time stamps convert to and from ISO text at two-second resolution", () => {
+  const stamp = metadata.parseDatestamp("1985-06-20T14:30:03");
+  assert.equal(stamp.date, ((1985 - 1980) << 9) | (6 << 5) | 20);
+  assert.equal(stamp.time, (14 << 11) | (30 << 5) | 1);
+  assert.equal(metadata.formatDatestamp(stamp), "1985-06-20T14:30:02");
+  assert.equal(metadata.formatDatestamp(stamp.date, stamp.time), "1985-06-20T14:30:02");
+  assert.equal(metadata.formatDatestamp(0x0021, 0), "1980-01-01T00:00:00");
+  assert.equal(metadata.parseDatestamp("1979-12-31"), null);
+  assert.equal(metadata.parseDatestamp("not a date"), null);
 });
 
 test("help handbook is isolated behind an injected modal boundary", () => {
@@ -165,8 +238,8 @@ test("editor workspace persistence validates, limits and restores documents", ()
     removeItem: key => values.delete(key),
   };
   const manager = editorWorkspace.create({ storage, key: "editors", maxDocuments: 2, maxDraftBytes: 4, maxPanes: 3 });
-  manager.state.documents.set("one", { key: "one", imageId: "a".repeat(32), index: 0, path: "$.ONE", name: "ONE", draft: "123456" });
-  manager.state.documents.set("two", { key: "two", imageId: "b".repeat(32), index: 1, path: "$.TWO", name: "TWO" });
+  manager.state.documents.set("one", { key: "one", imageId: "a".repeat(32), index: 0, path: "ONE", name: "ONE", draft: "123456" });
+  manager.state.documents.set("two", { key: "two", imageId: "b".repeat(32), index: 1, path: "TWO", name: "TWO" });
   manager.state.active = "one";
   manager.persist();
 
@@ -211,7 +284,7 @@ test("workspace recovery is isolated behind an injected persistence controller",
   const controller = workspacePersistence.create({
     panes: [], storage: { getItem() { return null; }, setItem() {} },
     storageKey: "workspace", newPaneState() { return {}; },
-    restoredOfsPath() { return "$"; }, api() {}, rebuildPaneHosts() {},
+    restoredGemdosPath() { return ""; }, api() {}, rebuildPaneHosts() {},
     renderPane() {}, acceptImage() {}, loadDirectory() {},
     editorWorkspace: { state: {} }, activateEditorDocument() {}, toast() {},
   });
@@ -225,49 +298,52 @@ test("pane presentation formats images and capacity through one component", () =
     esc: value => String(value),
     humanSize: value => `${value} B`,
   });
-  assert.equal(view.paneFormat({ kind: "ofs", name: "demo.adz" }), "ADZ");
+  assert.equal(view.paneFormat({ kind: "gemdos", name: "demo.st" }), "ST");
+  assert.equal(view.paneFormat({ kind: "gemdos", name: "demo.msa" }), "MSA");
+  assert.equal(view.paneFormat({ kind: "gemdos", name: "demo.dim" }), "DIM");
+  assert.equal(view.paneFormat({ kind: "gemdos", containerFormat: "stx", name: "demo.stx" }), "STX");
+  assert.equal(view.paneFormat({ kind: "gemdos", containerFormat: "hfe", name: "demo.hfe" }), "HFE");
+  assert.equal(view.paneFormat({ kind: "gemdos", containerFormat: "scp", name: "demo.scp" }), "SCP");
+  assert.equal(view.paneFormat({ kind: "gemdos", containerFormat: "ipf", name: "demo.ipf" }), "IPF");
+  assert.equal(view.paneFormat({ kind: "hd", name: "scsi0.img" }), "HD");
+  assert.equal(view.paneFormat({ kind: "vol", name: "c.img" }), "VOL");
+  assert.equal(view.paneFormat({ kind: "iso", name: "disc.iso" }), "CD");
+  assert.equal(view.paneFormat({ kind: "rom", name: "bank.rom" }), "ROM");
+  assert.equal(view.paneFormat({ kind: "rom", name: "tos206.tos" }), "TOS");
   assert.match(view.capacityMarkup({ available: true, total: 100, used: 75, free: 25, unit: "bytes" }), /capacity warning/);
-  // GEMDOS separates path components with "/" and writes a volume root as
-  // a bare colon. A full stop is an ordinary character in an Atari filename,
-  // so a drawer named "OS-Version3.5" is one crumb rather than two.
-  assert.match(view.crumbs(""), /class="crumb current" data-path=""/);
-  assert.match(view.crumbs("Games/Demos"), /data-path="Games"/);
-  assert.match(view.crumbs("Games/Demos"), /data-path="Games\/Demos"/);
-  assert.equal((view.crumbs("OS-Version3.5").match(/<button/g) || []).length, 2);
-  assert.match(view.crumbs("OS-Version3.5"), /data-path="OS-Version3.5"/);
+  // GEMDOS separates path components with a backslash and the root is the
+  // drive letter. A full stop is an ordinary character in an 8.3 name, so a
+  // folder named "OS-V3.5" is one crumb rather than two.
+  assert.match(view.crumbs(""), /class="crumb current" data-path="">\\</);
+  assert.match(view.crumbs("", false, "C"), /class="crumb current" data-path="">C:\\</);
+  assert.match(view.crumbs("GAMES\\DEMOS"), /data-path="GAMES"/);
+  assert.match(view.crumbs("GAMES\\DEMOS"), /data-path="GAMES\\DEMOS"/);
+  assert.match(view.crumbs("GAMES/DEMOS"), /data-path="GAMES\\DEMOS"/);
+  assert.equal((view.crumbs("OS-V3.5").match(/<button/g) || []).length, 2);
+  assert.match(view.crumbs("OS-V3.5"), /data-path="OS-V3.5"/);
 });
 
 test("the pane export control follows the formats the service offers", () => {
   const view = paneView.create({ esc: value => String(value), humanSize: value => `${value} B` });
 
   const exportable = view.exportAvailability({
-    name: "demo.adz",
+    name: "demo.st",
     exportFormats: [
-      { format: "native", extension: "adl", label: "Native sector image (.adz)" },
+      { format: "native", extension: "st", label: "Native sector image (.st)" },
+      { format: "msa", extension: "msa", label: "Magic Shadow Archiver (.msa)" },
       { format: "hfe", extension: "hfe", label: "HxC HFE flux image (.hfe)" },
-      { format: "scp", extension: "scp", label: "SuperCard Pro flux image (.scp)" },
     ],
   });
   assert.equal(exportable.available, true);
-  assert.match(exportable.label, /demo\.adz/);
+  assert.match(exportable.label, /demo\.st/);
 
-  // A Hardfile pair carries geometry a flux or sector container cannot hold,
-  // so the control is disabled and says which limitation applies.
-  const hardfile = view.exportAvailability({
-    name: "scsi0.hda",
-    hasDescriptor: true,
-    exportFormats: [],
-  });
-  assert.equal(hardfile.available, false);
-  assert.match(hardfile.label, /Hardfile HDA and GEO pair/);
-
-  // Anything else with no compatible target gets the general reason.
+  // Anything with no compatible target says so rather than going missing.
   const unsupported = view.exportAvailability({ name: "bank.rom", exportFormats: [] });
   assert.equal(unsupported.available, false);
   assert.match(unsupported.label, /no compatible format/);
 
   // A missing field must read as unavailable, never as an enabled control.
-  assert.equal(view.exportAvailability({ name: "old.adf" }).available, false);
+  assert.equal(view.exportAvailability({ name: "old.st" }).available, false);
 });
 
 test("the pane export icon matches the other header controls", () => {
@@ -279,14 +355,17 @@ test("the pane export icon matches the other header controls", () => {
   }
 });
 
-test("folder transfer planning preserves FFS trees and resolves collisions", () => {
+test("folder transfer planning preserves GEMDOS trees and resolves collisions", () => {
   const planning = transferPlanning.create({
     targetNameRule: (_pane, name) => ({ suggested: name.slice(0, 10), limit: 10 }),
   });
   const result = planning.folderTargetPlans(
-    { image: { kind: "ffs" } },
+    { image: { kind: "gemdos" } },
     [{ relativePath: "Pack/LongFilename" }, { relativePath: "Pack/LongFilename2" }],
     "preserve",
   );
-  assert.deepEqual(Array.from(result.plans, item => item.targetPath), ["Pack/LongFilena", "Pack/LongFilen1"]);
+  assert.deepEqual(Array.from(result.plans, item => item.targetPath), ["Pack\\LongFilena", "Pack\\LongFilen1"]);
+  // A ROM bank has no folders, so only the leaf names survive.
+  const flat = planning.folderTargetPlans({ image: { kind: "rom" } }, [{ relativePath: "Pack/LongFilename" }], "preserve");
+  assert.deepEqual(Array.from(flat.plans, item => item.targetPath), ["LongFilena"]);
 });

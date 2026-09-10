@@ -7,7 +7,7 @@
       storage,
       storageKey,
       newPaneState,
-      restoredOfsPath,
+      restoredGemdosPath,
       api,
       rebuildPaneHosts,
       reconcilePaneWindows = () => {},
@@ -30,7 +30,7 @@
         archivePath: pane.archivePath,
         archiveName: pane.archiveName,
         archiveMember: pane.archiveMember,
-        pathModel: pane.image?.kind === "ofs" ? "ofs-prefixes" : "hierarchical",
+        pathModel: "gemdos",
         windowState: pane.windowState,
       }));
       try {
@@ -83,24 +83,23 @@
           await acceptImage(index, data.image);
           const pane = panes[index];
           pane.side = saved.side === 2 ? 2 : data.image.doubleSided ? 0 : null;
-          if (data.image.kind === "hdf" && Number.isInteger(saved.partition)) {
+          if (data.image.kind === "hd" && Number.isInteger(saved.partition)) {
             const volume = pane.entries.find(entry => entry.partition === saved.partition);
             if (volume) {
               pane.partition = saved.partition;
               pane.partitionName = volume.name;
-              pane.path = restoredOfsPath(saved);
+              pane.path = restoredGemdosPath(saved);
               await loadDirectory(index);
             }
           } else if (
-            data.image.kind !== "hdf"
+            data.image.kind !== "hd"
             && typeof saved.path === "string"
             && (
-              (data.image.kind === "ofs" && restoredOfsPath(saved) !== "")
-              || (data.image.kind !== "ofs" && saved.path !== "$")
+              restoredGemdosPath(saved) !== ""
               || pane.side !== (data.image.doubleSided ? 0 : null)
             )
           ) {
-            pane.path = data.image.kind === "ofs" ? restoredOfsPath(saved) : saved.path;
+            pane.path = restoredGemdosPath(saved);
             await loadDirectory(index);
           }
           if (typeof saved.archivePath === "string" && saved.archivePath) {

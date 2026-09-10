@@ -15,15 +15,19 @@ import zlib
 import re
 from pathlib import Path
 
+from atarinut.tosrom import TOS_SIZES, decode_bcd_date, encode_dos_date
+
 from .checksum import sha256_bytes
 from .rom import (
+    CARTRIDGE_SIZE,
     DEFAULT_ROM_BASE,
     inspect_bank,
-    make_expansion_rom,
-    parse_extended_rom_header,
+    make_cartridge_rom,
+    parse_cartridge_header,
     parse_rom_header,
     rom_base,
 )
+from .rom_components import BOARD_CHIP_SETS, split_into_chips
 
 try:
     from capstone import (
@@ -54,192 +58,173 @@ class RomWorkbenchError(ValueError):
 # ---------------------------------------------------------------------------
 # Atari system vocabulary
 # ---------------------------------------------------------------------------
-# An Atari program does almost nothing through absolute addresses. It puts a
-# library base in A6 and calls a negative offset from it, so the interesting
-# annotation is not "what address is this" but "which library vector is this".
-# These tables turn ``JSR -$0198(A6)`` into ``exec.library OpenLibrary``.
+# A TOS program reaches the operating system through four TRAP instructions.
+# The function number is pushed as a word immediately before the TRAP, so the
+# interesting annotation is not "what address is this" but "which system call
+# is this". These tables turn ``MOVE.W #$3D,-(SP) / TRAP #1`` into
+# ``GEMDOS Fopen``.
 
-EXEC_LVOS = {
-    -30: ("Supervisor", "Run a routine in supervisor mode"),
-    -72: ("InitCode", "Initialise resident modules of a given priority"),
-    -78: ("InitStruct", "Initialise a structure from an init table"),
-    -84: ("MakeLibrary", "Build a library from a vector table"),
-    -90: ("MakeFunctions", "Fill in a library's jump table"),
-    -96: ("FindResident", "Find a resident tag by name"),
-    -102: ("InitResident", "Initialise one resident module"),
-    -108: ("Alert", "Display a system alert"),
-    -114: ("Debug", "Enter the ROM debugger"),
-    -120: ("Disable", "Disable interrupts"),
-    -126: ("Enable", "Enable interrupts"),
-    -132: ("Forbid", "Forbid task switching"),
-    -138: ("Permit", "Permit task switching"),
-    -144: ("SetSR", "Read or change the status register"),
-    -150: ("SuperState", "Enter supervisor state"),
-    -156: ("UserState", "Return to user state"),
-    -162: ("SetIntVector", "Install an interrupt server vector"),
-    -168: ("AddIntServer", "Add an interrupt server"),
-    -174: ("RemIntServer", "Remove an interrupt server"),
-    -180: ("Cause", "Cause a software interrupt"),
-    -186: ("Allocate", "Allocate from a memory header"),
-    -192: ("Deallocate", "Return memory to a header"),
-    -198: ("AllocMem", "Allocate memory of a requested type"),
-    -204: ("AllocAbs", "Allocate memory at an absolute address"),
-    -210: ("FreeMem", "Free previously allocated memory"),
-    -216: ("AvailMem", "Report free memory of a given type"),
-    -222: ("AllocEntry", "Allocate several memory blocks at once"),
-    -228: ("FreeEntry", "Free a memory-list allocation"),
-    -234: ("Insert", "Insert a node into a list"),
-    -240: ("AddHead", "Add a node to the head of a list"),
-    -246: ("AddTail", "Add a node to the tail of a list"),
-    -252: ("Remove", "Remove a node from a list"),
-    -258: ("RemHead", "Remove the first node of a list"),
-    -264: ("RemTail", "Remove the last node of a list"),
-    -270: ("Enqueue", "Insert a node by priority"),
-    -276: ("FindName", "Find a named node in a list"),
-    -282: ("AddTask", "Add a task to the system"),
-    -288: ("RemTask", "Remove a task"),
-    -294: ("FindTask", "Find a task by name, or the current task"),
-    -300: ("SetTaskPri", "Change a task's priority"),
-    -306: ("SetSignal", "Read or change a task's signals"),
-    -312: ("SetExcept", "Change a task's exception signals"),
-    -318: ("Wait", "Wait for one of a set of signals"),
-    -324: ("Signal", "Signal a task"),
-    -330: ("AllocSignal", "Allocate a signal bit"),
-    -336: ("FreeSignal", "Free a signal bit"),
-    -342: ("AllocTrap", "Allocate a trap vector"),
-    -348: ("FreeTrap", "Free a trap vector"),
-    -354: ("AddPort", "Add a public message port"),
-    -360: ("RemPort", "Remove a public message port"),
-    -366: ("PutMsg", "Send a message to a port"),
-    -372: ("GetMsg", "Receive a message from a port"),
-    -378: ("ReplyMsg", "Reply to a message"),
-    -384: ("WaitPort", "Wait for a message to arrive"),
-    -390: ("FindPort", "Find a public message port by name"),
-    -396: ("AddLibrary", "Add a library to the system"),
-    -402: ("RemLibrary", "Remove a library"),
-    -408: ("OldOpenLibrary", "Open a library, 1.0 compatible"),
-    -414: ("CloseLibrary", "Close a library"),
-    -420: ("SetFunction", "Patch one library vector"),
-    -426: ("SumLibrary", "Recalculate a library's checksum"),
-    -432: ("AddDevice", "Add a device to the system"),
-    -438: ("RemDevice", "Remove a device"),
-    -444: ("OpenDevice", "Open a device unit"),
-    -450: ("CloseDevice", "Close a device unit"),
-    -456: ("DoIO", "Perform a synchronous I/O request"),
-    -462: ("SendIO", "Start an asynchronous I/O request"),
-    -468: ("CheckIO", "Test whether an I/O request has finished"),
-    -474: ("WaitIO", "Wait for an I/O request to finish"),
-    -480: ("AbortIO", "Abort an I/O request"),
-    -486: ("AddResource", "Add a resource"),
-    -492: ("RemResource", "Remove a resource"),
-    -498: ("OpenResource", "Open a resource by name"),
-    -516: ("RawDoFmt", "Format a string with a per-character callback"),
-    -522: ("GetCC", "Read the condition codes portably"),
-    -528: ("TypeOfMem", "Report which memory type an address is in"),
-    -534: ("Procure", "Take a semaphore"),
-    -540: ("Vacate", "Release a semaphore"),
-    -552: ("OpenLibrary", "Open a library by name and minimum version"),
-    -558: ("InitSemaphore", "Initialise a signal semaphore"),
-    -564: ("ObtainSemaphore", "Take a signal semaphore, waiting if needed"),
-    -570: ("ReleaseSemaphore", "Release a signal semaphore"),
-    -576: ("AttemptSemaphore", "Take a semaphore without waiting"),
-    -582: ("ObtainSemaphoreList", "Take a list of semaphores"),
-    -594: ("FindSemaphore", "Find a named semaphore"),
-    -600: ("AddSemaphore", "Add a public semaphore"),
-    -606: ("RemSemaphore", "Remove a public semaphore"),
-    -612: ("SumKickData", "Checksum the KickTag data"),
-    -618: ("AddMemList", "Add a memory region to the free list"),
-    -624: ("CopyMem", "Copy memory"),
-    -630: ("CopyMemQuick", "Copy long-aligned memory quickly"),
-    -636: ("CacheClearU", "Clear the instruction and data caches"),
-    -684: ("CreateIORequest", "Create an I/O request structure"),
-    -690: ("DeleteIORequest", "Delete an I/O request structure"),
-    -696: ("CreateMsgPort", "Create a message port"),
-    -702: ("DeleteMsgPort", "Delete a message port"),
-    -732: ("AllocVec", "Allocate memory that remembers its own size"),
-    -738: ("FreeVec", "Free an AllocVec allocation"),
+GEMDOS_CALLS = {
+    0x00: ("Pterm0", "Terminate the process with exit code 0"),
+    0x01: ("Cconin", "Read a character from the console"),
+    0x02: ("Cconout", "Write a character to the console"),
+    0x03: ("Cauxin", "Read a character from the serial port"),
+    0x04: ("Cauxout", "Write a character to the serial port"),
+    0x05: ("Cprnout", "Write a character to the printer"),
+    0x06: ("Crawio", "Raw console input and output"),
+    0x07: ("Crawcin", "Read a console character without echo"),
+    0x08: ("Cnecin", "Read a console character without echo, with control keys"),
+    0x09: ("Cconws", "Write a string to the console"),
+    0x0A: ("Cconrs", "Read an edited line from the console"),
+    0x0B: ("Cconis", "Test whether a console character is waiting"),
+    0x0E: ("Dsetdrv", "Set the default drive"),
+    0x10: ("Cconos", "Test whether the console can accept output"),
+    0x11: ("Cprnos", "Test whether the printer can accept output"),
+    0x12: ("Cauxis", "Test whether a serial character is waiting"),
+    0x13: ("Cauxos", "Test whether the serial port can accept output"),
+    0x14: ("Maddalt", "Add alternative RAM to the GEMDOS pool"),
+    0x19: ("Dgetdrv", "Return the default drive"),
+    0x1A: ("Fsetdta", "Set the disk transfer address"),
+    0x20: ("Super", "Enter or leave supervisor mode"),
+    0x2A: ("Tgetdate", "Read the system date"),
+    0x2B: ("Tsetdate", "Set the system date"),
+    0x2C: ("Tgettime", "Read the system time"),
+    0x2D: ("Tsettime", "Set the system time"),
+    0x2F: ("Fgetdta", "Return the disk transfer address"),
+    0x30: ("Sversion", "Return the GEMDOS version"),
+    0x31: ("Ptermres", "Terminate and stay resident"),
+    0x36: ("Dfree", "Report free space on a drive"),
+    0x39: ("Dcreate", "Create a folder"),
+    0x3A: ("Ddelete", "Delete a folder"),
+    0x3B: ("Dsetpath", "Set the current folder"),
+    0x3C: ("Fcreate", "Create a file"),
+    0x3D: ("Fopen", "Open a file"),
+    0x3E: ("Fclose", "Close a file"),
+    0x3F: ("Fread", "Read from a file"),
+    0x40: ("Fwrite", "Write to a file"),
+    0x41: ("Fdelete", "Delete a file"),
+    0x42: ("Fseek", "Move the file position"),
+    0x43: ("Fattrib", "Read or set file attributes"),
+    0x44: ("Mxalloc", "Allocate memory of a requested type"),
+    0x45: ("Fdup", "Duplicate a file handle"),
+    0x46: ("Fforce", "Redirect a standard handle"),
+    0x47: ("Dgetpath", "Return the current folder"),
+    0x48: ("Malloc", "Allocate memory"),
+    0x49: ("Mfree", "Free memory"),
+    0x4A: ("Mshrink", "Shrink a memory block"),
+    0x4B: ("Pexec", "Load or execute a program"),
+    0x4C: ("Pterm", "Terminate the process with an exit code"),
+    0x4E: ("Fsfirst", "Find the first matching directory entry"),
+    0x4F: ("Fsnext", "Find the next matching directory entry"),
+    0x56: ("Frename", "Rename a file"),
+    0x57: ("Fdatime", "Read or set a file's date and time"),
 }
 
-DOS_LVOS = {
-    -30: ("Open", "Open a file"),
-    -36: ("Close", "Close a file"),
-    -42: ("Read", "Read from a file handle"),
-    -48: ("Write", "Write to a file handle"),
-    -54: ("Input", "Return the standard input handle"),
-    -60: ("Output", "Return the standard output handle"),
-    -66: ("Seek", "Move a file's position"),
-    -72: ("DeleteFile", "Delete a file"),
-    -78: ("Rename", "Rename a file"),
-    -84: ("Lock", "Lock a file or drawer"),
-    -90: ("UnLock", "Release a lock"),
-    -96: ("DupLock", "Duplicate a lock"),
-    -102: ("Examine", "Read a lock's FileInfoBlock"),
-    -108: ("ExNext", "Read the next directory entry"),
-    -114: ("Info", "Report a volume's free space"),
-    -120: ("CreateDir", "Create a drawer"),
-    -126: ("CurrentDir", "Change the current drawer"),
-    -132: ("IoErr", "Return the last error code"),
-    -138: ("CreateProc", "Create a process"),
-    -144: ("Exit", "Exit the current process"),
-    -150: ("LoadSeg", "Load an executable into memory"),
-    -156: ("UnLoadSeg", "Unload a loaded segment"),
-    -174: ("DeviceProc", "Find a device's handler process"),
-    -180: ("SetComment", "Set a file's comment"),
-    -186: ("SetProtection", "Set a file's protection bits"),
-    -192: ("DateStamp", "Read the system date and time"),
-    -198: ("Delay", "Wait for a number of ticks"),
-    -204: ("WaitForChar", "Wait for input with a timeout"),
-    -210: ("ParentDir", "Return a lock on the parent drawer"),
-    -216: ("IsInteractive", "Test whether a handle is a console"),
-    -222: ("Execute", "Run a command line"),
+BIOS_CALLS = {
+    0: ("Getmpb", "Fill in the memory parameter block"),
+    1: ("Bconstat", "Test whether a device has a character waiting"),
+    2: ("Bconin", "Read a character from a device"),
+    3: ("Bconout", "Write a character to a device"),
+    4: ("Rwabs", "Read or write disk sectors"),
+    5: ("Setexc", "Read or set an exception vector"),
+    6: ("Tickcal", "Return the system timer period"),
+    7: ("Getbpb", "Return a drive's BIOS parameter block"),
+    8: ("Bcostat", "Test whether a device can accept output"),
+    9: ("Mediach", "Report whether the medium changed"),
+    10: ("Drvmap", "Return the bitmap of connected drives"),
+    11: ("Kbshift", "Read or set the keyboard shift state"),
 }
 
-GRAPHICS_LVOS = {
-    -30: ("BltBitMap", "Blit between bitmaps"),
-    -228: ("LoadView", "Install a view"),
-    -240: ("WaitBlit", "Wait for the blitter"),
-    -246: ("SetRast", "Fill a raster with a colour"),
-    -270: ("Text", "Render text into a RastPort"),
-    -282: ("SetFont", "Select a font"),
-    -288: ("OpenFont", "Open a font"),
-    -294: ("CloseFont", "Close a font"),
-    -306: ("Move", "Move the graphics pen"),
-    -312: ("Draw", "Draw a line"),
-    -324: ("AreaDraw", "Add a vertex to an area fill"),
-    -330: ("AreaEnd", "Complete an area fill"),
-    -354: ("SetAPen", "Set the primary drawing pen"),
-    -360: ("SetBPen", "Set the secondary drawing pen"),
-    -366: ("SetDrMd", "Set the drawing mode"),
-    -558: ("OwnBlitter", "Take exclusive use of the blitter"),
-    -564: ("DisownBlitter", "Release the blitter"),
+XBIOS_CALLS = {
+    0: ("Initmous", "Initialise the mouse"),
+    1: ("Ssbrk", "Reserve memory at the top of RAM"),
+    2: ("Physbase", "Return the physical screen address"),
+    3: ("Logbase", "Return the logical screen address"),
+    4: ("Getrez", "Return the screen resolution"),
+    5: ("Setscreen", "Set the screen addresses and resolution"),
+    6: ("Setpalette", "Load the colour palette"),
+    7: ("Setcolor", "Read or set one palette entry"),
+    8: ("Floprd", "Read floppy sectors"),
+    9: ("Flopwr", "Write floppy sectors"),
+    10: ("Flopfmt", "Format a floppy track"),
+    11: ("Dbmsg", "Send a debugger message"),
+    12: ("Midiws", "Write a MIDI string"),
+    13: ("Mfpint", "Set an MFP interrupt vector"),
+    14: ("Iorec", "Return a device's input record"),
+    15: ("Rsconf", "Configure the serial port"),
+    16: ("Keytbl", "Set the keyboard translation tables"),
+    17: ("Random", "Return a pseudo-random number"),
+    18: ("Protobt", "Build a floppy boot sector"),
+    19: ("Flopver", "Verify floppy sectors"),
+    20: ("Scrdmp", "Dump the screen to the printer"),
+    21: ("Cursconf", "Configure the text cursor"),
+    22: ("Settime", "Set the IKBD clock"),
+    23: ("Gettime", "Read the IKBD clock"),
+    24: ("Bioskeys", "Restore the default keyboard tables"),
+    25: ("Ikbdws", "Write a string to the keyboard controller"),
+    26: ("Jdisint", "Disable an MFP interrupt"),
+    27: ("Jenabint", "Enable an MFP interrupt"),
+    28: ("Giaccess", "Read or write a PSG register"),
+    29: ("Offgibit", "Clear a PSG port A bit"),
+    30: ("Ongibit", "Set a PSG port A bit"),
+    31: ("Xbtimer", "Program an MFP timer"),
+    32: ("Dosound", "Start a sound command sequence"),
+    33: ("Setprt", "Read or set the printer configuration"),
+    34: ("Kbdvbase", "Return the keyboard vector table"),
+    35: ("Kbrate", "Set the key repeat rate"),
+    36: ("Prtblk", "Print a block of memory"),
+    37: ("Vsync", "Wait for the next vertical blank"),
+    38: ("Supexec", "Run a routine in supervisor mode"),
+    39: ("Puntaes", "Discard the AES and reboot"),
+    41: ("Floprate", "Set the floppy seek rate"),
+    42: ("DMAread", "Read ACSI sectors"),
+    43: ("DMAwrite", "Write ACSI sectors"),
+    44: ("Bconmap", "Map a serial device to a BIOS handle"),
+    46: ("NVMaccess", "Read or write non-volatile memory"),
+    64: ("Blitmode", "Read or set the blitter mode"),
+    80: ("EsetShift", "Set the STE shifter mode"),
+    81: ("EgetShift", "Read the STE shifter mode"),
+    82: ("EsetBank", "Set the STE palette bank"),
+    83: ("EsetColor", "Set one STE palette entry"),
+    84: ("EsetPalette", "Load an STE palette bank"),
+    85: ("EgetPalette", "Read an STE palette bank"),
+    86: ("EsetGray", "Set grey-scale mode"),
+    87: ("EsetSmear", "Set smear mode"),
+    88: ("VsetMode", "Set the Falcon video mode"),
+    89: ("VgetMonitor", "Return the Falcon monitor type"),
+    90: ("VsetSync", "Set the Falcon video sync"),
+    91: ("VgetSize", "Return the screen size for a mode"),
+    93: ("VsetRGB", "Set Falcon palette entries"),
+    94: ("VgetRGB", "Read Falcon palette entries"),
+    128: ("Locksnd", "Lock the sound system"),
+    129: ("Unlocksnd", "Unlock the sound system"),
+    130: ("Soundcmd", "Configure the sound system"),
+    131: ("Setbuffer", "Set the sound buffer addresses"),
+    132: ("Setmode", "Set the sound sample format"),
+    133: ("Settracks", "Set the number of sound tracks"),
+    134: ("Setmontracks", "Set the monitored sound tracks"),
+    135: ("Setinterrupt", "Set the sound interrupt"),
+    136: ("Buffoper", "Start or stop sound buffers"),
+    137: ("Dsptristate", "Tristate the DSP connections"),
+    138: ("Gpio", "Read or write the DSP port GPIO pins"),
+    139: ("Devconnect", "Connect sound devices"),
+    140: ("Sndstatus", "Report the sound system status"),
+    141: ("Buffptr", "Read the sound buffer positions"),
 }
 
-INTUITION_LVOS = {
-    -30: ("OpenIntuition", "Open Intuition, 1.0 compatible"),
-    -36: ("Intuition", "Feed an input event to Intuition"),
-    -60: ("ClearMenuStrip", "Detach a window's menus"),
-    -72: ("CloseWindow", "Close a window"),
-    -78: ("CloseWorkBench", "Close the Workbench screen"),
-    -198: ("OpenScreen", "Open a screen"),
-    -204: ("OpenWindow", "Open a window"),
-    -210: ("PrintIText", "Render an IntuiText structure"),
-    -222: ("RefreshGadgets", "Redraw a gadget list"),
-    -264: ("SetMenuStrip", "Attach menus to a window"),
-    -270: ("SetPointer", "Set a window's mouse pointer"),
-    -276: ("SetWindowTitles", "Change a window's titles"),
-    -342: ("DisplayBeep", "Flash the screen"),
-    -348: ("AutoRequest", "Show a simple requester"),
-    -462: ("CloseScreen", "Close a screen"),
+#: The selector in D0 when ``TRAP #2`` is taken.
+GEM_SELECTORS = {
+    0x73: ("VDI", "Call the VDI with the parameter block in D1"),
+    0xC8: ("AES", "Call the AES with the parameter block in D1"),
+    0xC9: ("AES", "Call the AES, application-level entry"),
+    0xFFFF: ("GEM query", "Return the GEM dispatcher address in D0"),
 }
 
-#: The library a call belongs to cannot be known from the offset alone, so the
-#: annotator reports the exec meaning by default and names the others when the
-#: surrounding code proves which base is in A6.
-LIBRARY_LVOS = {
-    "exec.library": EXEC_LVOS,
-    "dos.library": DOS_LVOS,
-    "graphics.library": GRAPHICS_LVOS,
-    "intuition.library": INTUITION_LVOS,
+#: Which table each TRAP dispatches through.
+TRAP_TABLES = {
+    1: ("GEMDOS", GEMDOS_CALLS),
+    13: ("BIOS", BIOS_CALLS),
+    14: ("XBIOS", XBIOS_CALLS),
 }
 
 
@@ -276,64 +261,119 @@ BRANCH_MEANINGS = {
 
 RETURN_MNEMONICS = {"RTS", "RTE", "RTR", "RTD"}
 
-#: The Atari's memory map, as a real machine decodes it.
+#: The ST memory map, as a real machine decodes it.
 HARDWARE_REGIONS = (
-    (0x000000, 0x1FFFFF, "Chip RAM"),
-    (0x200000, 0x9FFFFF, "Zorro II expansion space"),
-    (0xA00000, 0xBEFFFF, "reserved expansion space"),
-    (0xBFD000, 0xBFDF00, "CIA-B (8520, timers and disk control)"),
-    (0xBFE001, 0xBFEF01, "CIA-A (8520, keyboard and parallel port)"),
-    (0xC00000, 0xD7FFFF, "Slow (ranger) RAM"),
-    (0xDC0000, 0xDC003F, "battery-backed clock"),
-    (0xDFF000, 0xDFF1FE, "custom chips (Agnus, Denise, Paula)"),
-    (0xE80000, 0xE8FFFF, "Autoconfig expansion board space"),
-    (0xF00000, 0xF7FFFF, "extended ROM"),
-    (0xF80000, 0xFFFFFF, "Kickstart ROM"),
+    (0x000000, 0x0003FF, "68000 exception vectors"),
+    (0x000400, 0x0005FF, "TOS system variables"),
+    (0x000600, 0x3FFFFF, "ST RAM"),
+    (0x400000, 0xDFFFFF, "TT RAM and expansion space"),
+    (0xE00000, 0xEFFFFF, "TOS ROM (256 KiB and 512 KiB images)"),
+    (0xF00000, 0xF9FFFF, "IDE and VME space"),
+    (0xFA0000, 0xFBFFFF, "cartridge port"),
+    (0xFC0000, 0xFEFFFF, "TOS ROM (192 KiB image)"),
+    (0xFF8000, 0xFF800F, "MMU memory configuration"),
+    (0xFF8200, 0xFF823F, "shifter video control"),
+    (0xFF8240, 0xFF825F, "shifter palette"),
+    (0xFF8260, 0xFF827F, "shifter resolution"),
+    (0xFF8600, 0xFF860F, "DMA, FDC and ACSI"),
+    (0xFF8800, 0xFF8803, "PSG (YM2149) sound"),
+    (0xFF8900, 0xFF893F, "STE DMA sound"),
+    (0xFF8A00, 0xFF8A3F, "blitter"),
+    (0xFF8C80, 0xFF8C8F, "SCC serial (Mega STE and TT)"),
+    (0xFF9200, 0xFF923F, "STE joypads and paddles"),
+    (0xFFFA00, 0xFFFA3F, "MFP 68901"),
+    (0xFFFC00, 0xFFFC07, "ACIAs (keyboard and MIDI)"),
+    (0xFFFC20, 0xFFFC3F, "real-time clock (Mega ST)"),
 )
 
-#: The custom-chip registers a ROM touches most, by their hardware address.
-CUSTOM_REGISTERS = {
-    0xDFF000: "BLTDDAT", 0xDFF002: "DMACONR", 0xDFF004: "VPOSR",
-    0xDFF006: "VHPOSR", 0xDFF00A: "JOY0DAT", 0xDFF00C: "JOY1DAT",
-    0xDFF010: "ADKCONR", 0xDFF016: "POTGOR", 0xDFF01A: "DSKBYTR",
-    0xDFF01C: "INTENAR", 0xDFF01E: "INTREQR", 0xDFF020: "DSKPTH",
-    0xDFF024: "DSKLEN", 0xDFF02A: "VPOSW", 0xDFF034: "POTGO",
-    0xDFF03E: "COPCON", 0xDFF040: "BLTCON0", 0xDFF042: "BLTCON1",
-    0xDFF058: "BLTSIZE", 0xDFF080: "COP1LCH", 0xDFF084: "COP2LCH",
-    0xDFF088: "COPJMP1", 0xDFF08A: "COPJMP2", 0xDFF08E: "DIWSTRT",
-    0xDFF090: "DIWSTOP", 0xDFF092: "DDFSTRT", 0xDFF094: "DDFSTOP",
-    0xDFF096: "DMACON", 0xDFF09A: "INTENA", 0xDFF09C: "INTREQ",
-    0xDFF09E: "ADKCON", 0xDFF0A0: "AUD0LCH", 0xDFF100: "BPLCON0",
-    0xDFF102: "BPLCON1", 0xDFF104: "BPLCON2", 0xDFF108: "BPL1MOD",
-    0xDFF10A: "BPL2MOD", 0xDFF180: "COLOR00", 0xDFF182: "COLOR01",
-    0xDFF1FC: "FMODE",
+#: The hardware registers a ROM touches most, by their bus address.
+HARDWARE_REGISTERS = {
+    0xFF8001: "MMU memory configuration",
+    0xFF8201: "video base high", 0xFF8203: "video base mid",
+    0xFF8205: "video counter high", 0xFF8207: "video counter mid", 0xFF8209: "video counter low",
+    0xFF820A: "sync mode", 0xFF820D: "video base low (STE)", 0xFF820F: "line width (STE)",
+    0xFF8240: "palette colour 0", 0xFF8242: "palette colour 1", 0xFF8244: "palette colour 2",
+    0xFF8246: "palette colour 3", 0xFF8248: "palette colour 4", 0xFF824A: "palette colour 5",
+    0xFF824C: "palette colour 6", 0xFF824E: "palette colour 7", 0xFF8250: "palette colour 8",
+    0xFF8252: "palette colour 9", 0xFF8254: "palette colour 10", 0xFF8256: "palette colour 11",
+    0xFF8258: "palette colour 12", 0xFF825A: "palette colour 13", 0xFF825C: "palette colour 14",
+    0xFF825E: "palette colour 15", 0xFF8260: "shifter resolution", 0xFF8265: "horizontal scroll (STE)",
+    0xFF8604: "DMA data / FDC access", 0xFF8606: "DMA mode / status",
+    0xFF8609: "DMA base high", 0xFF860B: "DMA base mid", 0xFF860D: "DMA base low",
+    0xFF8800: "PSG register select / read", 0xFF8802: "PSG register write",
+    0xFF8900: "DMA sound control", 0xFF8921: "DMA sound mode",
+    0xFF8A00: "blitter halftone RAM", 0xFF8A3A: "blitter skew", 0xFF8A3C: "blitter line number / control",
+    0xFFFA01: "MFP GPIP", 0xFFFA03: "MFP active edge", 0xFFFA05: "MFP data direction",
+    0xFFFA07: "MFP interrupt enable A", 0xFFFA09: "MFP interrupt enable B",
+    0xFFFA0B: "MFP interrupt pending A", 0xFFFA0D: "MFP interrupt pending B",
+    0xFFFA0F: "MFP in-service A", 0xFFFA11: "MFP in-service B",
+    0xFFFA13: "MFP interrupt mask A", 0xFFFA15: "MFP interrupt mask B",
+    0xFFFA17: "MFP vector register", 0xFFFA19: "MFP timer A control",
+    0xFFFA1B: "MFP timer B control", 0xFFFA1D: "MFP timer C and D control",
+    0xFFFA1F: "MFP timer A data", 0xFFFA21: "MFP timer B data",
+    0xFFFA23: "MFP timer C data", 0xFFFA25: "MFP timer D data",
+    0xFFFA27: "MFP sync character", 0xFFFA29: "MFP USART control",
+    0xFFFA2B: "MFP receiver status", 0xFFFA2D: "MFP transmitter status",
+    0xFFFA2F: "MFP USART data",
+    0xFFFC00: "keyboard ACIA control / status", 0xFFFC02: "keyboard ACIA data",
+    0xFFFC04: "MIDI ACIA control / status", 0xFFFC06: "MIDI ACIA data",
 }
 
-#: The 68000 exception vectors, which live in the first kilobyte of Chip RAM.
+#: The 68000 exception vectors and the TOS uses of the TRAP and MFP vectors.
 EXCEPTION_VECTORS = {
     0x000: "Initial SSP", 0x004: "Initial PC", 0x008: "Bus error",
     0x00C: "Address error", 0x010: "Illegal instruction", 0x014: "Divide by zero",
     0x018: "CHK instruction", 0x01C: "TRAPV instruction", 0x020: "Privilege violation",
-    0x024: "Trace", 0x028: "Line-A emulator", 0x02C: "Line-F emulator",
-    0x060: "Spurious interrupt", 0x064: "Level 1 autovector (soft/DSK/TBE)",
-    0x068: "Level 2 autovector (CIA-A / ports)", 0x06C: "Level 3 autovector (COPER/VERTB/BLIT)",
-    0x070: "Level 4 autovector (audio)", 0x074: "Level 5 autovector (DSKSYN/RBF)",
-    0x078: "Level 6 autovector (CIA-B / EXTER)", 0x07C: "Level 7 autovector (NMI)",
+    0x024: "Trace", 0x028: "Line-A (VDI fast graphics)", 0x02C: "Line-F",
+    0x060: "Spurious interrupt", 0x064: "Level 1 autovector",
+    0x068: "Level 2 autovector (HBL)", 0x06C: "Level 3 autovector",
+    0x070: "Level 4 autovector (VBL)", 0x074: "Level 5 autovector",
+    0x078: "Level 6 autovector (MFP)", 0x07C: "Level 7 autovector (NMI)",
+    0x080: "TRAP #0", 0x084: "TRAP #1 (GEMDOS)", 0x088: "TRAP #2 (AES and VDI)",
+    0x08C: "TRAP #3", 0x090: "TRAP #4", 0x094: "TRAP #5", 0x098: "TRAP #6",
+    0x09C: "TRAP #7", 0x0A0: "TRAP #8", 0x0A4: "TRAP #9", 0x0A8: "TRAP #10",
+    0x0AC: "TRAP #11", 0x0B0: "TRAP #12", 0x0B4: "TRAP #13 (BIOS)",
+    0x0B8: "TRAP #14 (XBIOS)", 0x0BC: "TRAP #15",
+    0x100: "MFP parallel port busy", 0x104: "MFP RS232 DCD", 0x108: "MFP RS232 CTS",
+    0x10C: "MFP blitter done", 0x110: "MFP timer D (RS232 baud)", 0x114: "MFP timer C (200 Hz)",
+    0x118: "MFP ACIA (keyboard and MIDI)", 0x11C: "MFP FDC and ACSI", 0x120: "MFP timer B (HBL)",
+    0x124: "MFP RS232 transmit error", 0x128: "MFP RS232 transmit buffer empty",
+    0x12C: "MFP RS232 receive error", 0x130: "MFP RS232 receive buffer full",
+    0x134: "MFP timer A (DMA sound)", 0x138: "MFP RS232 ring indicator",
+    0x13C: "MFP monochrome monitor detect",
 }
 
-#: Retained under the previous name so the annotator's call sites are stable.
-MOS_VECTORS = EXCEPTION_VECTORS
-MOS_CALLS = {offset: name for offset, (name, _summary) in EXEC_LVOS.items()}
-MOS_PURPOSES = {offset: summary for offset, (_name, summary) in EXEC_LVOS.items()}
+#: The TOS system variables at $380 to $5FF.
+SYSTEM_VARIABLES = {
+    0x380: "proc_lives", 0x384: "proc_dregs", 0x3A4: "proc_aregs", 0x3C4: "proc_enum",
+    0x3C8: "proc_usp", 0x3CC: "proc_stk", 0x400: "etv_timer", 0x404: "etv_critic",
+    0x408: "etv_term", 0x40C: "etv_xtra", 0x420: "memvalid", 0x424: "memcntlr",
+    0x426: "resvalid", 0x42A: "resvector", 0x42E: "phystop", 0x432: "_membot",
+    0x436: "_memtop", 0x43A: "memval2", 0x43E: "flock", 0x440: "seekrate",
+    0x442: "_timr_ms", 0x444: "_fverify", 0x446: "_bootdev", 0x448: "palmode",
+    0x44A: "defshiftmd", 0x44C: "sshiftmd", 0x44E: "_v_bas_ad", 0x452: "vblsem",
+    0x454: "nvbls", 0x456: "_vblqueue", 0x45A: "colorptr", 0x45E: "screenpt",
+    0x462: "_vbclock", 0x466: "_frclock", 0x46A: "hdv_init", 0x46E: "swv_vec",
+    0x472: "hdv_bpb", 0x476: "hdv_rw", 0x47A: "hdv_boot", 0x47E: "hdv_mediach",
+    0x482: "_cmdload", 0x484: "conterm", 0x48E: "themd", 0x49E: "___md",
+    0x4A2: "savptr", 0x4A6: "_nflops", 0x4A8: "con_state", 0x4AC: "save_row",
+    0x4AE: "sav_context", 0x4B2: "_bufl", 0x4BA: "_hz_200", 0x4BE: "the_env",
+    0x4C2: "_drvbits", 0x4C6: "_dskbufp", 0x4CA: "_autopath", 0x4CE: "_vbl_list",
+    0x4EE: "_dumpflg", 0x4F0: "_prtabt", 0x4F2: "_sysbase", 0x4F6: "_shell_p",
+    0x4FA: "end_os", 0x4FE: "exec_os", 0x502: "scr_dump", 0x506: "prv_lsto",
+    0x50A: "prv_lst", 0x50E: "prv_auxo", 0x512: "prv_aux", 0x516: "pun_ptr",
+    0x51A: "memval3", 0x51E: "xconstat", 0x53E: "xconin", 0x55E: "xcostat",
+    0x57E: "xconout", 0x59E: "_longframe", 0x5A0: "_p_cookies", 0x5A4: "ramtop",
+    0x5A8: "ramvalid", 0x5AC: "bell_hook", 0x5B0: "kcl_hook",
+}
 
 
 def _hex_value(operand: str) -> int | None:
     """Parse the first numeric literal in a Capstone operand string.
 
-    Capstone renders operands in many shapes -- ``#$1F``, ``$dff180.l``,
-    ``-$228(a6)``, ``$f80014(pc)`` -- so the value is extracted by pattern
-    rather than by trimming, which is what made the earlier version silently
-    return nothing for program-counter-relative addresses.
+    Capstone renders operands in many shapes -- ``#$1F``, ``$ff8240.l``,
+    ``-$228(a6)``, ``$e00014(pc)`` -- so the value is extracted by pattern
+    rather than by trimming.
     """
     match = re.search(r"(-?)\$([0-9A-Fa-f]+)|(-?)\b(\d+)\b", str(operand or ""))
     if not match:
@@ -346,12 +386,7 @@ def _hex_value(operand: str) -> int | None:
 
 
 def _hex_values(operand: str) -> list[int]:
-    """Return every numeric literal in an operand, in the order they appear.
-
-    ``MOVE.W #$0FFF,$DFF180`` carries two: the immediate and the destination.
-    Only the second identifies a hardware register, so the annotator needs to
-    see both rather than only the first.
-    """
+    """Return every numeric literal in an operand, in the order they appear."""
     values: list[int] = []
     for match in re.finditer(r"(-?)\$([0-9A-Fa-f]+)|(-?)\b(\d+)\b", str(operand or "")):
         if match.group(2) is not None:
@@ -363,25 +398,31 @@ def _hex_values(operand: str) -> list[int]:
     return values
 
 
+_ABSOLUTE = re.compile(r"(?<![#(\w])\$([0-9A-Fa-f]+)(\.[wlWL])?(?![\w(])")
+
+
+def _absolute_addresses(operand: str) -> list[int]:
+    """Return the 24-bit bus addresses of the absolute operands in a string.
+
+    An immediate (``#$...``) and a displacement (``$...(a0)``) are not
+    addresses. A short absolute operand is sign-extended by the processor, so
+    ``$8240.w`` reaches ``$FF8240``; a long one is masked to the 24 lines an
+    ST actually drives, so ``$ffff8240.l`` lands on the same register.
+    """
+    found: list[int] = []
+    for match in _ABSOLUTE.finditer(str(operand or "")):
+        value = int(match.group(1), 16)
+        size = (match.group(2) or "").lower()
+        if size == ".w" and value >= 0x8000:
+            value |= 0xFFFF0000
+        found.append(value & 0xFFFFFF)
+    return found
+
+
 def _character(value: int | None) -> str:
     if value is None or not 32 <= value <= 126:
         return ""
     return f"'{chr(value)}'"
-
-
-def _cstring(data: bytes, origin: int, address: int | None, limit: int = 120) -> str:
-    if address is None:
-        return ""
-    offset = address - origin
-    if not 0 <= offset < len(data):
-        return ""
-    end = data.find(b"\0", offset, min(len(data), offset + limit))
-    if end < 0:
-        return ""
-    raw = data[offset:end]
-    if not raw or any(byte < 32 or byte > 126 for byte in raw):
-        return ""
-    return raw.decode("latin-1")
 
 
 def _hardware_region(address: int | None) -> str:
@@ -392,38 +433,69 @@ def _hardware_region(address: int | None) -> str:
     )
 
 
-def _library_vector(operand: str) -> int | None:
-    """Return the LVO offset when an operand addresses a library base in A6.
+def _trap_number(operand: str) -> int | None:
+    value = _hex_value(operand)
+    return value if value is not None and 0 <= value <= 15 else None
 
-    Capstone renders the call as ``-$0228(a6)``. Only negative displacements
-    through A6 are treated as library vectors, because that is the calling
-    convention every Atari library uses and the one thing that distinguishes a
-    vector call from an ordinary structure access.
+
+def _pushed_word(mnemonic: str, compact: str, operand: str) -> int | None:
+    """Return the immediate when the row is ``MOVE.W #imm,-(SP)``."""
+    if mnemonic != "MOVE" or not compact.startswith("#") or not compact.endswith(("-(a7)", "-(sp)")):
+        return None
+    value = _hex_value(operand)
+    return value & 0xFFFF if value is not None else None
+
+
+def _loaded_d0(mnemonic: str, compact: str, operand: str) -> int | None:
+    """Return the immediate when the row is ``MOVE.L #imm,D0`` or ``MOVEQ #imm,D0``."""
+    if mnemonic not in {"MOVE", "MOVEQ"} or not compact.startswith("#") or not compact.endswith(",d0"):
+        return None
+    value = _hex_value(operand)
+    return value & 0xFFFF if value is not None else None
+
+
+def _trap_call(trap: int, function: int | None, selector: int | None) -> tuple[str, str]:
+    """Name a system call from the TRAP number and the word pushed before it.
+
+    Returns the short label used for routine names and the full comment.
     """
-    text = str(operand or "").strip().lower()
-    if not text.endswith("(a6)"):
-        return None
-    displacement = text[: -len("(a6)")].strip()
-    if not displacement.startswith("-"):
-        return None
-    value = _hex_value(displacement)
-    if value is None or value >= 0 or value % 6:
-        return None
-    return value
-
-
-def _library_call_comment(offset: int, library: str | None) -> str:
-    """Describe a library vector call, naming the library when it is known."""
-    table = LIBRARY_LVOS.get(library or "", EXEC_LVOS)
-    entry = table.get(offset)
-    if entry is None and library:
-        entry = EXEC_LVOS.get(offset)
-        library = "exec.library"
+    if trap == 2:
+        if selector is None:
+            return "gem_call", "AES or VDI call through TRAP #2 (selector in D0 not visible here)"
+        name, summary = GEM_SELECTORS.get(selector, (f"TRAP #2 selector ${selector:X}", "Call the GEM dispatcher"))
+        return name.lower().replace(" ", "_"), f"{name}: {summary}"
+    table = TRAP_TABLES.get(trap)
+    if table is None:
+        return f"trap_{trap}", f"TRAP #{trap}: not a TOS system call vector"
+    system, calls = table
+    if function is None:
+        return system.lower(), f"{system} call through TRAP #{trap} (function number not visible here)"
+    entry = calls.get(function)
     if entry is None:
-        return f"Call library vector {offset} through A6"
+        return f"{system.lower()}_{function:02x}", f"{system} function ${function:02X}: not a documented call"
     name, summary = entry
-    prefix = f"{library} " if library else ""
-    return f"{prefix}{name}: {summary}"
+    return name.lower(), f"{system} {name} (${function:02X}): {summary}"
+
+
+def _trap_in_block(block: list[dict]) -> str | None:
+    """Return the short label of the first named system call in a routine."""
+    function: int | None = None
+    selector: int | None = None
+    for row in block:
+        mnemonic = base_mnemonic(row.get("mnemonic"))
+        operand = str(row.get("operand") or "")
+        compact = operand.replace(" ", "").lower()
+        pushed = _pushed_word(mnemonic, compact, operand)
+        if pushed is not None:
+            function = pushed
+        loaded = _loaded_d0(mnemonic, compact, operand)
+        if loaded is not None:
+            selector = loaded
+        if mnemonic == "TRAP":
+            trap = _trap_number(operand)
+            if trap is not None:
+                return _trap_call(trap, function, selector)[0]
+    return None
 
 
 def _semantic_68000_labels(report: dict) -> None:
@@ -460,32 +532,25 @@ def _semantic_68000_labels(report: dict) -> None:
             continue
         block = routine_rows(target)
         endings = {base_mnemonic(row.get("mnemonic")) for row in block}
-        vectors = [
-            _library_vector(str(row.get("operand") or ""))
-            for row in block
-            if row.get("mnemonic") in call_mnemonics
-        ]
-        vectors = [value for value in vectors if value is not None]
         backwards_branch = any(
             isinstance(row.get("target"), int) and int(row["target"]) <= int(row["address"])
             for row in block
             if base_mnemonic(row.get("mnemonic")) in BRANCH_MEANINGS
         )
+        system_call = _trap_in_block(block)
         if "RTE" in endings:
-            purpose = "interrupt_handler"
-        elif "TRAP" in endings:
-            purpose = "raise_exception"
-        elif vectors:
-            name = EXEC_LVOS.get(vectors[0], ("library_call",))[0]
-            purpose = f"call_{name.lower()}"
+            purpose = "exception_handler"
+        elif system_call:
+            purpose = f"call_{system_call}"
         elif backwards_branch:
             purpose = "loop_routine"
         else:
             hardware = next(
                 (
-                    _hardware_region(int(row["target"]))
+                    _hardware_region(address)
                     for row in block
-                    if isinstance(row.get("target"), int) and _hardware_region(int(row["target"]))
+                    for address in _absolute_addresses(str(row.get("operand") or ""))
+                    if address >= 0xFF8000
                 ),
                 "",
             )
@@ -528,10 +593,11 @@ def base_mnemonic(mnemonic: str) -> str:
 def _annotate_68000(report: dict, data: bytes) -> dict:
     """Explain a 68000 listing in Atari terms.
 
-    The two things that make Atari machine code readable are knowing which
-    library vector a call goes through, and knowing which chip a memory
-    reference touches. Both are tracked here: the library base most recently
-    loaded into A6, and the address ranges the hardware decodes.
+    The two things that make TOS machine code readable are knowing which
+    system call a ``TRAP`` makes, and knowing which chip a memory reference
+    touches. Both are tracked here: the function word pushed before the TRAP
+    (and the selector loaded into D0 for ``TRAP #2``), and the address ranges
+    the ST hardware decodes.
     """
     rows = report["rows"]
     by_address = {int(row["address"]): row for row in rows}
@@ -562,9 +628,8 @@ def _annotate_68000(report: dict, data: bytes) -> dict:
         ):
             row["operand"] = by_address[target].get("label") or row["operand"]
 
-    origin = int(report["origin"])
-    library_in_a6: str | None = None
-    pending_library: str | None = None
+    function: int | None = None
+    selector: int | None = None
     for row in rows:
         mnemonic = base_mnemonic(row.get("mnemonic"))
         # Capstone spaces its operands; compare against a space-free form so a
@@ -574,22 +639,27 @@ def _annotate_68000(report: dict, data: bytes) -> dict:
         target = row.get("target")
         comment = ""
 
-        # Track which library base is in A6. The name comes from the string an
-        # OpenLibrary call was given, which is the only place it appears.
-        if mnemonic.startswith("LEA") and compact.endswith(",a1"):
-            text = _cstring(data, origin, _hex_value(operand))
-            if text.endswith(".library"):
-                pending_library = text
-        if mnemonic.startswith("MOVE") and compact.endswith(",a6"):
-            library_in_a6 = pending_library
-        if mnemonic in {"JSR", "BSR"}:
-            vector = _library_vector(operand)
-            if vector is not None:
-                comment = _library_call_comment(vector, library_in_a6)
-                if library_in_a6 == "exec.library" and vector in (-552, -408):
-                    library_in_a6 = pending_library
-            elif isinstance(target, int):
+        pushed = _pushed_word(mnemonic, compact, operand)
+        loaded = _loaded_d0(mnemonic, compact, operand)
+        if pushed is not None:
+            function = pushed
+            comment = f"Push function number ${pushed:02X} for the next TRAP"
+        elif loaded is not None and mnemonic in {"MOVE", "MOVEQ"}:
+            selector = loaded
+            if loaded in GEM_SELECTORS:
+                comment = f"Select the {GEM_SELECTORS[loaded][0]} entry for TRAP #2"
+        if mnemonic == "TRAP":
+            trap = _trap_number(operand)
+            if trap is not None:
+                comment = _trap_call(trap, function, selector)[1]
+            else:
+                comment = "Raise a processor trap"
+            function = None
+            selector = None
+        elif mnemonic in {"JSR", "BSR"}:
+            if isinstance(target, int):
                 comment = f"Call subroutine {operand}"
+            function = None
         elif mnemonic in BRANCH_MEANINGS:
             comment = f"{BRANCH_MEANINGS[mnemonic]} to {operand}"
         elif mnemonic == "JMP":
@@ -601,38 +671,35 @@ def _annotate_68000(report: dict, data: bytes) -> dict:
                 "RTR": "Return and restore condition codes",
                 "RTD": "Return and deallocate stack",
             }[mnemonic]
-        elif mnemonic.startswith("TRAP"):
-            comment = "Raise a processor trap"
-        elif mnemonic.startswith(("MOVE", "BTST", "BSET", "BCLR", "BCHG", "AND", "OR")):
-            literals = _hex_values(operand)
-            # Prefer a literal that names something, so an immediate operand
-            # does not hide the destination register beside it.
-            value = next(
+        elif not comment and mnemonic.startswith(("MOVE", "LEA", "PEA", "BTST", "BSET", "BCLR", "BCHG", "AND", "OR", "CLR", "TST", "ADD", "SUB", "CMP")):
+            addresses = _absolute_addresses(operand)
+            address = next(
                 (
                     candidate
-                    for candidate in literals
-                    if candidate in CUSTOM_REGISTERS or candidate in EXCEPTION_VECTORS
+                    for candidate in addresses
+                    if candidate in HARDWARE_REGISTERS
+                    or candidate in EXCEPTION_VECTORS
+                    or candidate in SYSTEM_VARIABLES
                 ),
-                literals[0] if literals else None,
+                addresses[0] if addresses else None,
             )
-            register = CUSTOM_REGISTERS.get(value) if value is not None else None
-            vector = EXCEPTION_VECTORS.get(value) if value is not None else None
-            region = _hardware_region(value)
-            if value == 4 and compact.endswith(",a6"):
-                # ``MOVEA.L $4.W,A6`` is the first instruction of almost every
-                # Atari program: absolute address 4 holds ExecBase.
-                comment = "Load ExecBase from absolute address 4 into A6"
-                library_in_a6 = "exec.library"
-                pending_library = "exec.library"
-            elif register:
-                comment = f"Access the {register} custom register at ${value:06X}"
+            register = HARDWARE_REGISTERS.get(address) if address is not None else None
+            vector = EXCEPTION_VECTORS.get(address) if address is not None else None
+            variable = SYSTEM_VARIABLES.get(address) if address is not None else None
+            region = _hardware_region(address)
+            if register:
+                comment = f"Access the {register} register at ${address:06X}"
             elif vector:
-                comment = f"Access the {vector} exception vector at ${value:03X}"
-            elif region and value is not None and value >= 0xBFD000:
-                comment = f"Access {region} at ${value:06X}"
-            elif operand.startswith("#") and value is not None:
-                display = _character(value)
-                comment = f"Load ${value:X}{f' ({display})' if display else ''}"
+                comment = f"Access the {vector} vector at ${address:03X}"
+            elif variable:
+                comment = f"Access the {variable} system variable at ${address:03X}"
+            elif region and address is not None and address >= 0xFF8000:
+                comment = f"Access {region} at ${address:06X}"
+            elif operand.startswith("#"):
+                value = _hex_value(operand)
+                if value is not None:
+                    display = _character(value)
+                    comment = f"Load ${value:X}{f' ({display})' if display else ''}"
         if comment:
             row["comment"] = comment
         else:
@@ -711,7 +778,7 @@ def _annotate_generic_control_flow(report: dict) -> dict:
     jump_names = {"B", "BRA", "BRL", "JMP", "JML"}
     for row in rows:
         target = row.get("target")
-        mnemonic = str(row.get("mnemonic") or "").upper()
+        mnemonic = base_mnemonic(row.get("mnemonic"))
         target_row = by_address.get(target) if isinstance(target, int) else None
         if target_row is not None and not target_row.get("label"):
             if mnemonic in call_names:
@@ -724,7 +791,7 @@ def _annotate_generic_control_flow(report: dict) -> dict:
                 purpose = "continue"
             target_row["label"] = f"{purpose}_{int(target):X}"
     for row in rows:
-        mnemonic = str(row.get("mnemonic") or "").upper()
+        mnemonic = base_mnemonic(row.get("mnemonic"))
         operand = str(row.get("operand") or "")
         target = row.get("target")
         target_row = by_address.get(target) if isinstance(target, int) else None
@@ -816,15 +883,16 @@ def disassemble(data: bytes, *, architecture: str, origin: int, start: int = 0,
 def bank_map(data: bytes, bank_size: int, erase_byte: int = 0xFF) -> dict:
     """Map each bank of a ROM image to the addresses it answers at.
 
-    A Kickstart image is mapped as one contiguous block at the base its size
+    A TOS image is mapped as one contiguous block at the base its size
     implies, so a bank's window is its file offset added to that base rather
     than a fixed paging window.
     """
     rows, hashes = [], {}
     base = rom_base(len(data))
+    image_header = parse_rom_header(data)
     for bank, offset in enumerate(range(0, len(data), bank_size)):
         block = data[offset:offset + bank_size]
-        decoded = inspect_bank(block, bank, erase_byte)
+        decoded = inspect_bank(block, bank, erase_byte, image_header)
         digest = decoded["diagnostics"]["sha256"]
         hashes.setdefault(digest, []).append(bank)
         rows.append({"bank": bank, "fileOffset": offset,
@@ -917,51 +985,60 @@ def audit_rom(data: bytes, bank_size: int, erase_byte: int = 0xFF) -> dict:
     if len(data) % bank_size:
         findings.append({"level": "warning", "code": "partial-bank", "message":
                          f"The final bank contains {len(data) % bank_size:,} bytes."})
+    image_header = parse_rom_header(data)
     for row in mapping["banks"]:
         block = data[row["fileOffset"]:row["fileOffset"] + bank_size]
-        decoded = inspect_bank(block, row["bank"], erase_byte)
+        decoded = inspect_bank(block, row["bank"], erase_byte, image_header)
         for warning in decoded["warnings"]:
-            findings.append({"level": "error", "code": "header-role", "bank": row["bank"], "message": warning})
-            if "header-role-flags" not in repairable:
-                repairable.append("header-role-flags")
+            findings.append({"level": "error", "code": "tos-header", "bank": row["bank"], "message": warning})
+        for note in decoded["notes"]:
+            findings.append({"level": "info", "code": "vector-install", "bank": row["bank"], "message": note})
         if row["duplicates"] and row["bank"] < min(row["duplicates"]):
             findings.append({"level": "info", "code": "duplicate-bank", "bank": row["bank"],
                              "message": f"Bank {row['bank']} is identical to bank(s) {', '.join(map(str, row['duplicates']))}."})
-    extension = parse_extended_rom_header(data)
-    if extension and not extension.checksum_valid:
-        findings.append({"level": "error", "code": "extension-checksum", "message":
-                         "The TOS extension-ROM checksum is invalid."})
-        repairable.append("extension-checksum")
+    if image_header is not None:
+        if not image_header.dates_agree and image_header.date:
+            findings.append({"level": "error", "code": "date-word", "message":
+                             "The GEMDOS date word at $1E does not match the BCD build date at $18."})
+            repairable.append("date-word")
+        if image_header.emutos:
+            findings.append({"level": "info", "code": "emutos", "message":
+                             f"This is EmuTOS {image_header.emutos_version or '(version unknown)'}; "
+                             f"the header carries compatibility version word ${image_header.version_word:04X}."})
     return {"healthy": not any(row["level"] == "error" for row in findings),
             "sha256": sha256_bytes(data), "crc32": f"{zlib.crc32(data) & 0xFFFFFFFF:08X}",
             "findings": findings, "repairable": repairable, "map": mapping}
 
 
-def repair_extension_checksum(data: bytes) -> bytes:
-    extension = parse_extended_rom_header(data)
-    if extension is None:
-        raise RomWorkbenchError("No standard TOS extension-ROM trailer was found.")
+def repair_date_word(data: bytes) -> bytes:
+    """Rewrite the GEMDOS date word at ``$1E`` from the BCD build date at ``$18``.
+
+    The BCD date is the one TOS prints and the one every catalogue records, so
+    it is treated as authoritative. TOS 1.00 has no date word to repair.
+    """
+    header = parse_rom_header(data)
+    if header is None:
+        raise RomWorkbenchError("No TOS header was found, so there is no date word to repair.")
+    if header.version_word < 0x0102:
+        raise RomWorkbenchError("TOS 1.00 carries no GEMDOS date word.")
+    when = decode_bcd_date(int.from_bytes(data[0x18:0x1C], "big"))
+    if when is None:
+        raise RomWorkbenchError("The BCD build date is not a valid date, so the date word cannot be derived from it.")
+    if header.dates_agree:
+        raise RomWorkbenchError("The GEMDOS date word already matches the build date.")
     result = bytearray(data)
-    result[-12:-8] = extension.calculated_checksum.to_bytes(4, "little")
+    result[0x1E:0x20] = encode_dos_date(when).to_bytes(2, "big")
     return bytes(result)
+
+
+def repair_extension_checksum(data: bytes) -> bytes:
+    """Retained only so the un-ported route module still imports."""
+    raise RomWorkbenchError("A TOS ROM carries no checksum trailer; the available repair is date-word.")
 
 
 def repair_header_role_flags(data: bytes, bank_size: int) -> bytes:
-    result = bytearray(data)
-    repaired = 0
-    for offset in range(0, len(result), bank_size):
-        block = bytes(result[offset:offset + bank_size])
-        header = parse_rom_header(block)
-        if header is None:
-            continue
-        roles = (0x40 if header.language_entry is not None else 0) | (0x80 if header.service_entry is not None else 0)
-        new_type = (header.type_byte & 0x3F) | roles
-        if new_type != header.type_byte:
-            result[offset + 6] = new_type
-            repaired += 1
-    if not repaired:
-        raise RomWorkbenchError("No contradictory ROM header flags were found.")
-    return bytes(result)
+    """Retained only so the un-ported route module still imports."""
+    raise RomWorkbenchError("A TOS ROM header has no role flags; the available repair is date-word.")
 
 
 def normalise_project(document: dict | None) -> dict:
@@ -985,7 +1062,13 @@ def project_json(document: dict) -> bytes:
 
 
 def identify_rom(data: bytes, catalogue_path: Path | None = None) -> dict:
-    """Identify exact and common transformed dumps without guessing a title."""
+    """Identify a ROM by exact hash and by what its header declares.
+
+    The catalogue match is exact SHA-256 and is the only thing reported as a
+    confirmed title. The ``tos`` block is what the header itself says, which
+    is enough to name a release and country but not to prove the dump is
+    unaltered.
+    """
     digest, crc = sha256_bytes(data), f"{zlib.crc32(data) & 0xFFFFFFFF:08X}"
     records = []
     if catalogue_path and catalogue_path.is_file():
@@ -998,47 +1081,81 @@ def identify_rom(data: bytes, catalogue_path: Path | None = None) -> dict:
     transformations = []
     if len(data) % 2 == 0 and data[:len(data)//2] == data[len(data)//2:]:
         transformations.append("The image contains two identical mirrored halves.")
-    if len(data) in {8192, 16384, 32768, 65536, 131072, 262144}:
-        transformations.append(f"The size is a conventional {len(data) // 1024} KiB ROM or bank set.")
+    if len(data) in TOS_SIZES:
+        transformations.append(f"The size is a conventional {len(data) // 1024} KiB TOS ROM.")
+    elif len(data) == CARTRIDGE_SIZE:
+        transformations.append("The size is a conventional 128 KiB cartridge ROM.")
+    header = parse_rom_header(data)
+    cartridge = parse_cartridge_header(data) if header is None else None
+    declared = None
+    if header is not None:
+        declared = {
+            "kind": "emutos" if header.emutos else "tos",
+            "release": header.release,
+            "version": header.version,
+            "versionWord": f"{header.version_word:04X}",
+            "country": header.country,
+            "countryShort": header.country_short,
+            "videoStandard": header.video_standard,
+            "machine": header.machine,
+            "date": header.date,
+            "base": header.base,
+            "sizeValid": header.size_valid,
+            "baseValid": header.base_valid,
+        }
+    elif cartridge is not None:
+        declared = {
+            "kind": "cartridge",
+            "applications": [application["name"] for application in cartridge.applications],
+            "base": cartridge.base,
+            "sizeValid": cartridge.size_valid,
+        }
     return {"matched": exact is not None, "record": exact, "sha256": digest, "crc32": crc,
-            "transformations": transformations}
+            "transformations": transformations, "declared": declared}
 
 
-def build_expansion_rom(title: str, modules: list[dict] | None = None,
-                        size: int = 16 * 1024, erase_byte: int = 0xFF) -> bytes:
-    """Build an inert but structurally valid Atari expansion ROM.
+CARTRIDGE_BUILD_SIZES = {16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024}
 
-    Kickstart finds a ROM's contents by scanning for resident tags, so the
-    scaffold is one real ``$4AFC`` tag whose init routine is ``MOVEQ #0,D0 /
-    RTS``. That is a genuine "nothing to install" answer, so a scaffold fitted
-    to a machine before its driver is written cannot do anything unexpected.
-    Any further module names are recorded after the tag as an inventory the
-    developer fills in; they are not pretended to be working modules.
+
+def build_cartridge_rom(title: str, applications: list[dict] | None = None,
+                        size: int = 128 * 1024, erase_byte: int = 0xFF) -> bytes:
+    """Build an inert but structurally valid cartridge ROM.
+
+    TOS finds a cartridge's contents through the ``$ABCDEF42`` magic and the
+    application header chain that follows it, so the scaffold is one real
+    header per name whose run routine is a single ``RTS``. That is a genuine
+    "nothing to do" answer, so a scaffold fitted to a machine before its
+    program is written cannot do anything unexpected. Any further names are
+    recorded as headers in the chain; they are not pretended to be working
+    programs.
     """
-    if size not in {8192, 16384, 32768}:
-        raise RomWorkbenchError("An Atari expansion ROM scaffold must be 8K, 16K or 32K.")
-    clean = "".join(
-        character for character in str(title or "forge") if 32 <= ord(character) <= 126
-    )[:24] or "forge"
-    data = bytearray(make_expansion_rom(size, clean, erase_byte))
-    inventory = bytearray(b"AFFMODULES\0")
-    for row in modules or []:
-        name = "".join(
-            character for character in str(row.get("name") or "").strip()
-            if character.isalnum() or character in "._-"
-        )[:31]
-        if name:
-            purpose = str(row.get("syntax") or row.get("purpose") or "")[:80]
-            inventory.extend(
-                name.encode("latin-1", "replace") + b"\0"
-                + purpose.encode("latin-1", "replace") + b"\0"
-            )
-    start = 0x200
-    end = min(len(data), start + len(inventory))
-    if start + len(inventory) > size:
-        raise RomWorkbenchError("Those module names do not fit in the selected ROM size.")
-    data[start:end] = inventory[:end - start]
+    if size not in CARTRIDGE_BUILD_SIZES:
+        raise RomWorkbenchError("A cartridge ROM scaffold must be 16K, 32K, 64K or 128K.")
+    def application_name(value: str) -> str:
+        clean = "".join(
+            character for character in str(value or "").strip() if character.isalnum() or character in "_."
+        )[:12]
+        if clean and "." not in clean:
+            clean = f"{clean[:8]}.PRG"
+        return clean
+
+    names = [application_name(title) or "FORGE.PRG"]
+    for row in applications or []:
+        name = application_name(row.get("name"))
+        if name and name.upper() not in {existing.upper() for existing in names}:
+            names.append(name)
+    if len(names) > 7:
+        raise RomWorkbenchError("A cartridge scaffold holds at most seven application headers.")
+    data = bytearray(make_cartridge_rom(size, names[0], erase_byte))
+    if len(names) > 1:
+        from atarinut.tosrom import build_cartridge_rom as engine_build
+
+        data = bytearray(engine_build(size, tuple(names), erase_byte=erase_byte))
     return bytes(data)
+
+
+#: Retained under its previous name so the un-ported route module still imports.
+build_expansion_rom = build_cartridge_rom
 
 
 #: The identity of the workbench's own ROM file archive, so a reader can tell
@@ -1047,14 +1164,14 @@ DATA_ARCHIVE_SIGNATURE = b"AFFARCHIVE1"
 
 
 def build_data_archive(title: str, files: list[tuple[str, bytes]], *,
-                       size: int = 16 * 1024, erase_byte: int = 0xFF) -> bytes:
-    """Build a documented file archive inside a valid expansion ROM.
+                       size: int = 128 * 1024, erase_byte: int = 0xFF) -> bytes:
+    """Build a documented file archive inside a valid cartridge ROM.
 
-    This is a deterministic storage layout for companion data. Kickstart will
-    mount the ROM's resident tag but has no idea what the archive means, so a
-    driver of the developer's own has to read it.
+    This is a deterministic storage layout for companion data. TOS will list
+    the cartridge's application header but has no idea what the archive means,
+    so a program of the developer's own has to read it.
     """
-    data = bytearray(build_expansion_rom(title, [{"name": "affarchive.library"}], size, erase_byte))
+    data = bytearray(build_cartridge_rom(title, [], size, erase_byte))
     directory = bytearray(DATA_ARCHIVE_SIGNATURE)
     payload = bytearray()
     for name, content in files:
@@ -1074,14 +1191,42 @@ def build_data_archive(title: str, files: list[tuple[str, bytes]], *,
     return bytes(data)
 
 
+def board_chip_sets(size: int) -> list[dict]:
+    """Describe the chip sets a real board takes for a ROM of this size."""
+    return [
+        {
+            "chips": chips,
+            "chipSize": chip_size,
+            "lanes": lanes,
+            "label": label,
+        }
+        for chips, chip_size, lanes, label in BOARD_CHIP_SETS.get(int(size), ())
+    ]
+
+
 def hardware_export(data: bytes, *, device_size: int, erase_byte: int = 0xFF,
                     mirror: bool = False, lanes: int = 1, byte_swap: bool = False,
                     word_swap: bool = False,
-                    address_swaps: list[tuple[int, int]] | None = None) -> dict:
-    if device_size < len(data) or device_size > 64 * 1024 * 1024 or device_size & (device_size - 1):
-        raise RomWorkbenchError("Choose a power-of-two device size large enough for the ROM.")
+                    address_swaps: list[tuple[int, int]] | None = None,
+                    chip_count: int | None = None) -> dict:
+    """Prepare programmer files for a ROM.
+
+    ``lanes`` splits the image into byte-interleaved even and odd halves, as
+    a 16-bit board with byte-wide chips needs. ``chip_count`` then divides
+    each lane into consecutive chips, so a 192 KiB ST ROM becomes six 32 KiB
+    chips (three even/odd pairs), a 256 KiB STE ROM two 128 KiB chips, and a
+    512 KiB TT ROM two 256 KiB or four 128 KiB chips.
+    """
+    if device_size < max(1, len(data)) or device_size > 64 * 1024 * 1024:
+        raise RomWorkbenchError("Choose a device size at least as large as the ROM, up to 64 MiB.")
+    power_of_two = not device_size & (device_size - 1)
+    if address_swaps and not power_of_two:
+        raise RomWorkbenchError("Address-line swaps need a power-of-two device size.")
     if lanes not in {1, 2, 4} or device_size % lanes:
         raise RomWorkbenchError("Choose one, two or four equal byte lanes.")
+    chips = int(chip_count or lanes)
+    if chips < lanes or chips % lanes or device_size % chips:
+        raise RomWorkbenchError("The chip count must be a multiple of the lane count that divides the device size.")
     if mirror and data:
         repeats = (device_size + len(data) - 1) // len(data)
         prepared = (data * repeats)[:device_size]
@@ -1114,18 +1259,26 @@ def hardware_export(data: bytes, *, device_size: int, erase_byte: int = 0xFF,
                     target ^= (1 << left) | (1 << right)
             rewired[target] = value
         prepared = bytes(rewired)
-    components = [prepared[index::lanes] for index in range(lanes)]
-    return {"deviceSize": device_size, "lanes": lanes, "eraseByte": erase_byte & 0xFF,
+    parts = split_into_chips(prepared, lanes, chips // lanes)
+    return {"deviceSize": device_size, "lanes": lanes, "chipCount": chips,
+            "chipSize": device_size // chips, "eraseByte": erase_byte & 0xFF,
             "mirrored": mirror, "byteSwapped": byte_swap, "wordSwapped": word_swap,
             "addressSwaps": [list(pair) for pair in swaps], "sha256": sha256_bytes(prepared),
-            "components": components}
+            "components": [content for _name, content in parts],
+            "componentNames": [name for name, _content in parts]}
 
 
 def hardware_export_zip(result: dict, stem: str = "rom") -> bytes:
     output = io.BytesIO()
+    names = result.get("componentNames") or []
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        for index, content in enumerate(result["components"], 1):
-            name = f"{stem}.rom" if len(result["components"]) == 1 else f"{stem}-lane-{index}.rom"
+        for index, content in enumerate(result["components"]):
+            if len(result["components"]) == 1:
+                name = f"{stem}.rom"
+            elif index < len(names) and names[index]:
+                name = f"{stem}-{names[index]}.rom"
+            else:
+                name = f"{stem}-lane-{index + 1}.rom"
             archive.writestr(name, content)
         report = {key: value for key, value in result.items() if key != "components"}
         archive.writestr("PROGRAMMING.md", "# ROM programming export\n\n```json\n" + json.dumps(report, indent=2) + "\n```\n")

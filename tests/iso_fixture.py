@@ -2,11 +2,11 @@
 
 The discs this reader exists for are commercial CDs nobody can commit, and
 `genisoimage` is not in this tree or in the container, so a test wanting a
-Joliet tree or an Atari `AS` entry would otherwise embed an opaque blob. This
+Joliet tree or a Rock Ridge name would otherwise embed an opaque blob. This
 writes the structures instead, which means the volume descriptors, the
-directory records, the Rock Ridge system-use areas and the Atari extension are
-all exercised against bytes the test itself laid down, and a failure points at
-a field rather than at a fixture.
+directory records and the Rock Ridge system-use areas are all exercised
+against bytes the test itself laid down, and a failure points at a field
+rather than at a fixture.
 
 The builder is deliberately literal about the format's awkward parts, because
 those are what the reader has to survive: every numeric field is stored twice
@@ -36,21 +36,6 @@ def _recording_date(year=2000, month=11, day=29, hour=13, minute=45, second=0) -
     return bytes([year - 1900, month, day, hour, minute, second, 0])
 
 
-def atari_entry(protection: int | None = None, comment: str = "") -> bytes:
-    """An Atari ``AS`` system-use entry, as an Atari CD records one."""
-    flags = 0
-    body = b""
-    if protection is not None:
-        flags |= 0x01
-        body += struct.pack(">I", protection & 0xFFFF)
-    if comment:
-        flags |= 0x02
-        encoded = comment.encode("latin-1", "replace")[:255]
-        body += bytes([len(encoded)]) + encoded
-    payload = bytes([flags]) + body
-    return b"AS" + bytes([len(payload) + 4, 1]) + payload
-
-
 def name_entry(name: str) -> bytes:
     """A Rock Ridge ``NM`` entry carrying the name a person should see."""
     encoded = name.encode("latin-1", "replace")
@@ -63,6 +48,7 @@ def _directory_record(
     length: int,
     *,
     directory: bool,
+    hidden: bool = False,
     system_use: bytes = b"",
 ) -> bytes:
     """One directory record, padded so the next one starts on an even byte."""
@@ -71,7 +57,7 @@ def _directory_record(
         _both_endian_32(extent)
         + _both_endian_32(length)
         + _recording_date()
-        + bytes([0x02 if directory else 0x00])
+        + bytes([(0x02 if directory else 0x00) | (0x01 if hidden else 0x00)])
         + b"\x00\x00"
         + _both_endian_16(1)
         + bytes([len(identifier)])
@@ -89,12 +75,14 @@ def _directory_record(
 
 class _Node:
     def __init__(self, name: str, *, directory: bool, data: bytes = b"",
-                 iso_name: str | None = None, system_use: bytes = b"") -> None:
+                 iso_name: str | None = None, system_use: bytes = b"",
+                 hidden: bool = False) -> None:
         self.name = name
         self.directory = directory
         self.data = data
         self.iso_name = iso_name
         self.system_use = system_use
+        self.hidden = hidden
         self.children: list[_Node] = []
         self.extent = 0
         self.length = 0
@@ -104,12 +92,15 @@ class _Node:
         return node
 
 
-def directory(name: str, *, iso_name: str | None = None, system_use: bytes = b"") -> _Node:
-    return _Node(name, directory=True, iso_name=iso_name, system_use=system_use)
+def directory(name: str, *, iso_name: str | None = None, system_use: bytes = b"",
+              hidden: bool = False) -> _Node:
+    return _Node(name, directory=True, iso_name=iso_name, system_use=system_use, hidden=hidden)
 
 
-def file(name: str, data: bytes, *, iso_name: str | None = None, system_use: bytes = b"") -> _Node:
-    return _Node(name, directory=False, data=data, iso_name=iso_name, system_use=system_use)
+def file(name: str, data: bytes, *, iso_name: str | None = None, system_use: bytes = b"",
+         hidden: bool = False) -> _Node:
+    return _Node(name, directory=False, data=data, iso_name=iso_name,
+                 system_use=system_use, hidden=hidden)
 
 
 def _identifier(node: _Node) -> bytes:
@@ -137,12 +128,12 @@ def build_iso(
     ``joliet`` writes a second, independent directory tree in UCS-2 with a
     supplementary descriptor pointing at it, which is how a disc mastered for
     both worlds really carries one. The two trees describe the same files and
-    share their data extents, but only the base tree carries system-use areas.
-    That asymmetry is the whole point: reading such a disc through Joliet gives
-    perfect names and silently drops every Atari protection bit and comment.
+    share their data extents, and only the base tree carries system-use areas,
+    which is what a test proving Joliet is preferred needs in order to show
+    that nothing is lost by preferring it.
 
-    ``duplicate_primary`` writes the primary descriptor twice, which the
-    TOS 3.9 disc really does and the standard does not describe.
+    ``duplicate_primary`` writes the primary descriptor twice, which some real
+    discs do and the standard does not describe.
     """
     directories: list[_Node] = []
 
@@ -183,6 +174,7 @@ def build_iso(
             entries.append(_directory_record(
                 identifier, extent, length,
                 directory=child.directory,
+                hidden=child.hidden,
                 system_use=b"" if use_joliet else child.system_use,
             ))
         block = b""
@@ -278,4 +270,4 @@ def build_iso(
     return bytes(image)
 
 
-__all__ = ["atari_entry", "build_iso", "directory", "file", "name_entry"]
+__all__ = ["build_iso", "directory", "file", "name_entry"]

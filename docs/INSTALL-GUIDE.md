@@ -1,292 +1,247 @@
 # Preparing a hard drive and installing floppies onto it
 
-Copying a game disk into an HDF gives you the files. It does not give you
-something that runs. The title still expects to be booted from `DF0:`, and the
-hard drive still has no idea it is there. This guide covers the ways Atari File
-Forge closes that gap, and it is honest about what each one can and cannot do.
+Copying a game disk into a partition gives you the files. It does not give you
+something you can use. The title still expects to find itself in the root of
+`A:`, and the drive still has nothing on its desktop that would start it. This
+guide covers the ways Atari File Forge closes that gap, and it is honest about
+what each one can and cannot do.
 
-It starts with the drive itself. A blank partition is not a machine you can
-use, so the first section covers installing TOS onto it from your own
-Workbench floppies. The rest covers getting a title onto the drive once there
-is a system there to run it.
+It starts with the drive itself. There is no operating system to install: TOS
+lives in the machine's ROM, and where a machine has no usable ROM the EmuTOS
+image bundled with this application supplies one. What a drive needs instead is
+a **hard-disk driver**, so that a machine can reach the drive at all, and a
+**desktop configuration**, so that the desktop shows what is on it. The rest of
+the guide covers getting a title onto the drive once the drive is ready.
 
-The choice appears in the import dialog whenever the pane you are dropping onto
-is a mounted GEMDOS volume on a hard drive. Under **Import as** you get:
+The install choice appears in the import dialog whenever the pane you are
+dropping onto is a mounted GEMDOS volume on a hard drive. Under **Import as**
+you get:
 
-* Copy the disc contents in as they are, which is the behaviour that has always
+* Copy the disk contents in as they are, which is the behaviour that has always
   been there.
 * Install it onto this drive, which is what this guide is about.
-* Store the original image as an ordinary file, when the disc image itself is
+* Store the original image as an ordinary file, when the disk image itself is
   what you want to keep.
 
 A floppy pane offers no install option, because a floppy has nowhere to install
 to. A drive showing its partition table offers none either: a partition table is
 not a volume. Enter a partition first.
 
-## Preparing the drive: install Workbench
+## Preparing the drive
 
-Choose **Tools -> Install Workbench** with a partition open, then point at the
-folder holding your Workbench floppy images, or pick the images yourself.
+Choose **Prepare this drive** with a partition open. Preparing a drive does
+three things, and you can have any of them on their own:
 
-No TOS is shipped with Atari File Forge and none is downloaded. It is not
-free to redistribute, so the disks have to be the ones you own. ADF, ADZ, DMS
-and HFE images are all read, including the zipped-per-disk form a TOSEC
-collection uses.
+1. it settles what happens in the drive's **root sector**, which is the first
+   thing a machine reads and the only place a hard-disk driver can be loaded
+   from;
+2. it creates the folders a prepared drive is expected to have, `AUTO`,
+   `GEMSYS` and `GAMES`;
+3. it writes a **desktop configuration**, `NEWDESK.INF`, if the volume does not
+   already have one.
 
-Pointing at a whole collection folder is fine. A TOSEC `Workbench` folder holds
-every release together, and everything in it that is not part of one is listed
-as ignored. The disks you did not choose are simply not installed.
+Files already on the volume are left alone. A drive you have been building is
+added to rather than replaced, and preparing it twice does not undo work you did
+in between. In particular, a desktop configuration you arranged yourself is
+never overwritten.
 
-**Disks are recognised by the volume name inside each image, not by its file
-name.** ADF collections are named inconsistently - `wb31_workbench.adf`,
-`Workbench 3.1 (Disk 2 of 6).adf`, `disk02.adf` - and a renamed file says
-nothing at all about its contents, while the volume name was written by
-Commodore and travels with the data. That is what lets you point at a folder
-rather than assembling the set by hand; anything in it that is not part of a
-release is listed as ignored rather than silently included.
+### Atari File Forge cannot supply you with a driver
 
-**The release is decided once, from the Workbench disk, and every other disk is
-matched to it.** Mixing releases is the classic way to end up with a drive that
-looks complete and boots to a Guru: a 2.0 Extras drawer on a 3.1 system, or a
-Locale disk from a release that had none, produces a system whose parts disagree
-about what the others provide. A disk from another release is left out rather
-than mixed in. Where a collection holds several dumps of the same disk, one that
-says it was verified is preferred and one that says it was modified or cracked
-is avoided.
+AHDI, HDDRIVER, the PP driver and the ICD driver are each somebody's copyright,
+and none of them may be redistributed. Atari File Forge does not ship one, does
+not fetch one, and will not pretend to have one. Point it at the copy you own.
 
-Each disk lands where the TOS install script would put it:
+Put the driver's own files in either of these directories, unpacked as they were
+published:
 
-| Disk | Lands in | Notes |
-| --- | --- | --- |
-| Workbench | volume root | Required. The system itself: `C`, `L`, `Libs`, `Devs`, `S` and the desktop. |
-| Extras | volume root | Merged in after Workbench. |
-| Fonts | `Fonts` | |
-| Locale | `Locale` | TOS 3.x only. |
-| Storage | `Storage` | Drivers and monitors held back until they are wanted. |
-| Classes | `Classes` | BOOPSI classes and datatypes. |
-| GlowIcons | volume root | The TOS 3.5 icon set. |
-| Backdrops | `Backdrops` | |
-| Install | `Install` | Kept in its own drawer on purpose. |
+* `~/.config/atari-file-forge/drivers`, or the directory named by
+  `ATARI_FILE_FORGE_DRIVER_DIR`;
+* `firmware/drivers` beside the source, which is git-ignored exactly as
+  `firmware/tos` is.
 
-**The order is fixed and it matters.** Workbench is copied before Extras so that
-its full `C:`, `L:` and `Libs:` are not overwritten by the cut-down copies the
-other disks carry, and the Install disk is kept in its own drawer for the same
-reason. Only the Workbench disk is required; anything else you do not have is
-simply left out. If the automatic choice is wrong, change which disc plays each
-part before installing.
+The files may be loose or inside the distribution's own folder; one level of
+nesting is looked through, so `firmware/drivers/ICDPRO_6.55A/ICDBOOT.SYS` is
+found without your having to flatten anything. The release is read from that
+folder's name, which is where both of the drives this workflow was built from
+record it.
 
-`T`, `Trashcan`, `Devs/DOSDrivers` and `Prefs/Env-Archive` are created
-afterwards, because the install script makes them and no disk provides them. A
-system with no `T:` cannot write a temporary file.
+EmuTOS is the one exception to all of this. It is GPL, it is committed, and it
+is not a driver.
 
-**Files already on the volume are left alone.** The volume is written into
-rather than formatted, so a drive you have already partitioned, named and put
-work on is added to rather than replaced, and installing twice does not undo
-hand edits made in between.
+### The three choices, and what each one means on real hardware
 
-A hard drive boots from the flag in its Rigid Disk Block rather than from a
-floppy boot block, so if the partition is not marked bootable the install says
-so rather than leaving you with a drive that silently will not start.
+**Driverless, under EmuTOS.** This is the default. Nothing is written to the
+root sector, and the sector is left deliberately inert: its checksum word is set
+so that the sum of its 256 big-endian words is *not* `0x1234`, which is the only
+thing the ROM checks before it would execute it. EmuTOS reads ACSI, SCSI and IDE
+drives itself and finds the partitions without help, so a drive prepared this
+way works under EmuTOS on real hardware and in Hatari.
 
-## TOS 3.5 and 3.9, which came on CD
+> A machine running its original TOS ROM will not see this drive at all. There
+> is no partial state here: without a driver, an ST, STE or Mega STE boots to
+> its own desktop with no hard-disk icon.
 
-These two releases are not installed the way 3.1 is, and it is worth being
-plain about why. There is no tree to copy. The disc carries a Commodore
-Installer script of two hundred kilobytes that runs on the Atari, reads the
-versions of the libraries the live system has loaded, asks a great many
-questions and patches an existing installation in place. Its own words are
-that "Pretend mode cannot be used with this installation script", and 3.9
-refuses outright unless it finds an earlier release to update.
+**A driver you supply.** The driver file is copied into the root of the boot
+partition, which is where the loader looks for it: `ICDBOOT.SYS` for the ICD
+driver, `SHDRIVER.SYS` for AHDI 6, `HDDRIVER.SYS` for HDDRIVER. Where the
+distribution also carries the 512 bytes that belong in the root sector, named
+`ROOTSECT.BIN`, `BOOTSECT.BIN`, `HDBOOT.BIN` or `ROOTSECT.BOO`, that code is
+written into the sector below the partition table and the checksum word is
+recomputed so that the word sum is exactly `0x1234`. The partition entries
+themselves are untouched.
 
-So Atari File Forge does not install them. What it does is everything up to
-that point, which is the part that otherwise costs an afternoon to discover.
+> Most distributions do not carry that file, because the loader lives inside the
+> driver's own installation program. When that is the case the driver file is
+> still copied in and you are told plainly that the root sector was left as it
+> was: run the driver's own installer once, on the machine or in Hatari, to
+> write the loader. Atari File Forge will not fabricate a loader for a driver it
+> does not have.
 
-Choose **Tools -> Install TOS 3.5 or 3.9** with a partition open, then
-point it at the ISO of the disc you own. Nothing is downloaded, and no TOS
-is shipped.
+**A drive with a PC partition table.** A drive prepared on a PC carries a master
+boot record, whose own bytes occupy the space an Atari loader would need. Such a
+drive is read by EmuTOS's built-in support, and by TOS 4 and MiNT, and no driver
+can be installed onto it from here; asking for one is refused with that reason
+rather than quietly losing the partition table. Prepare it driverless.
 
-Three things are checked before anything starts:
+### What a prepared drive looks like
 
-- **The disc.** It is identified by the volume name Commodore wrote,
-  `TOS3.5` or `TOS3.9`, and then confirmed by looking for that
-  release's own drawer. A contribution CD or an OS4 disc is not accepted on a
-  similar name alone.
-- **The processor.** Both releases need a 68020 or better. An A1200, A3000,
-  A4000 or CD32 qualifies on its own, and so does any machine carrying a
-  68020, 68030, 68040 or 68060 accelerator, or a PiStorm. A stock A500 or A600
-  cannot run either release, and is told so rather than left to find out from
-  a machine that will not start.
-- **The drive.** Both releases update a system rather than creating one, so a
-  volume with no `S:Startup-Sequence` has nothing for them to update. Install
-  Workbench 3.1 onto it first, which this application can do.
+This is what the drives this workflow was built from actually look like, and
+what Atari File Forge reports when you open one:
 
-Every blocking reason is reported at once rather than one at a time, because
-fixing one and running again is exactly the slow loop the check exists to
-avoid.
+| Drive | Root sector | Boot sector | In the partition root |
+| --- | --- | --- | --- |
+| ICD-prepared ACSI | executable, word sum `0x1234` | executable | `ICDBOOT.SYS`, `ICDPRO_6.55A`, `NEWDESK.INF`, `DESKTOP.INF` |
+| AHDI-prepared IDE, stored byte-swapped | executable once un-swapped | executable | `SHDRIVER.SYS`, `AHDI_6.061`, `NEWDESK.INF` |
+| PC partition table, booting under EmuTOS | not executable | not executable | `AUTO`, `GEMSYS`, no driver |
 
-When all three are in order, **Boot with the CD** starts the machine with the
-drive booting and the disc in the CD drive, which is the state the installer
-expects. Open the disc on the Workbench and run its installation icon; it will
-ask where to install and what to include.
+A byte-swapped image is one taken through an IDE or CompactFlash adapter that
+exchanges the two bytes of every word. It is detected, read through the swap and
+written back through it, so nothing you see or do here has to know about it.
 
-### Making the disc visible
+### The desktop configuration
 
-A stock Workbench 3.1 installation has everything needed to read a CD and none
-of it switched on, which is worth knowing because the symptom is a machine that
-boots perfectly and shows no disc at all.
+The desktop shows what `NEWDESK.INF` tells it to show, falling back to the older
+`DESKTOP.INF` on TOS 1.x. Preparing a drive writes one if there is none, with
+the records a working desktop needs: `#a`, `#b`, `#c` and `#d` for the video and
+colour settings, `#K` for the keyboard table, `#E` for the desktop preferences,
+`#W` for a window position, the drive and trash icons, and the document-type
+records `#N`, `#D`, `#G`, `#Y`, `#P` and `#F` that make a folder open as a
+folder and a program run as a program.
 
-The Extras disk puts the CD filing system in `L:`, and the Storage disk puts
-the `CD0` mountlist in `Storage/DOSDrivers`, which is the drawer Workbench keeps
-things in until they are wanted. GEMDOS reads only `Devs/DOSDrivers`, so the
-driver is present and inactive.
+Installing a title on the desktop adds two more records:
 
-Booting with a CD activates it. The mountlist is copied into
-`Devs/DOSDrivers/CD0`, and because Commodore leaves its `Device` and `Unit`
-lines commented out and takes them from tooltypes on the `CD0` icon, defaulting
-to a real SCSI drive at unit 2, those two lines are written into the mountlist
-itself. That is the form the file's own comment documents.
+* one of `#G`, `#F`, `#P` or `#Y`, chosen by the program's own extension,
+  naming the program in full. The extension is the whole of what the desktop
+  reads, so it decides how the program runs: a `.TTP` is asked for a command
+  line, a `.TOS` runs without GEM, a `.PRG` or `.APP` runs with it.
+* an `#X` record, which is what puts the icon on the desktop itself.
 
-This writes to the image, so it takes an undo checkpoint like any other write,
-and it is reported before it happens rather than done silently.
+The new records are inserted above the `*.PRG`-style associations of the same
+letter, because the desktop takes the first record that matches and a wildcard
+association would otherwise swallow the specific one. Installing the same
+program twice replaces its record instead of adding a second. Everything else in
+the file, including window positions and icons you placed yourself, is left
+where it was.
 
-The device it points at, `uaescsi.device` unit 0, is what FS-UAE presents a CD
-on for a machine that has no CD drive of its own. If a disc still does not
-appear, that value is the thing to check: it lives in
-`Devs/DOSDrivers/CD0` on the drive and can be edited there.
+## Getting a title onto the drive
 
-## Method 1: stage it for installing later
+There are four honest ways, and the import dialog offers three of them; the
+fourth is a single program, which is offered wherever one file is selected.
 
-This is the default, and for a multi-disc set it is usually the right answer.
+### Stage it for installing later
 
-**The discs are staged onto the drive itself, in `Storage/Install/<Title>`.** That is
-the whole point of the mode. Boot the drive in an emulator, or put it in a real
-Atari, and the material is already in front of you: you can run the title's own
-installer against the staging drawer on the machine the title will actually run
-on. A staging directory on the computer running Atari File Forge would be
-unreachable at exactly the moment it was wanted.
+This is the default, because it is the only mode that cannot half-succeed. The
+disk is extracted into a folder **on the drive being built**, under
+`INSTALL\STAGE` unless you name somewhere else. Nothing is emulated, nothing is
+guessed at, and it is always fast.
 
-`Storage` is where Workbench keeps what is not in use yet, which is what a
-staged set is, and it is where the PiStorm imager puts the same thing. A plain
-`Install` drawer at the volume root would have been the obvious choice, but the
-TOS Install disk is copied there by a Workbench install, and staging into
-the same drawer listed that disk's own `c` and `Libs` as though they were
-titles somebody had staged.
+Putting the staged set on the target image rather than in a directory on this
+computer is the whole point. You can boot the drive in Hatari, or put it in a
+real Atari, open the folder and run the title's own installer against it with
+the disks already in front of you.
 
-Stage the second disc under the same title and its files are merged into the
-same tree, which is what an installer expects to be pointed at. Nothing is
-emulated, nothing is downloaded, and nothing is guessed at, so this mode always
-works and always works quickly.
+Disks staged under the same title merge into one tree, which is what an
+installer expects to be pointed at. Where two disks carry the same path with
+different contents, the first is kept and the later one is filed under
+`INSTALL\STAGE\CLASH`, so a set is never silently reduced to its last disk; the
+staged-disks dialog tells you how many files differed. Staging a disk again
+under a label that is already there is treated as a correction rather than as a
+second disk: its files replace what the earlier attempt wrote, and any conflict
+recorded against that label is dropped.
 
-Where two discs carry the same path with genuinely different contents, the first
-is kept and the later one is filed under
-`Storage/Install/Forge-Staging/<Title>/<Disc>`.
-A set is never silently reduced to whichever disc you staged last. The staging
-summary lists every conflict so you can see what happened.
+Titles are sentences and GEMDOS folder names are eight characters, so the folder
+is named from the title by the filing system's own rules: *Bubble Bobble (1987)*
+is staged into `BUBBLE_B`. The readable title is kept in the record beside it,
+which is what the dialog shows.
 
-Nothing belonging to Atari File Forge is put inside the payload drawer, because
-that drawer has to be exactly what gets installed. The record of what was
-staged, and the files a later disc disagreed about, both live in
-`Storage/Install/Forge-Staging`, which can be deleted once a set is in.
+That record, `INSTALL\STAGE\CLASH\<TITLE>\STAGE.INF`, lives on the drive rather
+than on this computer, so a drive you carry to another machine still describes
+what is waiting on it. It is kept out of the payload folder on purpose: that
+folder has to be exactly what gets installed.
 
-Protection bits and comments are written onto the volume with the files, because
-an Atari filing system has somewhere to put them. A loader that lost its `e` bit
-will not start, and the failure looks nothing like a missing permission, so this
-matters more than it sounds.
+### Install it into a folder on this drive
 
-Staging a disc under a label that is already there replaces it, files and all.
-Re-staging Disk 1 after correcting it leaves you with one Disk 1 holding the
-corrected files, and any conflict previously recorded against that disc is
-dropped. A set that grew every time it was fixed, or that filed your correction
-away as an alternative to the broken file, would be impossible to reason about
-by the time you came to install it.
+For a title that runs from wherever it is put, which is most games and demos.
+The staged tree is **moved** out of the staging folder into a folder of its own,
+`GAMES\<TITLE>` unless you name another. Both ends are on the same volume, so
+this is a move rather than a copy: the attributes and datestamps the disks
+carried are the ones already written, and nothing is read or written twice.
 
-Come back to a set with **Tools -> Staged installations**, with the drive open.
-That lists every title waiting on it, what discs it holds and where its files
-are, and installs one into a drawer you name. The list is read off the drive
-rather than out of a record kept on this computer, so a drive built on another
-machine, or one whose staging notes were deleted, still reports what is sitting
-in its staging drawer.
+Nothing in the moved tree is rewritten, and nothing needs to be. TOS resolves a
+path at run time against the drive the program was started from, and a relative
+path spelled with a leading backslash means the current drive either way, so a
+program that worked in `A:` works in `C:\GAMES\TITLE` without being patched.
 
-Installing moves the title out of the staging drawer into its own home on the
-same volume. Because both ends are on one drive it is a move rather than a copy:
-nothing is read or written twice, and the protection bits, comments and
-datestamps the discs carried are the ones already there. It also names any file
-that differed between discs, so a set that needed a judgement call says so
-rather than looking complete.
+If no program is found in the installed folder's own root, you are told so:
+there is nothing there the desktop could start, and the program is probably in a
+folder below it.
 
-Discarding a title deletes the staged copies from the drive. The original disc
-images are untouched, so the set can be staged again.
+### Run the title's own installer
 
-## Method 2: install with WHDLoad
+Productivity software installs itself by running a program that reads the
+machine it finds and asks where things should go. It cannot be run unattended
+and no tool can answer its questions for somebody else, so this mode stops
+trying. It boots the drive in Hatari with the title's first disk in `A:` and
+hands you the keyboard. Up to two disks can be inserted at once, because an
+Atari has two floppy drives; swap the rest as the installer asks.
 
-WHDLoad is how most Atari games and demos are made to run from a hard drive. It
-comes in two halves, and only one of them can be fetched for you.
+Every mode stages first, so a run that goes wrong has still put the disk's
+contents somewhere you can finish by hand.
 
-**The program** is published by its author at `whdload.de`. Atari File Forge
-checks whether the drive already has `C:WHDLoad`, reads its version from the
-program's own `$VER:` string, and installs the current release if there is none.
-Aminet is used as a fallback if the author's site cannot be reached. The
-`C:` tools and the `S:` startup and cleanup scripts are copied directly rather
-than by running the archive's `Install` script under emulation: the destinations
-are fixed and known, so booting a machine to rediscover them would cost a minute
-per image and add a way to fail that copying does not have.
+### Copy a single program in
 
-An existing `S:WHDLoad.prefs` is never overwritten. If you have tuned where
-WHDLoad writes its debug output on that machine, reinstalling leaves your file
-alone.
+The smallest install there is, and the commonest: one `.PRG` or `.TOS` that is
+the whole of the software. It is copied into the folder you name and, where you
+ask for it, installed on the desktop. Nothing is staged, because there is
+nothing to merge and nothing to finish later. A file TOS would not start is
+refused rather than copied in and left inert.
 
-**A slave** is the small per-title patch that teaches WHDLoad one game, and it
-cannot be downloaded. The author's site refuses its `/games/` index to anything
-that is not a browser session, and Aminet does not carry slaves. Atari File
-Forge does not pretend otherwise and offers no button that would always fail. A
-slave reaches an image because it is already there, or because you supply one.
-You can hand it either the bare `.slave` file or the small LHA it was published
-in, and the archive is unpacked on the way through, so you do not need an LHA
-tool of your own.
+## Checking what is already installed
 
-An install without a slave is reported as incomplete rather than presented as
-finished. The title's drawer is created and its files are staged into it, ready
-for the slave whenever you have it.
+**Check installed drive software** walks the volume and reports every folder
+that holds a program. Two things are checked, and only one of them has a repair,
+because only one of them has an answer that can be proved:
 
-## Method 3: run the disc's own installer
+* **A program that is not a program.** A file named `.PRG` whose first word is
+  not `0x601A`, or whose header declares more text and data than the file holds,
+  would be refused by TOS. This is reported and never rewritten: what the right
+  bytes would have been is not knowable from here.
+* **A desktop record naming a file that is not there.** A `#G`, `#F`, `#P`,
+  `#Y` or `#X` record that installs a program which is not on the volume cannot
+  start anything. Removing it is offered as a repair, and it takes nothing away.
 
-Some software cannot be second-guessed at all. Productivity titles ask which
-drawer, which language, which screen mode, and no tool has an answer to those
-on your behalf.
+The first pass is read-only and lists the exact change it would make for each
+folder before anything is written. The audit is run again before a repair, so a
+result that has gone stale is refused rather than acted on.
 
-This mode stops trying. It boots the drive in the emulator with the disc already
-in `DF0:` and hands you the keyboard. The drive is attached whole, the same way
-a hard-drive launch already works, so the installer sees the partitions and the
-Workbench you actually built. Up to four discs can be inserted at once, filling
-`DF0:` to `DF3:`, so a disc swap is a menu choice rather than a restart.
+## What is deliberately not here
 
-Because the emulator boots the drive rather than the disc, the drive needs a
-working Workbench on it before this is useful; see
-[Preparing the drive](#preparing-the-drive-install-workbench). It also needs a Kickstart ROM for
-the machine in your hardware profile; see the [firmware notes](../firmware/README.md).
+There is no loader-patching mode. The previous platform this application was
+written for had a third-party loader that games were patched to run under; TOS
+has no counterpart, and offering one would mean inventing a workflow that does
+not exist.
 
-Whichever mode you choose, the disc is staged first. An install that fails
-halfway has still preserved the disc's contents somewhere you can finish by hand.
+There is no operating-system install, because there is no operating system to
+install. There is no release published on CD to install from either.
 
-## What gets an undo point
-
-Staging a disc, installing a staged title, installing Workbench, installing
-WHDLoad and placing a slave all change a volume, and each takes an undo
-checkpoint before it runs. Staging now takes one too, because it writes onto the
-drive being built rather than into a directory on this computer. Booting the
-emulator changes nothing Atari File Forge owns, so it takes none.
-
-## Reading LHA archives
-
-Atari File Forge decodes LHA itself rather than calling out to `lha` or
-`lhasa`. That keeps the container, the Debian package and the Snap behaving
-identically instead of leaving one of them with a missing tool nobody notices
-until a user hits it. Header levels 0, 1 and 2 are read, and the `-lh0-`,
-`-lh4-`, `-lh5-`, `-lh6-` and `-lh7-` methods are decompressed, which is
-everything the Atari world produced. Every member is checked against the CRC the
-archive stores for it, so a damaged download is reported rather than written
-into a disk image.
-
-A method this build cannot expand still lists correctly and names itself when
-you try to read it, because "this archive uses `-lh1-`" is a fact you can act
-on and "something went wrong" is not.
+There is no driver download. See above: it is not ours to give you.

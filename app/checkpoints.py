@@ -42,10 +42,9 @@ class CheckpointStore:
     def _state(session: ImageSession) -> dict:
         return {
             "name": session.name,
-            "descriptorName": session.descriptor_name,
             "dirty": session.dirty,
             "partition": session.partition,
-            "ffsSourceNames": dict(session.ffs_source_names),
+            "sourceNames": dict(session.source_names),
             "distributionName": session.distribution_name,
             "targetHardware": session.target_hardware,
             "hardwareProfile": dict(session.hardware_profile),
@@ -63,20 +62,13 @@ class CheckpointStore:
     @classmethod
     def fingerprint(cls, session: ImageSession) -> tuple:
         image = session.path.stat()
-        descriptor = session.descriptor_path.stat() if session.descriptor_path else None
         state_fields = cls._state(session)
         # Saved/unsaved is UI state, not an image edit. Saving an unchanged
         # image must not create a new undo checkpoint merely because its dot
         # was cleared.
         state_fields.pop("dirty", None)
         state = json.dumps(state_fields, sort_keys=True, separators=(",", ":"))
-        return (
-            image.st_size,
-            image.st_mtime_ns,
-            descriptor.st_size if descriptor else None,
-            descriptor.st_mtime_ns if descriptor else None,
-            state,
-        )
+        return (image.st_size, image.st_mtime_ns, state)
 
     @staticmethod
     def _normalise_name(name: str) -> str:
@@ -128,23 +120,14 @@ class CheckpointStore:
         checkpoints.sort(key=lambda item: int(item.get("created") or 0), reverse=True)
         return checkpoints
 
-    def oldest_snapshot(
-        self, session: ImageSession
-    ) -> tuple[Path, Path | None, dict] | None:
-        """Return the oldest retained image, optional descriptor and full metadata."""
+    def oldest_snapshot(self, session: ImageSession) -> tuple[Path, dict] | None:
+        """Return the oldest retained image and its full metadata."""
         checkpoints = self._metadata(session)
         if not checkpoints:
             return None
         metadata = checkpoints[-1]
         folder = self._root(session) / str(metadata["id"])
-        descriptor = (
-            folder / "descriptor.bin" if metadata.get("hasDescriptor") else None
-        )
-        if descriptor is not None and not descriptor.is_file():
-            raise CheckpointError(
-                "The earliest workflow checkpoint has lost its GEO companion."
-            )
-        return folder / "image.bin", descriptor, metadata
+        return folder / "image.bin", metadata
 
     def create(
         self,
@@ -164,13 +147,7 @@ class CheckpointStore:
         try:
             image_copy = temporary / "image.bin"
             self._copy_file(session.path, image_copy)
-            descriptor_copy = None
-            if session.descriptor_path:
-                descriptor_copy = temporary / "descriptor.bin"
-                self._copy_file(session.descriptor_path, descriptor_copy)
-            size = image_copy.stat().st_size + (
-                descriptor_copy.stat().st_size if descriptor_copy else 0
-            )
+            size = image_copy.stat().st_size
             metadata = {
                 "id": checkpoint_id,
                 "name": display_name,
@@ -178,7 +155,6 @@ class CheckpointStore:
                 "automatic": bool(automatic),
                 "created": time.time_ns() // 1_000_000,
                 "size": size,
-                "hasDescriptor": descriptor_copy is not None,
                 "state": self._state(session),
             }
             (temporary / "checkpoint.json").write_text(
@@ -213,35 +189,20 @@ class CheckpointStore:
             raise CheckpointError("That checkpoint no longer exists.")
         state = metadata.get("state") or {}
         image_temp = session.path.parent / f".{session.path.name}.restore-{uuid.uuid4().hex}"
-        descriptor_temp = None
         try:
             self._copy_file(folder / "image.bin", image_temp)
-            if metadata.get("hasDescriptor"):
-                if session.descriptor_path is None:
-                    raise CheckpointError(
-                        "This checkpoint belongs to a paired image but its descriptor path is unavailable."
-                    )
-                descriptor_temp = session.descriptor_path.parent / (
-                    f".{session.descriptor_path.name}.restore-{uuid.uuid4().hex}"
-                )
-                self._copy_file(folder / "descriptor.bin", descriptor_temp)
             image_temp.replace(session.path)
-            if descriptor_temp and session.descriptor_path:
-                descriptor_temp.replace(session.descriptor_path)
         finally:
             image_temp.unlink(missing_ok=True)
-            if descriptor_temp:
-                descriptor_temp.unlink(missing_ok=True)
 
         session.name = str(state.get("name") or session.name)
-        session.descriptor_name = state.get("descriptorName")
         session.dirty = bool(state.get("dirty"))
         session.partition = (
             int(state["partition"]) if state.get("partition") is not None else None
         )
-        session.ffs_source_names = {
+        session.source_names = {
             str(path): str(name)
-            for path, name in (state.get("ffsSourceNames") or {}).items()
+            for path, name in (state.get("sourceNames") or {}).items()
         }
         session.distribution_name = state.get("distributionName")
         session.target_hardware = str(state.get("targetHardware") or "auto")

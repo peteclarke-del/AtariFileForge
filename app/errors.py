@@ -28,9 +28,15 @@ class DestinationExistsError(DiskError):
         self.conflict = conflict
         super().__init__(
             f"{conflict.get('sourceName') or 'The source image'} cannot use "
-            f"{conflict['destination']} because that drawer already exists."
+            f"{conflict['destination']} because that folder already exists."
         )
 
 
-class DMSError(ValueError):
-    """The bytes are not a usable DiskMasher archive."""
+class OperationCancelled(DiskError):
+    """A long operation was cancelled by the caller.
+
+    This lives beside the other errors rather than in the operation registry so
+    a service can raise it, and a caller can catch it, without importing the
+    disk service. That import would be a cycle: the disk service already
+    depends on nearly every service that might want to cancel.
+    """

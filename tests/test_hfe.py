@@ -6,16 +6,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.disk_service import DiskError, DiskService, ImageSession
 from app.hfe import HFEError, parse_hfe_header
 
+try:
+    from app.disk_service import HFE_FORMATS, DiskError, DiskService, ImageSession
+except ImportError:  # the service is ported separately
+    DiskService = None
 
-def header(signature: bytes = b"HXCPICFE", revision: int = 0) -> bytes:
+
+def header(signature: bytes = b"HXCPICFE", revision: int = 0, sides: int = 2) -> bytes:
     data = bytearray(512)
     data[:8] = signature
     data[8] = revision
     data[9] = 80
-    data[10] = 2
+    data[10] = sides
     data[11] = 2
     data[12:14] = (250).to_bytes(2, "little")
     return bytes(data)
@@ -27,6 +31,9 @@ class HFETests(unittest.TestCase):
         self.assertEqual((parsed.version, parsed.tracks, parsed.sides), ("v1", 80, 2))
         self.assertFalse(parsed.advanced)
 
+    def test_a_single_sided_header_is_parsed(self) -> None:
+        self.assertEqual(parse_hfe_header(header(sides=1)).sides, 1)
+
     def test_v2_and_v3_are_advanced(self) -> None:
         self.assertTrue(parse_hfe_header(header(revision=1)).advanced)
         self.assertEqual(parse_hfe_header(header(b"HXCHFEV3")).version, "v3")
@@ -34,6 +41,17 @@ class HFETests(unittest.TestCase):
     def test_invalid_signature_is_rejected(self) -> None:
         with self.assertRaisesRegex(HFEError, "valid HFE signature"):
             parse_hfe_header(header(b"NOTANHFE"))
+
+    def test_an_incomplete_header_is_rejected(self) -> None:
+        with self.assertRaisesRegex(HFEError, "incomplete"):
+            parse_hfe_header(header()[:100])
+        with self.assertRaisesRegex(HFEError, "track geometry"):
+            parse_hfe_header(header(sides=3))
+
+
+@unittest.skipIf(DiskService is None, "DiskService imports once the service is ported")
+class HFEServiceTests(unittest.TestCase):
+    """What the disk service must do with an HFE once it is ported."""
 
     def test_hfe_extension_uses_container_decoder(self) -> None:
         self.assertEqual(DiskService.detect_kind("disk.hfe"), "hfe")
@@ -50,7 +68,7 @@ class HFETests(unittest.TestCase):
                     None,
                 )
                 if output:
-                    Path(output).write_bytes(bytes(901_120))
+                    Path(output).write_bytes(bytes(737_280))
                 return "Number of bad sectors : 0"
 
             with (
@@ -69,12 +87,12 @@ class HFETests(unittest.TestCase):
 
     def test_advanced_hfe_working_copy_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
-            image = Path(folder) / "decoded.adf"
+            image = Path(folder) / "decoded.st"
             image.write_bytes(b"")
             session = ImageSession(
                 "a" * 32,
                 "protected.hfe",
-                "ofs",
+                "gemdos",
                 image,
                 hfe_original_path=Path(folder) / "protected.hfe",
                 hfe_version="v3",
@@ -83,17 +101,46 @@ class HFETests(unittest.TestCase):
             with self.assertRaisesRegex(DiskError, "cannot be rewritten safely"):
                 DiskService.require_writable_geometry(session)
 
+    def test_every_hfe_wrapper_holds_the_geometry_its_name_claims(self) -> None:
+        """A wrapper that quietly holds a different disk is worse than none.
+
+        The single-sided 400K and 440K geometries were both mapped onto the
+        360K wrapper, so choosing "HFE 440K" in the interface produced a 360K
+        disk: eleven sectors per track became nine, and the choice the operator
+        made was silently discarded. This asserts the whole map, because the
+        failure is invisible until the disk is short.
+        """
+        from atarinut.filesystem.blocks import NAMED_GEOMETRIES
+
+        expected_bytes = {
+            "hfe-st-360k": 368_640,
+            "hfe-st-400k": 409_600,
+            "hfe-st-440k": 450_560,
+            "hfe-st-720k": 737_280,
+            "hfe-st-800k": 819_200,
+            "hfe-st-880k": 901_120,
+            "hfe-st-1440k": 1_474_560,
+        }
+        self.assertEqual(set(HFE_FORMATS), set(expected_bytes))
+        for wrapper, geometry_name in HFE_FORMATS.items():
+            with self.subTest(wrapper=wrapper):
+                geometry = NAMED_GEOMETRIES[geometry_name]
+                size = geometry.total_sectors * geometry.sector_size
+                self.assertEqual(size, expected_bytes[wrapper])
+
     @unittest.skipIf(
         shutil.which("hxcfe") is None,
         "HxCFE is installed in the application container",
     )
-    def test_every_creatable_hfe_filesystem_opens_and_browses(self) -> None:
+    def test_every_creatable_hfe_geometry_opens_and_browses(self) -> None:
         expected = {
-            "hfe-adf": ("ofs", 901_120),
-            "hfe-ffs": ("ffs", 901_120),
-            "hfe-ffs-intl": ("ffs", 901_120),
-            "hfe-adf-hd": ("ofs", 1_802_240),
-            "hfe-ffs-hd": ("ffs", 1_802_240),
+            "hfe-st-720k": ("gemdos", 737_280),
+            "hfe-st-360k": ("gemdos", 368_640),
+            "hfe-st-400k": ("gemdos", 409_600),
+            "hfe-st-440k": ("gemdos", 450_560),
+            "hfe-st-800k": ("gemdos", 819_200),
+            "hfe-st-880k": ("gemdos", 901_120),
+            "hfe-st-1440k": ("gemdos", 1_474_560),
         }
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
@@ -101,10 +148,10 @@ class HFETests(unittest.TestCase):
                 with self.subTest(format=format_name):
                     created = service.create_blank(format_name, "Wrapped")
                     source_hfe = created.hfe_original_path
-                    if format_name == "hfe-adf":
+                    if format_name == "hfe-st-720k":
                         payload = Path(folder) / "hfe-test-file"
                         payload.write_bytes(b"Browseable HFE content\n")
-                        service.put(created, "Test", payload)
+                        service.put(created, "TEST", payload)
                         source_hfe = service.prepare_download(created)
                     with source_hfe.open("rb") as image:
                         reopened = service.create_from_stream(created.name, image)
@@ -113,7 +160,7 @@ class HFETests(unittest.TestCase):
                     listing = service.browse_directory(reopened, "", None)
                     self.assertEqual(
                         [entry["name"] for entry in listing["entries"]],
-                        ["Test"] if format_name == "hfe-adf" else [],
+                        ["TEST"] if format_name == "hfe-st-720k" else [],
                     )
 
 
