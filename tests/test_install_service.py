@@ -52,12 +52,12 @@ class StagingTests(unittest.TestCase):
         self.drive = self._drive()
 
     def _drive(self, name: str = "SYSTEM"):
-        drive = self.service.create_blank("ffs-hard", name, "40MB")
+        drive = self.service.create_blank("hd", name, "40MB")
         self.service.select_partition(drive, 0)
         return drive
 
     def _floppy(self, name: str, *, payload: bytes, protection: str = "----rwed", comment: str = "") -> object:
-        floppy = self.service.create_blank("adf", name)
+        floppy = self.service.create_blank("ds-720k", name)
         self.service.make_directory(floppy, "s")
         loader = self.root / f"loader-{name}"
         loader.write_bytes(b"\x00\x00\x03\xf3loader")
@@ -299,7 +299,7 @@ class StagingTests(unittest.TestCase):
 
     def test_a_partition_table_is_not_a_place_to_stage_onto(self) -> None:
         """A drive with no partition selected is an index, not a volume."""
-        drive = self.service.create_blank("ffs-hard", "TARGET", "40MB")
+        drive = self.service.create_blank("hd", "TARGET", "40MB")
         with self.assertRaises(DiskError):
             self.service.stage_disk(self._floppy("GAME", payload=b"data"), drive, "Title")
 
@@ -309,7 +309,7 @@ class WHDLoadInstallTests(unittest.TestCase):
         self._temporary = tempfile.TemporaryDirectory()
         self.root = Path(self._temporary.name)
         self.service = DiskService(self.root / "work")
-        self.drive = self.service.create_blank("ffs-hard", "SYSTEM", "40MB")
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(self.drive, 0)
         self.addCleanup(self._temporary.cleanup)
 
@@ -437,7 +437,7 @@ class WHDLoadSlaveTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.service = DiskService(Path(self._temporary.name) / "work")
-        self.drive = self.service.create_blank("ffs-hard", "SYSTEM", "40MB")
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(self.drive, 0)
         self.addCleanup(self._temporary.cleanup)
 
