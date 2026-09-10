@@ -24,15 +24,21 @@ window.AtariFileVisuals = (() => {
     file: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h8l4 4v13H6z"/><path d="M14 3.5v4h4"/></svg>',
   };
 
-  const archiveNamePattern = /\.(?:dms|adz|lha|lzx|zip|tar|tgz|tbz2?|txz|gz|gzip|bz2|xz)$/i;
-  // GEMDOS runs S/Startup-Sequence at boot; the rest are the names a disk
-  // conventionally gives its own launcher.
-  const scriptNamePattern = /^(?:startup-sequence|user-startup|shell-startup|diskmenu|startup|start|loader|menu|boot)(?:\.|$)/i;
-  // Workbench object types from a .info icon. A Tool is an executable and a
-  // Kickstart icon marks a ROM image; a Project only says that some tool opens
-  // it, so it proves nothing about the content.
-  const WB_TOOL = "3";
-  const WB_KICK = "7";
+  // The names GEMDOS gives its files are 8.3 and case-insensitive, so the
+  // extension is the strongest hint a listing offers before the bytes are
+  // read. Archives and disk images share one icon because both are containers
+  // the pane can open in place.
+  const executableNamePattern = /\.(?:prg|tos|ttp|app|acc|gtp)$/i;
+  const basicNamePattern = /\.(?:gfa|bas|lst|sto|stb|mbs)$/i;
+  const systemNamePattern = /\.(?:inf|cpx|rsc|sys|cnf|acx|prx|apx|xfs|xdd)$/i;
+  const pictureNamePattern = /\.(?:img|pi1|pi2|pi3|pc1|pc2|pc3|neo|deg|degas|iff|tny|tn1|tn2|tn3|spu|spc|gif|xga|tga)$/i;
+  const musicNamePattern = /\.(?:mod|snd|sndh|sam|avr|dvs|mus|ym|sc68|mid|midi)$/i;
+  const archiveNamePattern = /\.(?:st|msa|dim|stx|zip|lzh|lha|arc|arj|zoo|tar|gz|tgz|hfe|scp|ipf)$/i;
+  const textNamePattern = /\.(?:txt|doc|asc|readme|1st|me|nfo|diz|hyp|c|h|s|asm)$/i;
+  // The desktop reads DESKTOP.INF (TOS 1), NEWDESK.INF (TOS 2 and 3) and
+  // EMUDESK.INF (EmuTOS) at boot; MINT.CNF configures the kernel; the rest
+  // are the conventional names for other configuration and driver files.
+  const scriptNamePattern = /^(?:desktop\.inf|newdesk\.inf|emudesk\.inf|mint\.cnf|.+\.inf|.+\.cnf|.+\.sys)$/i;
 
   function fileKindKey(pane, name) {
     return [pane.partition ?? "image", pane.side ?? "side", pane.path, pane.archivePath || "", pane.archiveMember || "", name]
@@ -45,20 +51,22 @@ window.AtariFileVisuals = (() => {
     let label = "Binary file";
     const name = String(entry.name || "");
     const cached = entry.contentKind || pane.fileKinds?.[fileKindKey(pane, name)];
-    const filetype = String(entry.filetype ?? "").trim();
     if (entryType === "disk") [kind, label] = ["disk", "Disk image"];
     else if (entryType === "rom-bank") [kind, label] = ["rom", "ROM bank"];
     else if (isVirtual) [kind, label] = ["catalogue", "Grouped results"];
-    else if (entryType === "dir") [kind, label] = ["folder", pane.archivePath ? "Container folder" : "Directory"];
-    else if (isArchiveFile || cached === "container" || archiveNamePattern.test(name)) [kind, label] = ["archive", "Archive or disk container"];
-    else if (filetype === WB_KICK) [kind, label] = ["rom", "Kickstart ROM image"];
-    else if (cached === "basic" || /\.(?:bas|basic|abas)$/i.test(name)) [kind, label] = ["basic", "ST BASIC program"];
-    else if (cached === "script" || scriptNamePattern.test(name)) [kind, label] = ["script", "GEMDOS script"];
-    else if (cached === "text" || /\.(?:txt|text|doc|guide|readme|md)$/i.test(name) || /^(?:readme|read\.me|license|copying|install)(?:\.|$)/i.test(name)) [kind, label] = ["text", "Text file"];
-    else if (filetype === WB_TOOL) [kind, label] = ["binary", "Workbench tool"];
+    else if (entryType === "dir") [kind, label] = ["folder", pane.archivePath ? "Container folder" : "Folder"];
+    else if (isArchiveFile || cached === "container" || archiveNamePattern.test(name)) [kind, label] = ["archive", "Archive or disk image"];
+    else if (cached === "rom" || /\.(?:rom|img\.rom|tos)$/i.test(name) && /^tos/i.test(name)) [kind, label] = ["rom", "TOS ROM image"];
+    else if (cached === "executable" || executableNamePattern.test(name)) [kind, label] = ["binary", "GEMDOS program"];
+    else if (cached === "basic" || basicNamePattern.test(name)) [kind, label] = ["basic", "BASIC program"];
+    else if (cached === "script" || scriptNamePattern.test(name)) [kind, label] = ["script", "Configuration file"];
+    else if (cached === "system" || systemNamePattern.test(name)) [kind, label] = ["binary", "System or resource file"];
+    else if (cached === "picture" || pictureNamePattern.test(name)) [kind, label] = ["file", "Picture"];
+    else if (cached === "music" || musicNamePattern.test(name)) [kind, label] = ["file", "Music or sample"];
+    else if (cached === "text" || textNamePattern.test(name) || /^(?:readme|read\.me|liesmich|lisez|install|history)(?:\.|$)/i.test(name)) [kind, label] = ["text", "Text file"];
     else if (entry.length === 0) [kind, label] = ["file", "Empty file"];
     return { kind, label, markup: FILE_ICONS[kind] };
   }
 
-  return { entryIcon, fileKindKey, FILE_ICONS, PANE_ICONS };
+  return { entryIcon, fileKindKey, FILE_ICONS, PANE_ICONS, scriptNamePattern, archiveNamePattern, executableNamePattern };
 })();
