@@ -201,7 +201,9 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
     }, ids);
     await page.waitForFunction(() => !document.querySelector("[data-apply-patch]")?.disabled);
     const preflight = await page.locator(".patch-preflight-results").textContent();
-    if (!preflight.includes("BASEblank.st") || !preflight.includes("CANDIDATEblank.st") || !preflight.includes("1operations") || !preflight.includes("PATCHED.DATadded")) {
+    // The names come from the two images this test made, so a rename of the
+    // fixtures cannot leave the assertion quietly checking nothing.
+    if (!preflight.includes("BASECOMPAREA.st") || !preflight.includes("CANDIDATECOMPAREB.st") || !preflight.includes("1operations") || !preflight.includes("PATCHED.DATadded")) {
       throw new Error(`Patch preflight did not describe the exact change: ${preflight}`);
     }
     const preflightJob = await page.evaluate(async () => {

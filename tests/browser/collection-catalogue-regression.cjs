@@ -37,12 +37,18 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
     page = await context.newPage();
     await page.goto(target, { waitUntil: "domcontentloaded" });
     try {
-      await page.waitForFunction(() => document.querySelector(".pane .image-title")?.textContent.includes("blank.st"));
+      // The fixture is created as COLLECT, so the restored pane carries that
+      // name. Waiting for another one meant this only ever proved a timeout.
+      await page.waitForFunction(() => document.querySelector(".pane .image-title")?.textContent.includes("COLLECT.st"));
     } catch (error) {
       const state = await page.evaluate(() => ({ saved: localStorage.getItem("atari-file-forge-dynamic-panes"), titles: [...document.querySelectorAll(".pane .image-title")].map(item => item.textContent), text: document.body.innerText.slice(0, 800) }));
       throw new Error(`Collection fixture pane was not restored: ${JSON.stringify(state)} · ${error.message}`);
     }
     await page.locator("#collectionButton").click();
+    // Wait for the dialog rather than racing it: the fields do not exist
+    // until it opens, and filling a field that is not there yet silently
+    // does nothing.
+    await page.locator('[name="collectionLocation"]').waitFor({ state: "visible" });
     await page.locator('[name="collectionLocation"]').fill("Gotek USB stick");
     await page.locator('[name="collectionMachines"]').fill("Atari 1040STE, Atari Mega ST");
     await page.locator("[data-index-pane]").click();
