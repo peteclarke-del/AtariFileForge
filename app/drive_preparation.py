@@ -890,12 +890,17 @@ class DrivePreparationMixin:
         drive = self.partition_label(session) or "C"
         name = next(
             (item for item in DESKTOP_FILES if volume_copy.entry_exists(self, session, item)),
-            NEWDESK,
+            "",
         )
-        try:
-            existing = self.read_file(session, name).decode("latin-1")
-        except DiskError:
-            existing = default_desktop(drive)
+        # A volume with no desktop configuration at all is given the default
+        # one to add to. Reading a file that is known not to be there raises
+        # out of the engine rather than returning nothing, so the existence
+        # check decides, not the exception.
+        existing = (
+            self.read_file(session, name).decode("latin-1")
+            if name else default_desktop(drive)
+        )
+        name = name or NEWDESK
         records = [application_record(program, documents=documents, drive=drive)]
         if on_desktop:
             records.append(desktop_icon_record(program, label, drive=drive))

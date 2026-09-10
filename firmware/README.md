@@ -122,6 +122,35 @@ You do not need a driver at all if you are booting the drive under EmuTOS,
 which mounts a partitioned drive without one. That is the default, and it is
 the only route that needs nothing you have to find first.
 
+## Replacement desktops
+
+The built-in TOS desktop has no icons of your own, no program groups and no
+way to find a file, so every serious Atari acquired a replacement. Preparing a
+drive can install one, and the same rule applies as to the drivers: put your
+own copy in place and it will be offered by name.
+
+Each one goes in its own folder under `firmware/desktops/`, or under
+`~/.config/atari-file-forge/desktops`. One level of nesting is read, so a
+folder per desktop unpacked as it was published is the shape to use. Naming
+the folder after the release, `TERADESK_4.06` say, means the version is read
+from it and reported.
+
+| Desktop | Licence | Suits |
+| --- | --- | --- |
+| TeraDesk | Free software, GPL | Any machine, and the one to choose below 2 MB |
+| NeoDesk 4 | Commercial, Gribnif Software | ST to TT with 2 MB or more |
+| Gemini with Mupfel | Free to use | Anyone who wants a shell in the desktop |
+| Thing | Free to use | STE and later, and anything running MagiC or MiNT |
+
+Nothing here is bundled, including TeraDesk. The application recommends one
+for the machine the drive is being built for and installs the copy you supply.
+
+What it does not do is make the replacement start instead of the built-in
+desktop. Every TOS release and every one of these programs arranges that
+differently, so the desktop is installed, listed among the applications and
+put on the desktop itself, and the result says plainly that the built-in
+desktop still comes up first.
+
 ## Checking a ROM
 
     python3 -m atarinut identify /path/to/tos104uk.img
