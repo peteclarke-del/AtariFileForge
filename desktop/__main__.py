@@ -136,6 +136,22 @@ def _review_open_plans(message: str) -> list[dict]:
     return reviewed
 
 
+def _open_error_script(name: str, message: str, pane: int | None) -> str:
+    """The call that reports a failed open and releases the pane awaiting it.
+
+    A pane is put into the opening state before the work starts and nothing
+    else takes it out again, so a failure has to name the pane it left
+    waiting. Without that the workspace goes on saying it is working on an
+    image that was refused seconds ago, which reads as a hang rather than an
+    answer.
+    """
+    return (
+        "window.AtariDesktopHost.showError("
+        f"{json.dumps(f'Could not open {name}: {message}')}, "
+        f"{json.dumps(pane)});"
+    )
+
+
 def _close_chooser_later(glib, chooser) -> None:
     """Tear a native dialog down after its own response has been delivered.
 
@@ -576,10 +592,10 @@ def run(argv: list[str] | None = None) -> int:
                     self.open_queue.task_done()
                     return
                 display_name = "the selected image"
+                preferred_pane = plan.get("preferredPane") if isinstance(plan, dict) else None
                 try:
                     paths = plan["paths"]
                     display_name = paths[0].name
-                    preferred_pane = plan.get("preferredPane")
                     GLib.idle_add(self._deliver_opening, display_name, preferred_pane)
                     body = {
                         "path": str(paths[0]),
@@ -608,9 +624,9 @@ def run(argv: list[str] | None = None) -> int:
                         message = str(exc.reason or exc)
                     finally:
                         exc.close()
-                    GLib.idle_add(self._deliver_error, display_name, message)
+                    GLib.idle_add(self._deliver_error, display_name, message, preferred_pane)
                 except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as exc:
-                    GLib.idle_add(self._deliver_error, display_name, str(exc))
+                    GLib.idle_add(self._deliver_error, display_name, str(exc), preferred_pane)
                 finally:
                     self.open_queue.task_done()
 
@@ -644,12 +660,8 @@ def run(argv: list[str] | None = None) -> int:
             self._evaluate_frontend(script)
             return GLib.SOURCE_REMOVE
 
-        def _deliver_error(self, name: str, message: str) -> bool:
-            script = (
-                "window.AtariDesktopHost.showError("
-                f"{json.dumps(f'Could not open {name}: {message}')});"
-            )
-            self._evaluate_frontend(script)
+        def _deliver_error(self, name: str, message: str, pane: int | None = None) -> bool:
+            self._evaluate_frontend(_open_error_script(name, message, pane))
             return GLib.SOURCE_REMOVE
 
         def _stop_workers(self) -> None:
