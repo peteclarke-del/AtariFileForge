@@ -5,7 +5,11 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from desktop.__main__ import _desktop_message_text, _folder_selection
+from desktop.__main__ import (
+    _close_chooser_later,
+    _desktop_message_text,
+    _folder_selection,
+)
 
 
 class _ScriptValue:
@@ -50,8 +54,6 @@ class DesktopMessageTests(unittest.TestCase):
             _desktop_message_text(_ScriptValue(42))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class FolderSelectionTests(unittest.TestCase):
@@ -105,3 +107,56 @@ class FolderSelectionTests(unittest.TestCase):
             (self.root / f"disk{index:02d}.st").write_bytes(b"x")
 
         self.assertEqual(len(_folder_selection(self.root, limit=5)), 5)
+
+
+class _RecordingGLib:
+    """Just enough of GLib to see whether the teardown was deferred."""
+
+    def __init__(self) -> None:
+        self.deferred = []
+
+    def idle_add(self, callback, *args):
+        self.deferred.append((callback, args))
+        return 1
+
+
+class _Chooser:
+    def __init__(self) -> None:
+        self.destroyed = False
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+class NativeChooserTeardownTests(unittest.TestCase):
+    """A native dialog must outlive the response it is delivering.
+
+    GtkNativeDialog is portal-backed. Destroying one from inside its own
+    response handler frees it while GTK is still unwinding that emission,
+    which segfaults inside GTK with nothing in the Python traceback to show
+    for it. The crash is intermittent, because it depends on whether the
+    freed memory has been reused by the time GTK reads it again, so the
+    ordering is asserted rather than left to be noticed.
+    """
+
+    def test_the_dialog_is_not_destroyed_while_its_signal_is_running(self) -> None:
+        glib = _RecordingGLib()
+        chooser = _Chooser()
+        _close_chooser_later(glib, chooser)
+        self.assertFalse(
+            chooser.destroyed,
+            "the dialog was torn down inside its own response emission",
+        )
+        self.assertEqual(len(glib.deferred), 1)
+
+    def test_the_deferred_teardown_really_destroys_the_dialog(self) -> None:
+        glib = _RecordingGLib()
+        chooser = _Chooser()
+        _close_chooser_later(glib, chooser)
+        callback, args = glib.deferred[0]
+        callback(*args)
+        self.assertTrue(chooser.destroyed)
+
+
+if __name__ == "__main__":
+    unittest.main()
