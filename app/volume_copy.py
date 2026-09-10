@@ -131,7 +131,7 @@ def directory_exists(service: DiskService, session: ImageSession, path: str) -> 
 
 
 def entry_exists(service: DiskService, session: ImageSession, path: str) -> bool:
-    """Whether anything at all, file or drawer, is at this path.
+    """Whether anything at all, file or folder, is at this path.
 
     ``directory_exists`` can only answer for folders, because listing is what
     it asks. Asking it about a file says the file is absent, which would turn
@@ -174,7 +174,7 @@ def files_present(
     """Every file under ``directory``, keyed by its case-folded relative path.
 
     Read in one pass and compared against, rather than asking the volume about
-    each name in turn. A Workbench disk holds well over a thousand entries, and
+    each name in turn. A system disk holds well over a thousand entries, and
     the difference is an install that takes a moment against one that takes
     minutes.
     """
@@ -235,7 +235,7 @@ def write_file(
 
 
 def delete_tree(service: DiskService, target: ImageSession, path: str) -> None:
-    """Remove a drawer and everything below it."""
+    """Remove a folder and everything below it."""
     from .gemdos_items import delete_gemdos_items
 
     delete_gemdos_items(service, target, [path])
@@ -351,13 +351,13 @@ def copy_volume_tree(
         for path in temporary:
             path.unlink(missing_ok=True)
 
-    result.directories = _create_carried_drawers(
+    result.directories = _create_carried_directories(
         service, target, destination, carried_directories, destination_items, result.warnings
     )
     return result
 
 
-def _create_carried_drawers(
+def _create_carried_directories(
     service: DiskService,
     target: ImageSession,
     destination: str,

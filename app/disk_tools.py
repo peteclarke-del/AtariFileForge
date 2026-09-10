@@ -9,22 +9,25 @@ from .errors import DiskError
 
 
 def friendly_engine_error(message: str) -> str:
-    # A disc can carry an Atari boot block and no GEMDOS filing system at
-    # all. Atari UNIX ships exactly that: the boot block chain-loads the UNIX
-    # bootstrap and the rest of the disc is a UNIX filesystem, so there is no
-    # root block to find. Calling such a disc damaged is wrong, and it sends
-    # somebody looking for a fault in a perfectly good dump.
-    if "boot block" in message and "no readable root block" in message:
+    # A disk can carry an executable Atari boot sector and no filing system
+    # at all. A great many ST games ship exactly that: the boot sector is the
+    # game's own loader and the rest of the disk is whatever layout it wants.
+    # Calling such a disk damaged is wrong, and it sends somebody looking for
+    # a fault in a perfectly good dump.
+    if "boot sector" in message and "no filing system" in message:
         return (
-            "This disc has an Atari boot block but no GEMDOS filing system. "
-            "It is either unformatted or damaged, or it is a disc that boots "
-            "an operating system of its own, such as an Atari UNIX bootstrap. "
-            "Its bytes can still be inspected in the hex editor."
+            "This disk has an executable Atari boot sector but no GEMDOS "
+            "filing system. It is either unformatted, or it is a disk that "
+            "boots a loader of its own, which is how a great many ST games "
+            "were published. Its bytes can still be inspected in the hex "
+            "editor."
         )
-    if "outside this volume" in message and "Block" in message:
+    if "outside this volume" in message:
         return (
-            "The hard-drive image geometry is incomplete or invalid. "
-            "For an RDB-less hardfile, reopen the original HDA with its matching GEO file."
+            "This volume's directory points at a cluster the volume does not "
+            "contain. The image is damaged, truncated, or is a disk whose "
+            "loader wrote its own layout where a directory would be. Its bytes "
+            "can still be inspected in the hex editor."
         )
     if "Traceback (most recent call last)" in message:
         lines = [line.strip() for line in message.splitlines() if line.strip()]
