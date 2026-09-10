@@ -22,7 +22,7 @@ def _checkpoint_source(
     """Return the oldest retained pre-change snapshot and its recorded state."""
     snapshot = service.oldest_checkpoint_snapshot(session)
     if snapshot is not None:
-        image, _companion, metadata = snapshot
+        image, metadata = snapshot
         state = dict(metadata.get("state") or {})
         state["workflowCheckpointReason"] = str(
             metadata.get("reason") or metadata.get("name") or "retained checkpoint"

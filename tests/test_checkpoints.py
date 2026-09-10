@@ -53,14 +53,11 @@ class CheckpointTests(unittest.TestCase):
             session.path.write_bytes(b"later")
             service.create_checkpoint(session, "Later point")
 
-            image, companion, metadata = service.oldest_checkpoint_snapshot(session)
+            image, metadata = service.oldest_checkpoint_snapshot(session)
 
             self.assertEqual(metadata["id"], oldest["id"])
             self.assertEqual(image.read_bytes(), b"original image")
             self.assertEqual(metadata["reason"], "Workflow base")
-            # An Atari drive describes its own shape in its root sector, so
-            # there is no companion file for a checkpoint to keep beside it.
-            self.assertIsNone(companion)
 
     def test_undo_restores_and_consumes_latest_automatic_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

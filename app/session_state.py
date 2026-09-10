@@ -49,8 +49,6 @@ def session_metadata(session: ImageSession) -> dict:
         "id": session.id,
         "name": session.name,
         "kind": session.kind,
-        "descriptorName": session.descriptor_name,
-        "descriptorFile": session.descriptor_path.name if session.descriptor_path else None,
         "partition": session.partition,
         "sourceNames": session.source_names,
         "distributionName": session.distribution_name,

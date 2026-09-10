@@ -72,12 +72,7 @@ window.AtariPaneView = (() => {
       if (formats.length) {
         return { available: true, label: `Export ${image.name} as another format` };
       }
-      return {
-        available: false,
-        label: image.hasDescriptor
-          ? "Export as… · an AHDI drive image with its own geometry descriptor cannot be converted"
-          : "Export as… · no compatible format for this media",
-      };
+      return { available: false, label: "Export as… · no compatible format for this media" };
     };
 
     return { archiveCrumbs, capacityMarkup, crumbs, exportAvailability, paneFormat };
