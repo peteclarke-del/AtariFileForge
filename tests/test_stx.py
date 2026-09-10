@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 import unittest
 
 from app import stx
@@ -187,3 +188,74 @@ class ProtectionReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProtectedDiskLayoutTests(unittest.TestCase):
+    """The layout comes from the capture, not from what the disk claims.
+
+    Reproduces the shape of a real protected release: eighty single-sided
+    tracks of ten sectors with one sector per track the controller rejected,
+    two further tracks captured past the data area, and a parameter block in
+    the boot sector that describes a nine-sector disk it is not.
+    """
+
+    SECTORS = 10
+    TRACKS = 80
+
+    def _capture(self) -> bytes:
+        specs = []
+        for track in range(self.TRACKS):
+            spec = standard_track(track, 0, self.SECTORS)
+            # The protection: one sector per track that never reads cleanly.
+            spec.sectors[-1].fdc_status = 0x08
+            if track == 0:
+                # A parameter block declaring nine sectors per track, which is
+                # what a disk that boots its own loader is free to do.
+                boot = bytearray(512)
+                boot[0:3] = b"\x60\x1c\x00"
+                struct.pack_into("<H", boot, 0x0B, 512)
+                boot[0x0D] = 2
+                struct.pack_into("<H", boot, 0x0E, 1)
+                boot[0x10] = 2
+                struct.pack_into("<H", boot, 0x11, 112)
+                struct.pack_into("<H", boot, 0x13, 720)
+                boot[0x15] = 0xF9
+                struct.pack_into("<H", boot, 0x16, 5)
+                struct.pack_into("<H", boot, 0x18, 9)
+                struct.pack_into("<H", boot, 0x1A, 1)
+                spec.sectors[0].data = bytes(boot)
+            specs.append(spec)
+        # Tracks past the data area, holding no sectors at all.
+        specs.append(TrackSpec(80, 0, []))
+        specs.append(TrackSpec(81, 0, []))
+        return build_stx(specs)
+
+    def test_the_capture_settles_the_layout_not_the_parameter_block(self) -> None:
+        decoded = decode_stx(self._capture())
+        self.assertEqual(decoded.geometry.sectors, self.SECTORS)
+        self.assertEqual(decoded.geometry.tracks, self.TRACKS)
+        self.assertEqual(decoded.geometry.sides, 1)
+        self.assertEqual(len(decoded.image), self.TRACKS * self.SECTORS * 512)
+
+    def test_the_disagreement_with_the_parameter_block_is_reported(self) -> None:
+        protection = decode_stx(self._capture()).protection
+        self.assertEqual(protection["declaredSectorsPerTrack"], 9)
+        self.assertTrue(
+            any("parameter block claims 9" in line for line in decode_stx(self._capture()).warnings),
+            "the disagreement must be stated rather than silently resolved",
+        )
+
+    def test_tracks_past_the_data_area_do_not_inflate_the_image(self) -> None:
+        decoded = decode_stx(self._capture())
+        self.assertEqual(decoded.protection["extraTracks"], 2)
+        self.assertEqual(decoded.protection["sectorsExpected"], self.TRACKS * self.SECTORS)
+
+    def test_every_rejected_sector_is_counted_and_left_blank(self) -> None:
+        decoded = decode_stx(self._capture())
+        self.assertEqual(decoded.protection["unreadableSectors"], self.TRACKS)
+        self.assertEqual(
+            decoded.protection["sectorsRecovered"],
+            self.TRACKS * (self.SECTORS - 1),
+        )
+        blank = decoded.image[(self.SECTORS - 1) * 512 : self.SECTORS * 512]
+        self.assertEqual(blank, bytes(512))
