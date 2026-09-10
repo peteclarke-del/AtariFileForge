@@ -16,6 +16,11 @@ from __future__ import annotations
 from flask import Blueprint, jsonify, request
 
 from ..disk_service import DiskError, DiskService
+from ..desktop_replacement import (
+    NO_DESKTOP,
+    describe_desktops,
+    recommended_desktop,
+)
 from ..drive_preparation import (
     DEFAULT_FOLDERS,
     DRIVERLESS,
@@ -199,6 +204,42 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
             program,
             documents=str(data.get("documents") or ""),
             label=str(data.get("label") or ""),
+            on_desktop=data.get("onDesktop", True) is not False,
+        )
+        return jsonify(image=service.summary(session), desktop=result)
+
+    @blueprint.get("/api/install/desktops")
+    def desktop_replacements():
+        """The replacement desktops, and which one suits the machine asked about.
+
+        The built-in TOS desktop cannot be replaced by anything this ships,
+        because three of these four belong to somebody. What it can do is
+        install the operator's own copy and say which one is the sensible
+        choice for the machine the drive is being built for, which is the part
+        that otherwise takes an evening of reading forum posts.
+        """
+        machine = str(request.args.get("machine") or "st")
+        try:
+            memory = int(request.args.get("memory") or 0)
+        except ValueError:
+            memory = 0
+        return jsonify(
+            desktops=describe_desktops(),
+            available=service.available_desktops(),
+            recommended=recommended_desktop(machine, memory),
+            default=NO_DESKTOP,
+        )
+
+    @blueprint.post("/api/images/<image_id>/install/desktop-replacement")
+    @image_mutation("installing a replacement desktop")
+    def install_desktop_replacement(image_id):
+        """Copy a replacement desktop onto this drive and install it."""
+        data = payload()
+        session = service.get(image_id)
+        apply_partition(service, session, data.get("partition"))
+        result = service.install_desktop_replacement(
+            session,
+            str(data.get("desktop") or ""),
             on_desktop=data.get("onDesktop", True) is not False,
         )
         return jsonify(image=service.summary(session), desktop=result)

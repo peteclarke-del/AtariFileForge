@@ -3593,9 +3593,19 @@ async function showPrepareDrive(index) {
   const target = volumeLabel(pane) || pane.image.name;
   const partition = pane.partition == null ? "" : `?partition=${pane.partition}`;
   let state = null;
+  let desktops = { desktops: [], available: [], recommended: null };
   try {
-    state = (await paneOperation(index, "Reading how this drive is prepared…", () =>
-      api(`/api/images/${pane.image.id}/install/driver${partition}`))).preparation;
+    const profile = activeWorkbenchProfile();
+    const machine = profile.profile?.machine || profile.machine || "st";
+    const memory = Number(profile.memoryBytes || profile.profile?.memoryBytes || 0);
+    const query = new URLSearchParams({ machine, memory: String(memory) });
+    [state, desktops] = await paneOperation(index, "Reading how this drive is prepared…", async () => {
+      const [preparation, catalogue] = await Promise.all([
+        api(`/api/images/${pane.image.id}/install/driver${partition}`),
+        api(`/api/install/desktops?${query}`).catch(() => ({ desktops: [], available: [], recommended: null })),
+      ]);
+      return [preparation.preparation, catalogue];
+    });
   } catch (error) {
     return toast(error.message, true);
   }
@@ -3618,6 +3628,7 @@ async function showPrepareDrive(index) {
         ${published.map(driver => `<option value="${esc(driver.id)}"${supplied[driver.id] && !supplied[driver.id].available ? " disabled" : ""}>${esc(driver.label)}${supplied[driver.id]?.version ? ` · ${esc(supplied[driver.id].version)}` : ""}${supplied[driver.id] && !supplied[driver.id].available ? " · not supplied" : ""}</option>`).join("")}
       </select>
       <small data-driver-detail>${esc(detailFor(published[0]?.id))}</small></div>
+    ${desktopReplacementField(desktops)}
     <label class="check-field"><input type="checkbox" name="createFolders" value="yes" checked> Create the folders a prepared drive expects (AUTO, GEMSYS, GAMES)</label>
     <label class="check-field"><input type="checkbox" name="writeDesktop" value="yes" checked> Write a desktop configuration if this volume has none</label>
     <div class="help-note">Files already on the volume are left alone, so an existing drive is added to rather than replaced, and preparing twice does not undo work done in between.</div>
@@ -3639,6 +3650,18 @@ async function showPrepareDrive(index) {
         }),
       }));
     pane.image = result.image;
+    const chosenDesktop = String(form.get("driveDesktop") || "desktop-none");
+    if (chosenDesktop !== "desktop-none") {
+      const installed = await trackedPaneOperation(index, "Installing the desktop…", operationId =>
+        api(`/api/images/${pane.image.id}/install/desktop-replacement`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ desktop: chosenDesktop, partition: pane.partition, operationId }),
+        }));
+      pane.image = installed.image;
+      (installed.desktop.warnings || []).forEach(warning => toast(warning, true));
+      toast(`${installed.desktop.label} installed into ${installed.desktop.folder} on ${target}.`);
+    }
     await loadDirectory(index);
     (result.warnings || []).forEach(warning => toast(warning, true));
     toast(result.driver.installed
@@ -3651,7 +3674,52 @@ async function showPrepareDrive(index) {
   const picker = modalContent.querySelector('[name="driveDriver"]');
   const detail = modalContent.querySelector("[data-driver-detail]");
   picker?.addEventListener("change", () => { detail.textContent = detailFor(picker.value); });
+  const desktopPicker = modalContent.querySelector('[name="driveDesktop"]');
+  const desktopDetail = modalContent.querySelector("[data-desktop-detail]");
+  desktopPicker?.addEventListener("change", () => {
+    desktopDetail.textContent = desktopReplacementDetail(desktops, desktopPicker.value);
+  });
   return closed;
+}
+
+//: The replacement desktop. The built-in TOS desktop has no icons of your
+//: own, no program groups and no way to find a file, so every serious machine
+//: acquired a replacement. Three of the four belong to somebody, so what this
+//: offers is the operator's own copy, and the recommendation for the machine
+//: the drive is being built for.
+function desktopReplacementDetail(catalogue, id) {
+  if (!id || id === "desktop-none") {
+    return "The drive keeps the built-in TOS desktop. A replacement can be installed at any time afterwards.";
+  }
+  const desktop = (catalogue.desktops || []).find(item => item.id === id);
+  if (!desktop) return "";
+  const supplied = (catalogue.available || []).find(item => item.id === id);
+  const recommended = catalogue.recommended?.id === id ? `${catalogue.recommended.reason} ` : "";
+  const missing = supplied && !supplied.available
+    ? ` No copy of ${desktop.label} was found, so it cannot be installed yet. ${desktop.licence}`
+    : "";
+  return `${recommended}${desktop.note}${missing}`;
+}
+
+function desktopReplacementField(catalogue) {
+  const desktops = catalogue.desktops || [];
+  if (!desktops.length) return "";
+  const supplied = Object.fromEntries((catalogue.available || []).map(row => [row.id, row]));
+  const preferred = catalogue.recommended?.id;
+  const options = [{ id: "desktop-none", label: "None, keep the built-in TOS desktop" }]
+    .concat(desktops.map(desktop => ({ id: desktop.id, label: desktop.label })))
+    .map(option => {
+      const copy = supplied[option.id];
+      const unavailable = copy && !copy.available;
+      const version = copy?.version ? ` ${copy.version}` : "";
+      const suffix = unavailable ? " · not supplied" : version;
+      const chosen = option.id === preferred && !unavailable;
+      return `<option value="${esc(option.id)}"${unavailable ? " disabled" : ""}${chosen ? " selected" : ""}>${esc(option.label)}${esc(suffix)}</option>`;
+    }).join("");
+  const initial = supplied[preferred]?.available ? preferred : "desktop-none";
+  return `<div class="field"><label>Replacement desktop</label>
+      <select name="driveDesktop">${options}</select>
+      <small data-desktop-detail>${esc(desktopReplacementDetail(catalogue, initial))}</small></div>`;
 }
 
 //: Running a title's own installer. There is no tree to copy: the installer
