@@ -1,14 +1,10 @@
-"""Installing a disc, as opposed to copying one, has to be checked end to end.
+"""Installing a disk, as opposed to copying one, has to be checked end to end.
 
 These tests build real images through the public service API and read the
 results back the same way, because every interesting failure in this area is
-one where the files are present and the thing still does not run: a lost
-protection bit, a second disc that quietly replaced the first, a WHDLoad
-installed over the operator's own preferences.
-
-The WHDLoad archive is built rather than downloaded. Its layout is the part
-that matters, and building it means the tests say what the code depends on
-instead of depending on a network and a release that changes.
+one where the files are present and the thing still does not run: a second disk
+that quietly replaced the first, a set staged somewhere no Atari can reach, a
+title moved into a folder that already held something else.
 """
 
 from __future__ import annotations
@@ -17,38 +13,35 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import whdload
+from app import volume_copy
 from app.disk_service import DiskError, DiskService
-from app.gemdos_items import delete_gemdos_items as delete_ffs_items
-from app.install_service import slugify
-from tests.lha_fixture import archive, level1_member
+from app.install_service import (
+    DEFAULT_INSTALL_PARENT,
+    DEFAULT_STAGING_PARENT,
+    HOUSEKEEPING_DIRECTORY,
+    is_program_name,
+    slugify,
+)
 
 
-def whdload_archive(version: str = "20.0", *, omit: str = "") -> bytes:
-    """A WHDLoad_usr.lha with the layout the installer relies on."""
-    members = []
-    for name in list(whdload.PROGRAM_FILES) + list(whdload.SCRIPT_FILES) + [whdload.PREFERENCES_FILE]:
-        if name == omit:
-            continue
-        body = f"$VER: {Path(name).name} {version} [build 1] (01.01.2026)".encode("latin-1")
-        members.append(level1_member(whdload.archive_path(name), body + b"\x00" * 8))
-    return archive(*members)
+def program(body: bytes = b"code") -> bytes:
+    """The smallest thing TOS would accept as a program."""
+    return b"\x60\x1a" + (0).to_bytes(4, "big") * 5 + (0).to_bytes(2, "big") + body
 
 
 class StagingTests(unittest.TestCase):
     """Staging writes onto the drive, so every check is made against the drive.
 
-    The point of the change these tests describe is that a staged set has to be
-    reachable from the machine the title will run on. Reading the results back
-    off the host filesystem would pass just as well against the old behaviour,
-    which put the discs somewhere no Atari could ever see them.
+    A staged set has to be reachable from the machine the title will run on.
+    Reading the results back off the host filesystem would pass just as well
+    against a staging directory nobody with an Atari could ever open.
     """
 
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.root = Path(self._temporary.name)
-        self.service = DiskService(self.root / "work")
         self.addCleanup(self._temporary.cleanup)
+        self.service = DiskService(self.root / "work")
         self.drive = self._drive()
 
     def _drive(self, name: str = "SYSTEM"):
@@ -56,18 +49,17 @@ class StagingTests(unittest.TestCase):
         self.service.select_partition(drive, 0)
         return drive
 
-    def _floppy(self, name: str, *, payload: bytes, protection: str = "----rwed", comment: str = "") -> object:
+    def _floppy(self, name: str, *, payload: bytes = b"data", locked: bool = False):
         floppy = self.service.create_blank("ds-720k", name)
-        self.service.make_directory(floppy, "s")
-        loader = self.root / f"loader-{name}"
-        loader.write_bytes(b"\x00\x00\x03\xf3loader")
-        self.service.put(floppy, "Loader", loader, protection=protection, comment=comment or None)
-        data = self.root / f"data-{name}"
+        self.service.make_directory(floppy, "DATA")
+        launcher = self.root / f"prg-{name}"
+        launcher.write_bytes(program())
+        self.service.put(
+            floppy, "GAME.PRG", launcher, attributes="r----" if locked else None
+        )
+        data = self.root / f"dat-{name}"
         data.write_bytes(payload)
-        self.service.put(floppy, "Shared.dat", data)
-        sequence = self.root / f"seq-{name}"
-        sequence.write_bytes(b"Loader\n")
-        self.service.put(floppy, "s/Startup-Sequence", sequence)
+        self.service.put(floppy, "DATA\\LEVEL.DAT", data)
         return floppy
 
     def _names(self, directory: str) -> set[str]:
@@ -76,407 +68,291 @@ class StagingTests(unittest.TestCase):
             for row in self.service.list_directory(self.drive, directory)["entries"]
         }
 
-    def test_a_staged_disc_lands_on_the_target_image_not_on_the_host(self) -> None:
-        """The whole reason for staging is that the Atari can reach the result.
+    # -- where a staged set lands ---------------------------------------
 
-        A staged set left in a directory on the machine running this program is
-        unreachable from the emulator and from the real hardware, which is
-        exactly where the install has to be finished.
-        """
+    def test_a_staged_disk_lands_on_the_target_image_not_on_the_host(self) -> None:
         staged = self.service.stage_disk(
-            self._floppy("GAME", payload=b"data"), self.drive, "Hyper Sports"
+            self._floppy("GAME"), self.drive, "Hyper Sports"
         )
 
-        self.assertEqual(staged["path"], "Storage/Install/Hyper Sports")
+        self.assertEqual(staged["path"], "INSTALL\\STAGE\\HYPER_SP")
         self.assertEqual(
-            self.service.read_file(self.drive, "Storage/Install/Hyper Sports/s/Startup-Sequence"),
-            b"Loader\n",
+            self.service.read_file(self.drive, "INSTALL\\STAGE\\HYPER_SP\\DATA\\LEVEL.DAT"),
+            b"data",
         )
         # Nothing is left behind on the host: the working directory holds
         # sessions and checkpoints, never a staging tree.
         self.assertFalse((self.service.work_dir / "staging").exists())
 
-    def test_the_staging_drawer_can_be_chosen(self) -> None:
+    def test_the_default_staging_folder_is_a_pair_of_gemdos_names(self) -> None:
+        """The interface prints this path, and GEMDOS holds 8.3 names only."""
+        self.assertEqual(DEFAULT_STAGING_PARENT, "INSTALL\\STAGE")
+        for part in DEFAULT_STAGING_PARENT.split("\\"):
+            self.assertLessEqual(len(part), 8)
+        self.assertEqual(self.service.staging_parent(), DEFAULT_STAGING_PARENT)
+
+    def test_a_sentence_of_a_title_becomes_a_folder_gemdos_can_hold(self) -> None:
         staged = self.service.stage_disk(
-            self._floppy("GAME", payload=b"data"), self.drive, "Title", parent="Games/Waiting"
+            self._floppy("GAME"), self.drive, "Bubble Bobble (1987)"
         )
-        self.assertEqual(staged["path"], "Games/Waiting/Title")
+        self.assertEqual(staged["name"], "BUBBLE_B")
+        self.assertEqual(staged["title"], "Bubble Bobble (1987)")
 
-    def test_staging_keeps_clear_of_the_tos_install_drawer(self) -> None:
-        """A Workbench install copies the Install disk to ``Install:``.
+    def test_the_staging_folder_can_be_chosen(self) -> None:
+        staged = self.service.stage_disk(
+            self._floppy("GAME"), self.drive, "TITLE", parent="GAMES\\WAITING"
+        )
+        self.assertEqual(staged["path"], "GAMES\\WAITING\\TITLE")
 
-        Staging into the same drawer listed that disk's own ``c`` and ``Libs``
-        as though somebody had staged titles by those names, which is how the
-        collision was found. ``Storage`` is where Workbench keeps what is not
-        in use yet, so a staged set belongs there instead.
-        """
-        self.assertEqual(self.service.staging_parent(), "Storage/Install")
-        self.service.make_directory(self.drive, "Install/c")
-        self.service.stage_disk(self._floppy("GAME", payload=b"data"), self.drive, "Real Title")
+    def test_a_forward_slash_path_is_accepted_and_normalised(self) -> None:
+        """A browser joins paths its own way; GEMDOS spells them with a backslash."""
+        self.assertEqual(self.service.staging_parent("INSTALL/STAGE"), "INSTALL\\STAGE")
 
-        titles = [row["name"] for row in self.service.staged_titles(self.drive)]
+    # -- merging a set ---------------------------------------------------
 
-        self.assertEqual(titles, ["Real Title"])
+    def test_two_disks_of_one_title_merge_into_one_tree(self) -> None:
+        title = "Chuck Rock"
+        self.service.stage_disk(self._floppy("ONE", payload=b"one"), self.drive, title)
+        second = self._floppy("TWO", payload=b"one")
+        extra = self.root / "extra"
+        extra.write_bytes(b"level two")
+        self.service.put(second, "DATA\\LEVEL2.DAT", extra)
 
-    def test_a_multi_disc_set_stages_into_one_tree(self) -> None:
-        first = self._floppy("GAME1", payload=b"IDENTICAL")
-        second = self._floppy("GAME2", payload=b"IDENTICAL")
+        staged = self.service.stage_disk(second, self.drive, title)
 
-        self.service.stage_disk(first, self.drive, "Hyper Sports", disc_label="Disk 1")
-        staged = self.service.stage_disk(second, self.drive, "Hyper Sports", disc_label="Disk 2")
-
-        self.assertEqual(staged["discCount"], 2)
-        self.assertEqual([disc["volume"] for disc in staged["discs"]], ["GAME1", "GAME2"])
-        self.assertIn("Loader", self._names(staged["path"]))
-        self.assertIn("Startup-Sequence", self._names(f"{staged['path']}/s"))
-        # Identical files across discs are stored once, not twice.
+        self.assertEqual(staged["diskCount"], 2)
+        self.assertEqual(
+            self._names("INSTALL\\STAGE\\CHUCK_RO\\DATA"), {"LEVEL.DAT", "LEVEL2.DAT"}
+        )
         self.assertEqual(staged["conflicts"], [])
 
-    def test_two_discs_carrying_different_files_under_one_name_both_survive(self) -> None:
-        """Keeping only the last disc would silently destroy half the set."""
-        self.service.stage_disk(
-            self._floppy("GAME1", payload=b"LEVEL ONE"), self.drive, "Title", disc_label="Disk 1"
-        )
+    def test_a_file_two_disks_disagree_about_is_kept_and_the_other_filed_aside(self) -> None:
+        """A set is never silently reduced to whichever disk was staged last."""
+        title = "Chuck Rock"
+        self.service.stage_disk(self._floppy("ONE", payload=b"first"), self.drive, title)
         staged = self.service.stage_disk(
-            self._floppy("GAME2", payload=b"LEVEL TWO, LONGER"), self.drive, "Title",
-            disc_label="Disk 2",
+            self._floppy("TWO", payload=b"second"), self.drive, title
         )
 
+        self.assertEqual(
+            self.service.read_file(self.drive, "INSTALL\\STAGE\\CHUCK_RO\\DATA\\LEVEL.DAT"),
+            b"first",
+        )
         self.assertEqual(len(staged["conflicts"]), 1)
         conflict = staged["conflicts"][0]
-        self.assertEqual(conflict["path"], "Shared.dat")
+        self.assertEqual(conflict["keptFrom"], "Disk 1")
         self.assertEqual(conflict["alsoIn"], "Disk 2")
         self.assertEqual(
-            self.service.read_file(self.drive, f"{staged['path']}/Shared.dat"), b"LEVEL ONE"
+            self.service.read_file(self.drive, conflict["storedAs"]), b"second"
         )
+
+    def test_restaging_one_disk_corrects_it_rather_than_adding_another(self) -> None:
+        title = "Chuck Rock"
+        self.service.stage_disk(
+            self._floppy("ONE", payload=b"broken"), self.drive, title, disk_label="Disk 1"
+        )
+        staged = self.service.stage_disk(
+            self._floppy("ONE", payload=b"fixed"), self.drive, title, disk_label="Disk 1"
+        )
+
+        self.assertEqual(staged["diskCount"], 1)
         self.assertEqual(
-            self.service.read_file(self.drive, conflict["storedAs"]), b"LEVEL TWO, LONGER"
+            self.service.read_file(self.drive, "INSTALL\\STAGE\\CHUCK_RO\\DATA\\LEVEL.DAT"),
+            b"fixed",
         )
-
-    def test_the_payload_drawer_holds_nothing_but_the_title(self) -> None:
-        """What is installed has to be the disc, not the disc plus bookkeeping."""
-        self.service.stage_disk(
-            self._floppy("GAME1", payload=b"ONE"), self.drive, "Title", disc_label="Disk 1"
-        )
-        staged = self.service.stage_disk(
-            self._floppy("GAME2", payload=b"TWO"), self.drive, "Title", disc_label="Disk 2"
-        )
-
-        self.assertEqual(self._names(staged["path"]), {"Loader", "Shared.dat", "s"})
-        self.assertIn("Forge-Staging", self._names("Storage/Install"))
-
-    def test_protection_bits_and_comments_survive_the_round_trip(self) -> None:
-        """A loader that loses its ``e`` bit will not start, and looks fine."""
-        floppy = self._floppy("GAME", payload=b"data", protection="----rw-d", comment="do not delete")
-        staged = self.service.stage_disk(floppy, self.drive, "Protected Title")
-
-        result = self.service.install_staged_title(self.drive, staged["name"], parent="Games")
-
-        entries = {
-            row["name"]: row
-            for row in self.service.list_directory(self.drive, result["path"])["entries"]
-        }
-        self.assertEqual(entries["Loader"]["comment"], "do not delete")
-        self.assertEqual(
-            self.service.file_metadata(self.drive, f"{result['path']}/Loader")["protection"],
-            self.service.file_metadata(floppy, "Loader")["protection"],
-        )
-
-    def test_a_staged_title_installs_with_its_drawers_intact(self) -> None:
-        staged = self.service.stage_disk(
-            self._floppy("GAME", payload=b"data"), self.drive, "Nested Title"
-        )
-
-        result = self.service.install_staged_title(self.drive, staged["name"], parent="Games")
-
-        self.assertEqual(result["path"], "Games/Nested Title")
-        self.assertEqual(
-            self.service.read_file(self.drive, "Games/Nested Title/s/Startup-Sequence"), b"Loader\n"
-        )
-
-    def test_installing_a_title_empties_its_staging_drawer(self) -> None:
-        """A set that stayed staged after installing would be counted twice."""
-        staged = self.service.stage_disk(
-            self._floppy("GAME", payload=b"data"), self.drive, "Moved Title"
-        )
-        self.service.install_staged_title(self.drive, staged["name"], parent="Games")
-
-        self.assertEqual(self.service.staged_titles(self.drive), [])
-        self.assertNotIn("Moved Title", self._names("Storage/Install"))
-        self.assertNotIn("Moved Title", self._names("Storage/Install/Forge-Staging"))
-
-    def test_restaging_a_disc_replaces_it_rather_than_adding_another(self) -> None:
-        """A set that grew every time it was corrected could not be reasoned about."""
-        self.service.stage_disk(
-            self._floppy("GAME1", payload=b"one"), self.drive, "Title", disc_label="Disk 1"
-        )
-        self.service.stage_disk(
-            self._floppy("GAME2", payload=b"two"), self.drive, "Title", disc_label="Disk 2"
-        )
-
-        staged = self.service.stage_disk(
-            self._floppy("GAME1B", payload=b"one"), self.drive, "Title", disc_label="Disk 1"
-        )
-
-        self.assertEqual(staged["discCount"], 2)
-        self.assertEqual([disc["label"] for disc in staged["discs"]], ["Disk 1", "Disk 2"])
-        self.assertEqual(staged["discs"][0]["volume"], "GAME1B")
-
-    def test_restaging_a_corrected_disc_overwrites_it_instead_of_filing_it_aside(self) -> None:
-        """Filing the correction as an alternate would leave the bad file in place."""
-        self.service.stage_disk(
-            self._floppy("GAME1", payload=b"BROKEN"), self.drive, "Title", disc_label="Disk 1"
-        )
-
-        staged = self.service.stage_disk(
-            self._floppy("GAME1FIXED", payload=b"CORRECTED"), self.drive, "Title", disc_label="Disk 1"
-        )
-
         self.assertEqual(staged["conflicts"], [])
-        self.assertEqual(
-            self.service.read_file(self.drive, f"{staged['path']}/Shared.dat"), b"CORRECTED"
-        )
-        self.assertNotIn("Disk 1", self._names("Storage/Install/Forge-Staging"))
 
-    def test_a_conflict_stops_being_reported_once_the_disc_behind_it_is_restaged(self) -> None:
-        self.service.stage_disk(
-            self._floppy("GAME1", payload=b"ONE"), self.drive, "Title", disc_label="Disk 1"
-        )
-        conflicted = self.service.stage_disk(
-            self._floppy("GAME2", payload=b"TWO"), self.drive, "Title", disc_label="Disk 2"
-        )
-        self.assertEqual(len(conflicted["conflicts"]), 1)
+    def test_the_housekeeping_folder_is_never_listed_as_a_staged_title(self) -> None:
+        self.service.stage_disk(self._floppy("ONE"), self.drive, "Title A")
+        names = [row["name"] for row in self.service.staged_titles(self.drive)]
+        self.assertEqual(names, ["TITLE_A"])
+        self.assertIn(HOUSEKEEPING_DIRECTORY, self._names(DEFAULT_STAGING_PARENT))
 
-        resolved = self.service.stage_disk(
-            self._floppy("GAME2AGAIN", payload=b"ONE"), self.drive, "Title", disc_label="Disk 2"
-        )
+    def test_the_manifest_lives_on_the_drive_and_not_beside_the_payload(self) -> None:
+        """A drive carried to another machine still describes what is waiting."""
+        self.service.stage_disk(self._floppy("ONE"), self.drive, "Title A")
 
-        self.assertEqual(resolved["conflicts"], [])
-
-    def test_an_unlabelled_disc_takes_the_first_free_slot(self) -> None:
-        self.service.stage_disk(self._floppy("GAME1", payload=b"one"), self.drive, "Title")
-        staged = self.service.stage_disk(self._floppy("GAME2", payload=b"two"), self.drive, "Title")
-        self.assertEqual([disc["label"] for disc in staged["discs"]], ["Disc 1", "Disc 2"])
-
-    def test_a_staged_title_can_be_listed_and_discarded(self) -> None:
-        self.service.stage_disk(self._floppy("GAME", payload=b"data"), self.drive, "Listed Title")
-        self.assertEqual(
-            [row["title"] for row in self.service.staged_titles(self.drive)], ["Listed Title"]
+        payload = self._names("INSTALL\\STAGE\\TITLE_A")
+        self.assertEqual(payload, {"GAME.PRG", "DATA"})
+        self.assertIn(
+            "STAGE.INF", self._names("INSTALL\\STAGE\\CLASH\\TITLE_A")
         )
 
-        self.service.discard_staged_title(self.drive, "Listed Title")
+    def test_a_title_staged_by_hand_is_still_reported(self) -> None:
+        """A folder somebody made themselves is a staged title; measuring beats hiding."""
+        self.service.make_directory(self.drive, "INSTALL\\STAGE\\BYHAND")
+        volume_copy.write_file(self.service, self.drive, "INSTALL\\STAGE\\BYHAND\\A.PRG", program())
+
+        titles = {row["name"]: row for row in self.service.staged_titles(self.drive)}
+
+        self.assertIn("BYHAND", titles)
+        self.assertEqual(titles["BYHAND"]["fileCount"], 1)
+        self.assertEqual(titles["BYHAND"]["diskCount"], 0)
+
+    def test_discarding_removes_the_payload_and_the_record_together(self) -> None:
+        self.service.stage_disk(self._floppy("ONE"), self.drive, "Title A")
+        self.service.discard_staged_title(self.drive, "Title A")
 
         self.assertEqual(self.service.staged_titles(self.drive), [])
+        self.assertFalse(
+            volume_copy.directory_exists(self.service, self.drive, "INSTALL\\STAGE\\TITLE_A")
+        )
+        self.assertFalse(
+            volume_copy.directory_exists(
+                self.service, self.drive, "INSTALL\\STAGE\\CLASH\\TITLE_A"
+            )
+        )
+
+    def test_discarding_something_that_is_not_there_is_refused(self) -> None:
         with self.assertRaises(DiskError):
-            self.service.discard_staged_title(self.drive, "Listed Title")
+            self.service.discard_staged_title(self.drive, "Nothing")
 
-    def test_the_list_is_read_off_the_drive_rather_than_remembered_here(self) -> None:
-        """A drive built elsewhere still has to report what is waiting on it.
-
-        Deleting the record and finding the title gone would mean the list was
-        being kept on this machine after all, which is the thing being fixed.
-        """
-        self.service.stage_disk(self._floppy("GAME", payload=b"data"), self.drive, "Derived")
-        delete_ffs_items(self.service, self.drive, ["Storage/Install/Forge-Staging"])
-
-        titles = self.service.staged_titles(self.drive)
-
-        self.assertEqual([row["name"] for row in titles], ["Derived"])
-        self.assertEqual(titles[0]["fileCount"], 3)
-
-    def test_a_title_name_becomes_a_directory_every_filesystem_accepts(self) -> None:
-        """Staged trees end up on FAT cards and Atari volumes, not only here."""
-        self.assertEqual(slugify("Hyper Sports"), "hyper-sports")
-        self.assertEqual(slugify("Turrican II: The Final Fight"), "turrican-ii-the-final-fight")
-        self.assertEqual(slugify("../../etc"), "etc")
-        self.assertEqual(slugify(""), "untitled")
-
-    def test_a_staged_name_cannot_reach_outside_the_staging_drawer(self) -> None:
-        staged = self.service.stage_disk(self._floppy("GAME", payload=b"data"), self.drive, "Safe")
-        self.assertTrue(staged["path"].startswith("Storage/Install/"))
-        with self.assertRaises(DiskError):
-            self.service.discard_staged_title(self.drive, "../../work")
-
-    def test_a_partition_table_is_not_a_place_to_stage_onto(self) -> None:
-        """A drive with no partition selected is an index, not a volume."""
-        drive = self.service.create_blank("hd", "TARGET", "40MB")
-        with self.assertRaises(DiskError):
-            self.service.stage_disk(self._floppy("GAME", payload=b"data"), drive, "Title")
+    def test_a_drive_with_no_partition_chosen_cannot_be_staged_onto(self) -> None:
+        """A partitioned drive opens on its table, which is not a volume."""
+        drive = self.service.create_blank("hd", "UNCHOSEN", "40MB")
+        self.service.select_partition(drive, None)
+        with self.assertRaises(DiskError) as raised:
+            self.service.stage_disk(self._floppy("ONE"), drive, "Title")
+        self.assertIn("partition", str(raised.exception))
 
 
-class WHDLoadInstallTests(unittest.TestCase):
+class InstallingAStagedTitleTests(unittest.TestCase):
+    """Installing moves the tree; both ends are on the same volume."""
+
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.root = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
         self.service = DiskService(self.root / "work")
         self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(self.drive, 0)
-        self.addCleanup(self._temporary.cleanup)
+        self.floppy = self.service.create_blank("ds-720k", "GAME")
+        launcher = self.root / "prg"
+        launcher.write_bytes(program())
+        self.service.put(self.floppy, "CHUCK.PRG", launcher)
+        self.service.make_directory(self.floppy, "DATA")
+        data = self.root / "dat"
+        data.write_bytes(b"level")
+        self.service.put(self.floppy, "DATA\\LEVEL.DAT", data)
 
-    def test_a_drive_without_whdload_says_so(self) -> None:
-        status = self.service.whdload_status(self.drive)
-        self.assertFalse(status["installed"])
-        self.assertEqual([source["name"] for source in status["sources"]], ["whdload.de", "Aminet"])
+    def _stage(self, title: str = "Chuck Rock"):
+        return self.service.stage_disk(self.floppy, self.drive, title)
 
-    def test_installing_puts_the_loader_and_its_tools_where_gemdos_looks(self) -> None:
-        result = self.service.install_whdload(
-            self.drive, whdload_archive(), source="test", url="https://example.invalid/x.lha"
+    def test_a_staged_title_is_moved_into_its_own_folder(self) -> None:
+        self._stage()
+        result = self.service.install_staged_title(self.drive, "Chuck Rock")
+
+        self.assertEqual(result["path"], "GAMES\\CHUCK_RO")
+        self.assertEqual(result["fileCount"], 2)
+        self.assertEqual(result["programs"], ["CHUCK.PRG"])
+        self.assertEqual(
+            self.service.read_file(self.drive, "GAMES\\CHUCK_RO\\DATA\\LEVEL.DAT"), b"level"
+        )
+        self.assertFalse(
+            volume_copy.directory_exists(self.service, self.drive, "INSTALL\\STAGE\\CHUCK_RO")
         )
 
-        self.assertEqual(result["version"], "20.0")
-        self.assertFalse(result["replaced"])
-        installed = {row["name"] for row in self.service.list_directory(self.drive, "C")["entries"]}
-        self.assertIn("WHDLoad", installed)
-        self.assertIn("WHDLoadCD32", installed)
-        scripts = {row["name"] for row in self.service.list_directory(self.drive, "S")["entries"]}
-        self.assertEqual(scripts, {"WHDLoad-Startup", "WHDLoad-Cleanup", "WHDLoad.prefs"})
-        self.assertTrue(self.service.whdload_status(self.drive)["installed"])
+    def test_the_default_install_folder_is_the_one_a_prepared_drive_has(self) -> None:
+        self.assertEqual(DEFAULT_INSTALL_PARENT, "GAMES")
 
-    def test_reinstalling_keeps_preferences_the_operator_has_tuned(self) -> None:
-        """The prefs file records where debug output goes on that machine."""
-        self.service.install_whdload(self.drive, whdload_archive("19.0"), source="test", url="")
-        tuned = self.root / "prefs"
-        tuned.write_bytes(b";DebugKey=$58\nCoreDumpPath=DH0:Dumps\n")
-        self.service.put(self.drive, whdload.PREFERENCES_FILE, tuned)
+    def test_the_volume_root_is_a_legitimate_destination(self) -> None:
+        self._stage()
+        result = self.service.install_staged_title(self.drive, "Chuck Rock", parent="")
+        self.assertEqual(result["path"], "CHUCK_RO")
 
-        result = self.service.install_whdload(self.drive, whdload_archive("20.0"), source="test", url="")
+    def test_the_folder_name_can_be_chosen(self) -> None:
+        self._stage()
+        result = self.service.install_staged_title(
+            self.drive, "Chuck Rock", folder="CHUCK"
+        )
+        self.assertEqual(result["path"], "GAMES\\CHUCK")
 
-        self.assertTrue(result["replaced"])
-        self.assertEqual(result["previousVersion"], "19.0")
-        self.assertTrue(result["keptPreferences"])
-        self.assertEqual(self.service.read_file(self.drive, whdload.PREFERENCES_FILE), tuned.read_bytes())
-        self.assertEqual(self.service.whdload_status(self.drive)["version"], "20.0")
-
-    def test_an_install_says_whether_it_moved_the_drive_forwards(self) -> None:
-        """An operator who asked for an install assumes it was an upgrade."""
-        first = self.service.install_whdload(self.drive, whdload_archive("19.0"), source="test", url="")
-        self.assertTrue(first["upgraded"])
-
-        upgrade = self.service.install_whdload(self.drive, whdload_archive("20.0"), source="test", url="")
-        self.assertTrue(upgrade["upgraded"])
-        self.assertEqual(upgrade["previousVersion"], "19.0")
-
-        same = self.service.install_whdload(self.drive, whdload_archive("20.0"), source="test", url="")
-        self.assertFalse(same["upgraded"])
-
-        older = self.service.install_whdload(self.drive, whdload_archive("18.0"), source="test", url="")
-        self.assertFalse(older["upgraded"])
-        self.assertEqual(self.service.whdload_status(self.drive)["version"], "18.0")
-
-    def test_an_incomplete_archive_is_refused_before_anything_is_written(self) -> None:
-        """Half a WHDLoad looks installed and fails only when a game is run."""
+    def test_installing_over_something_that_is_there_is_refused(self) -> None:
+        self._stage()
+        self.service.make_directory(self.drive, "GAMES\\CHUCK_RO")
         with self.assertRaises(DiskError) as raised:
-            self.service.install_whdload(
-                self.drive, whdload_archive(omit="C/WHDLoadCD32"), source="test", url=""
-            )
+            self.service.install_staged_title(self.drive, "Chuck Rock")
+        self.assertIn("already exists", str(raised.exception))
 
-        self.assertIn("C/WHDLoadCD32", str(raised.exception))
-        self.assertFalse(self.service.whdload_status(self.drive)["installed"])
-
-    def test_an_archive_that_is_not_whdload_is_named_as_such(self) -> None:
-        with self.assertRaises(DiskError) as raised:
-            self.service.install_whdload(
-                self.drive, archive(level1_member("Game/Loader", b"x")), source="Aminet", url=""
-            )
-        self.assertIn("does not contain WHDLoad", str(raised.exception))
-
-    def test_a_download_that_is_an_error_page_is_reported_not_installed(self) -> None:
-        """Aminet answers a missing file with HTML and an HTTP 200."""
+    def test_installing_something_that_was_never_staged_is_refused(self) -> None:
         with self.assertRaises(DiskError):
-            self.service.install_whdload(
-                self.drive, b"<!DOCTYPE HTML><html>Not found</html>", source="Aminet", url=""
+            self.service.install_staged_title(self.drive, "Nothing")
+
+    def test_the_housekeeping_record_goes_with_the_title(self) -> None:
+        self._stage()
+        self.service.install_staged_title(self.drive, "Chuck Rock")
+        self.assertFalse(
+            volume_copy.directory_exists(
+                self.service, self.drive, "INSTALL\\STAGE\\CLASH\\CHUCK_RO"
             )
+        )
+
+    def test_a_title_with_no_program_in_its_root_says_so(self) -> None:
+        """A folder of data is not something the desktop could ever start."""
+        data_only = self.service.create_blank("ds-720k", "DATA")
+        payload = self.root / "only"
+        payload.write_bytes(b"sample")
+        self.service.put(data_only, "READ.ME", payload)
+        self.service.stage_disk(data_only, self.drive, "Notes")
+
+        result = self.service.install_staged_title(self.drive, "Notes")
+
+        self.assertEqual(result["programs"], [])
+        self.assertTrue(result["warnings"])
+        self.assertIn("No program was found", result["warnings"][0])
 
 
-class WHDLoadSourceTests(unittest.TestCase):
-    def test_the_first_source_that_answers_is_used(self) -> None:
-        served = whdload_archive("20.0")
-        asked: list[str] = []
+class SingleProgramTests(unittest.TestCase):
+    """The smallest install there is, and the commonest."""
 
-        def fetch(url: str) -> bytes:
-            asked.append(url)
-            return served
-
-        release = whdload.download(fetch)
-
-        self.assertEqual(release.source, "whdload.de")
-        self.assertEqual(asked, [whdload.WHDLOAD_ARCHIVE_URL])
-        self.assertEqual(release.archive_bytes, served)
-
-    def test_a_failing_first_source_falls_through_to_the_mirror(self) -> None:
-        served = whdload_archive("20.0")
-
-        def fetch(url: str) -> bytes:
-            if "whdload.de" in url:
-                raise OSError("connection refused")
-            return served
-
-        self.assertEqual(whdload.download(fetch).source, "Aminet")
-
-    def test_every_source_failing_reports_all_of_them_and_what_to_do(self) -> None:
-        def fetch(url: str) -> bytes:
-            raise OSError("no route to host")
-
-        with self.assertRaises(DiskError) as raised:
-            whdload.download(fetch)
-
-        message = str(raised.exception)
-        self.assertIn("whdload.de", message)
-        self.assertIn("Aminet", message)
-        self.assertIn("WHDLoad_usr.lha", message)
-
-    def test_versions_are_compared_as_numbers_not_as_text(self) -> None:
-        """WHDLoad passed version 9, so "10.0" sorts below "9.0" as text."""
-        self.assertTrue(whdload.newer("10.0", "9.0"))
-        self.assertTrue(whdload.newer("20.0", "19.9"))
-        self.assertFalse(whdload.newer("18.0", "20.0"))
-        self.assertFalse(whdload.newer("", "20.0"))
-
-
-class WHDLoadSlaveTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
-        self.service = DiskService(Path(self._temporary.name) / "work")
+        self.root = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
+        self.service = DiskService(self.root / "work")
         self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(self.drive, 0)
-        self.addCleanup(self._temporary.cleanup)
+        self.floppy = self.service.create_blank("ds-720k", "TOOLS")
+        source = self.root / "prg"
+        source.write_bytes(program(b"a tool"))
+        self.service.put(self.floppy, "TOOL.PRG", source)
+        note = self.root / "note"
+        note.write_bytes(b"read me")
+        self.service.put(self.floppy, "READ.ME", note)
 
-    def test_a_bare_slave_is_placed_in_the_title_drawer(self) -> None:
-        result = self.service.install_whdload_slave(
-            self.drive, "Games/Hyper Sports", b"slave bytes", "HyperSports.slave"
+    def test_one_program_is_copied_into_the_folder_named(self) -> None:
+        result = self.service.install_program(
+            self.floppy, self.drive, "TOOL.PRG", parent="GEMSYS"
         )
 
-        self.assertEqual(result["path"], "Games/Hyper Sports/HyperSports.slave")
+        self.assertEqual(result["path"], "GEMSYS\\TOOL.PRG")
         self.assertEqual(
-            self.service.read_file(self.drive, result["path"]), b"slave bytes"
+            self.service.read_file(self.drive, "GEMSYS\\TOOL.PRG"), program(b"a tool")
         )
 
-    def test_a_slave_still_inside_its_archive_is_unpacked_on_the_way_in(self) -> None:
-        """Requiring an LHA tool first is the dependency this build avoids."""
-        packaged = archive(
-            level1_member("HyperSports/HyperSports.slave", b"slave bytes"),
-            level1_member("HyperSports/ReadMe", b"notes"),
+    def test_the_program_can_be_renamed_on_the_way_in(self) -> None:
+        result = self.service.install_program(
+            self.floppy, self.drive, "TOOL.PRG", name="Hard Disk Tool.PRG"
         )
+        self.assertEqual(result["name"], "HARD_DIS.PRG")
 
-        result = self.service.install_whdload_slave(self.drive, "Games/HS", packaged, "hs.lha")
-
-        self.assertEqual(result["name"], "HyperSports.slave")
-        self.assertEqual(self.service.read_file(self.drive, result["path"]), b"slave bytes")
-
-    def test_an_archive_of_several_slaves_asks_which_one(self) -> None:
-        packaged = archive(
-            level1_member("Pack/One.slave", b"a"),
-            level1_member("Pack/Two.slave", b"b"),
-        )
+    def test_a_file_tos_would_not_start_is_refused(self) -> None:
         with self.assertRaises(DiskError) as raised:
-            self.service.install_whdload_slave(self.drive, "Games/Pack", packaged, "pack.lha")
-        self.assertIn("2 slaves", str(raised.exception))
+            self.service.install_program(self.floppy, self.drive, "READ.ME")
+        self.assertIn(".PRG", str(raised.exception))
 
-    def test_a_file_that_is_not_a_slave_is_refused(self) -> None:
-        with self.assertRaises(DiskError) as raised:
-            self.service.install_whdload_slave(self.drive, "Games/X", b"data", "readme.txt")
-        self.assertIn(".slave", str(raised.exception))
+    def test_the_extensions_tos_starts_are_the_ones_accepted(self) -> None:
+        for name in ("A.PRG", "A.APP", "A.TOS", "A.TTP", "A.GTP", "A.ACC"):
+            self.assertTrue(is_program_name(name), name)
+        for name in ("A.DAT", "READ.ME", "A"):
+            self.assertFalse(is_program_name(name), name)
 
 
-if __name__ == "__main__":
+class SlugTests(unittest.TestCase):
+    def test_a_title_reduces_to_a_stable_identifier(self) -> None:
+        self.assertEqual(slugify("Chuck Rock (1991)"), "chuck-rock-1991")
+        self.assertEqual(slugify("  "), "untitled")
+
+
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

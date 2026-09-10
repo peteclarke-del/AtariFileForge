@@ -462,7 +462,7 @@ class InstallMixin:
             atari_paths.leaf(entry["path"])
             for entry in staged_files
             if is_program_name(entry["path"])
-            and atari_paths.parent(entry["path"]).casefold() == destination.casefold()
+            and atari_paths.parent(entry["path"]).casefold() == source.casefold()
         )
         return {
             "path": destination,

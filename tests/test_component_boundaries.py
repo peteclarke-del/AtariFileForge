@@ -132,10 +132,11 @@ class ComponentBoundaryTests(unittest.TestCase):
         shared component is what stops that happening again, so both callers
         are required to go through it rather than walk and write themselves.
         """
-        for module in ("install_service.py", "workbench_install.py"):
+        staging = (APP_ROOT / "install_service.py").read_text(encoding="utf-8")
+        self.assertIn("volume_copy.copy_volume_tree", staging)
+        for module in ("install_service.py", "drive_preparation.py"):
             source = (APP_ROOT / module).read_text(encoding="utf-8")
             with self.subTest(module=module):
-                self.assertIn("volume_copy.copy_volume_tree", source)
                 # Reading a volume, writing the batch and spilling files to
                 # host temporaries all belong to the shared component.
                 self.assertNotIn("put_host_tree", source)

@@ -473,33 +473,35 @@ def create_tools_blueprint(
             return jsonify(report)
 
     @blueprint.get("/api/images/<image_id>/drive-software/audit")
-    def audit_ffs_installations(image_id):
+    def audit_drive_software(image_id):
         session = service.get(image_id)
+        apply_partition(service, session, request.args.get("partition"))
         operation_id = request.args.get("operationId")
-        root = str(request.args.get("root") or "$")
+        root = str(request.args.get("root") or "")
         with operations.tracked(
             operation_id,
             "Finding installed drive software",
             "Installed drive-software audit complete",
         ) as progress:
-            result = service.audit_ffs_installations(session, root, progress)
+            result = service.audit_drive_software(session, root, progress)
             return jsonify(result)
 
     @blueprint.post("/api/images/<image_id>/drive-software/repair")
     @image_mutation("repairing installed drive software")
-    def repair_ffs_installations(image_id):
+    def repair_drive_software(image_id):
         session = service.get(image_id)
         data = payload()
+        apply_partition(service, session, data.get("partition"))
         operation_id = data.get("operationId")
         directories = data.get("directories")
         if not isinstance(directories, list):
-            raise DiskError("Choose the installed disk directories to repair.")
+            raise DiskError("Choose the installed software folders to repair.")
         with operations.tracked(
             operation_id,
             "Rechecking the proposed drive-software repairs",
             "Installed drive-software repair complete",
         ) as progress:
-            result = service.repair_ffs_installations(session, directories, progress)
+            result = service.repair_drive_software(session, directories, progress)
             return jsonify(image=service.summary(session), repair=result)
 
     @blueprint.get("/api/images/<image_id>/manifest")
