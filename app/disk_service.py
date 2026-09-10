@@ -41,7 +41,7 @@ from typing import BinaryIO, Callable
 from .gemdos_install_service import GemdosInstallMixin
 from .install_service import InstallMixin
 from .iso_disk_service import IsoDiskMixin
-from .workbench_install import WorkbenchInstallMixin
+from .drive_preparation import DrivePreparationMixin
 from .checkpoints import CheckpointStore
 from .content_kind import LISTING_SNIFF_LIMIT, analyse_content, metadata_kind
 from .disk_tools import decode_disc_json, friendly_engine_error, run_disc, run_hxcfe
@@ -169,7 +169,7 @@ class DiskService(
     GemdosInstallMixin,
     InstallMixin,
     IsoDiskMixin,
-    WorkbenchInstallMixin,
+    DrivePreparationMixin,
     PartitionMixin,
     RomDiskMixin,
     ContainerDiskMixin,
