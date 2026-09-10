@@ -1,7 +1,11 @@
 window.AtariTransferPlanning = (() => {
   function create({ targetNameRule }) {
+    // A GEMDOS volume keeps folders, so a copied tree can keep its shape.
+    // Anything else receives the leaf names only.
+    const keepsFolders = pane => pane?.image?.kind === "gemdos" || (pane?.image?.kind === "hd" && pane?.partition != null);
+
     function folderTargetPlans(pane, records, mode) {
-      const preserve = mode === "preserve" && pane.image.kind === "ffs";
+      const preserve = mode === "preserve" && keepsFolders(pane);
       const componentNames = new Map();
       const usedByParent = new Map();
       const changes = [];
@@ -30,11 +34,11 @@ window.AtariTransferPlanning = (() => {
           const keptParts = preserve ? sourceParts : sourceParts.slice(-1);
           const targetParts = [];
           for (const [partIndex, part] of keptParts.entries()) {
-            const parent = targetParts.join("/").toLowerCase();
+            const parent = targetParts.join("\\").toLowerCase();
             const identity = !preserve && partIndex === keptParts.length - 1 ? item.relativePath : "";
             targetParts.push(allocate(parent, part, identity));
           }
-          return { ...item, targetPath: targetParts.join("/") };
+          return { ...item, targetPath: targetParts.join("\\") };
         }),
       };
     }

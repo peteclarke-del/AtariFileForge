@@ -14,9 +14,15 @@ window.AtariCodeEditor = (() => {
   const BASIC_LANGUAGE = window.AtariBasicLanguage;
   const ASSEMBLY_LANGUAGE = window.AtariAssemblyLanguage;
   const CALL_CATALOGUE = window.AtariCallCatalogue;
-  // Every Atari processor decodes the same instruction set, so the editor
+  // Every Atari ST decodes the same 68000 instruction set: the ST, Mega ST,
+  // STE and Mega STE carry a 68000, the TT030 and Falcon030 a 68030, and a
+  // TT or Falcon may add a 68881 or 68882 floating-point unit. The editor
   // treats them as one language and varies only the extensions it accepts.
-  const M68K_TARGETS = ["68000", "68010", "68020", "68030", "68040", "68060", "m68k"];
+  const MACHINE_PROCESSORS = Object.freeze({ st: "68000", megast: "68000", ste: "68000", megaste: "68000", tt030: "68030", falcon030: "68030" });
+  const M68K_TARGETS = ["68000", "68010", "68020", "68030", "68040", "68060", "68030+fpu", "68040+fpu", "68060+fpu", "m68k"];
+  const PLATFORM_NAMES = Object.freeze({
+    st: "Atari ST", megast: "Mega ST", ste: "Atari STE", megaste: "Mega STE", tt030: "Atari TT030", falcon030: "Atari Falcon030",
+  });
   const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;",
   }[character]));
@@ -25,182 +31,274 @@ window.AtariCodeEditor = (() => {
     summary, syntax, requirements, notes,
   });
 
-  const BASIC_HELP = {
-    AND: help("Combines two values bit by bit using logical AND.", "expression AND expression", "Operands are converted to integers before the bitwise operation."),
-    OR: help("Combines two values bit by bit using logical OR.", "expression OR expression", "Inside IF conditions, zero is false and a non-zero result is true."),
-    XOR: help("Combines two values bit by bit using exclusive OR.", "expression XOR expression", "Operands are converted to integers before the bitwise operation."),
-    NOT: help("Inverts every bit of an integer value.", "NOT expression", "The expression is converted to an integer before inversion."),
-    MOD: help("Returns the integer remainder after division.", "integer MOD integer", "The divisor must not be zero."),
-    EQV: help("Reports whether two values agree bit by bit.", "expression EQV expression", "Operands are converted to integers first."),
-    IMP: help("Applies bitwise implication to two values.", "expression IMP expression", "Operands are converted to integers first."),
-    CHAIN: help("Loads and runs another ST BASIC program, optionally keeping variables.", 'CHAIN "program"[,line][,ALL]', "The target must be an ST BASIC program reachable through the current path.", "Use MERGE to combine programs instead of replacing the running one."),
-    MERGE: help("Merges the lines of a saved ASCII program into the current one.", 'MERGE "program"', "The file must have been saved with the ,A option."),
-    CALL: help("Calls a machine-code routine or a named SUB.", "CALL address(arguments) or CALL name(arguments)", "A machine-code address must contain valid 68000 code that ends in RTS.", "A wrong address, or a routine that corrupts A5 or A7, will take the machine down."),
-    LIBRARY: help("Opens an Atari library so its functions can be called from BASIC.", 'LIBRARY "dos.library"', "A matching .bmap file must be present for the library being opened.", "LIBRARY CLOSE releases every library opened this way."),
-    DECLARE: help("Declares a library function before it is called.", 'DECLARE FUNCTION name LIBRARY', "The function must exist in an opened library's .bmap file."),
-    GOTO: help("Continues execution at a line number or label.", "GOTO line", "The destination must exist in the current program."),
-    GOSUB: help("Calls a subroutine; RETURN resumes after the GOSUB.", "GOSUB line", "The destination must exist and every completed path should reach RETURN."),
-    RETURN: help("Returns from the most recent GOSUB.", "RETURN [line]", "A matching active GOSUB is required."),
-    SUB: help("Begins a named subprogram with its own local variables.", "SUB name(parameters) STATIC", "ST BASIC subprograms are STATIC; they end with END SUB."),
-    FN: help("Calls a function defined with DEF FN.", "FNname(parameter…)", "A matching DEF FNname definition must have been executed."),
-    DEF: help("Defines a single-line function or a default variable type.", "DEF FNname(x)=expression, or DEFINT A-Z", "A DEF FN definition must be executed before the function is called."),
-    FOR: help("Starts a counted loop and assigns its control variable.", "FOR variable = start TO limit [STEP amount]", "A matching NEXT completes the loop."),
-    NEXT: help("Advances one or more active FOR loops.", "NEXT [variable[,variable…]]", "The named variable must belong to an active FOR loop."),
-    WHILE: help("Starts a pre-tested loop.", "WHILE condition", "A matching WEND ends the loop."),
-    WEND: help("Returns to the matching WHILE test.", "WEND", "A matching active WHILE is required."),
-    IF: help("Conditionally executes statements, on one line or as a block.", "IF condition THEN statement [ELSE statement]", "A block form must be closed with END IF."),
-    ON: help("Selects a numbered branch, or installs error, menu, mouse or timer handling.", "ON expression GOTO/GOSUB list; ON ERROR GOTO line", "Branch destinations must exist. ON ERROR GOTO 0 restores the default handler."),
-    ERROR: help("Raises an ST BASIC error with a numeric code.", "ERROR number", "The active ON ERROR handler may intercept it."),
-    RESUME: help("Continues after an error handler.", "RESUME [NEXT | line]", "Only valid inside an active ON ERROR handler."),
-    DIM: help("Reserves an array.", "DIM array(dimensions)", "Enough free memory must remain; ERASE releases a dynamic array."),
-    ERASE: help("Releases a dynamically allocated array.", "ERASE array[,array…]", "The array must have been dimensioned."),
-    CLEAR: help("Clears variables and optionally resizes BASIC's data and stack space.", "CLEAR [,data-size[,stack-size]]", "The requested sizes must fit in free memory.", "The stack size is the GEMDOS Stack the program will run with."),
-    OPEN: help("Opens a file or device on a numbered channel.", 'OPEN "name" FOR mode AS #channel', "The path or device must exist and the mode must be one of INPUT, OUTPUT, APPEND or RANDOM."),
-    CLOSE: help("Closes one channel, or all channels when used bare.", "CLOSE [#channel[,#channel…]]", "The channel must be open."),
-    GET: help("Reads a record from a random-access channel, or pixels from a window.", "GET #channel[,record] or GET (x1,y1)-(x2,y2),array", "A random channel must have a defined record length."),
-    PUT: help("Writes a record to a random-access channel, or pixels to a window.", "PUT #channel[,record] or PUT (x,y),array", "A random channel must have a defined record length."),
-    INPUT: help("Reads values from the keyboard or an open channel.", "INPUT [#channel,] variable…", "File input requires an open channel and compatible textual data."),
-    PRINT: help("Writes values to the current window or an open channel.", "PRINT [#channel,] expression…", "File output requires a writable open channel."),
-    WRITE: help("Writes values in comma-separated, quoted form.", "WRITE [#channel,] expression…", "Intended to be read back by INPUT."),
-    LOAD: help("Loads an ST BASIC program without running it.", 'LOAD "program"[,R]', "The file must be an ST BASIC program."),
-    SAVE: help("Saves the current program, optionally as plain text.", 'SAVE "program"[,A]', "The destination must be writable. The ,A option writes an ASCII listing."),
-    RUN: help("Runs the current program, or loads and runs a named one.", 'RUN [line | "program"]', "A named target must be an ST BASIC program."),
-    KILL: help("Deletes a file.", 'KILL "filename"', "The file must exist and not be write protected."),
-    NAME: help("Renames a file.", 'NAME "old" AS "new"', "The new name must not already exist."),
-    FILES: help("Lists the contents of a directory.", 'FILES ["pattern"]', "The path must be readable."),
-    COLOR: help("Selects the foreground and background pens for text and drawing.", "COLOR foreground[,background]", "The pen numbers must exist in the current screen's depth.", "PALETTE changes what colour a pen actually is."),
-    PALETTE: help("Sets the red, green and blue components of one colour register.", "PALETTE index,red,green,blue", "Components run from 0 to 1. The index must be within the screen's depth."),
-    SCREEN: help("Opens a custom screen with a chosen size, depth and mode.", "SCREEN id,width,height,depth,mode", "Depth and mode must be supported by the chipset in the target machine.", "Modes 3 and 4 are interlaced; four and five bitplanes need enough Chip RAM."),
-    WINDOW: help("Opens, selects, closes or reports on a window.", "WINDOW id[,title][,(x1,y1)-(x2,y2)][,flags][,screen]", "A window on a custom screen must fit inside it."),
-    MENU: help("Defines or reads an Intuition menu item.", "MENU menu,item,state[,title$]", "Menu and item numbers start at 1; item 0 is the menu title."),
-    MOUSE: help("Reads the mouse buttons and position.", "MOUSE(n)", "MOUSE ON must have been issued before the values change."),
-    OBJECT: help("Defines and moves a bob or sprite.", "OBJECT.SHAPE, OBJECT.X, OBJECT.Y, OBJECT.ON …", "The object must have been given a shape before it is displayed."),
-    LINE: help("Draws a line, box or filled box.", "LINE (x1,y1)-(x2,y2)[,colour][,b[f]]", "The coordinates are relative to the current output window."),
-    PSET: help("Sets one pixel.", "PSET (x,y)[,colour]", "The coordinates must lie inside the output window."),
-    PRESET: help("Resets one pixel to the background pen.", "PRESET (x,y)[,colour]", "The coordinates must lie inside the output window."),
-    CIRCLE: help("Draws a circle, ellipse or arc.", "CIRCLE (x,y),radius[,colour][,start,end][,aspect]", "Angles are in radians."),
-    PAINT: help("Flood-fills an area up to a boundary colour.", "PAINT (x,y)[,fill][,boundary]", "The starting point must be inside a closed boundary."),
-    PATTERN: help("Sets the line and area fill patterns.", "PATTERN line[,area]", "The area pattern array length must be a power of two."),
-    CLS: help("Clears the current output window.", "CLS", "None."),
-    LOCATE: help("Moves the text cursor.", "LOCATE row[,column]", "The position must lie inside the output window."),
-    WIDTH: help("Sets the line width for a channel or the screen.", "WIDTH [#channel,] columns", "The channel must be open."),
-    SOUND: help("Plays a note on one of the four audio channels.", "SOUND frequency,duration[,volume[,voice]]", "The frequency is in hertz, the duration in eighteenths of a second, the volume 0 to 255 and the voice 0 to 3.", "SOUND WAIT queues notes so several voices start together; SOUND RESUME releases them."),
-    WAVE: help("Defines the waveform a voice plays.", "WAVE voice,waveform", "The waveform is either SIN or an array of 256 values from -128 to 127."),
-    SAY: help("Speaks a phonetic string through the narrator device.", "SAY phonemes$[,mode]", "narrator.device and translator.library must be available.", "TRANSLATE$ converts English text into the phonemes SAY expects."),
-    PEEK: help("Reads one byte from an address.", "PEEK(address)", "The address must be readable; PEEKW and PEEKL read a word and a long."),
-    POKE: help("Writes one byte to an address.", "POKE address,value", "Writing to an address the system owns will crash the machine.", "POKEW and POKEL write a word and a long, and both need an even address."),
-    POKEW: help("Writes one 16-bit word to an even address.", "POKEW address,value", "The address must be even, because a 68000 word access cannot be odd."),
-    POKEL: help("Writes one 32-bit long to an even address.", "POKEL address,value", "The address must be even, because a 68000 long access cannot be odd."),
-    PEEKW: help("Reads one 16-bit word from an even address.", "PEEKW(address)", "The address must be even."),
-    PEEKL: help("Reads one 32-bit long from an even address.", "PEEKL(address)", "The address must be even."),
-    VARPTR: help("Returns the address of a variable or file control block.", "VARPTR(variable)", "The address is only valid until BASIC moves its variables."),
-    SADD: help("Returns the address of a string's characters.", "SADD(string$)", "The address is only valid until the string is reassigned."),
-    TIMER: help("Reports the seconds elapsed since midnight.", "TIMER", "ON TIMER(n) GOSUB installs a periodic handler."),
-    SLEEP: help("Waits until an event the program is watching occurs.", "SLEEP", "At least one of ON MOUSE, ON MENU, ON TIMER or ON BREAK must be active."),
-    SYSTEM: help("Returns to Workbench or the Shell, closing the program.", "SYSTEM", "Open files are closed first."),
-    STOP: help("Halts the program and returns to the BASIC prompt.", "STOP", "CONT resumes where STOP left off."),
-    END: help("Ends the program, closing open files.", "END", "None."),
-    DATA: help("Stores constant values for sequential access by READ.", "DATA value[,value…]", "READ variables must be compatible with the stored values."),
-    READ: help("Reads the next value from the program's DATA stream.", "READ variable[,variable…]", "Enough DATA values must remain; RESTORE repositions the stream."),
-    RESTORE: help("Moves the DATA read pointer to the start or to a line.", "RESTORE [line]", "A named destination must exist."),
-    RANDOMIZE: help("Reseeds the random number generator.", "RANDOMIZE [seed]", "Without a seed ST BASIC asks for one."),
-    SWAP: help("Exchanges the values of two variables of the same type.", "SWAP first,second", "Both variables must have the same type."),
-    REM: help("Introduces a comment; the rest of the line is not executed.", "REM comment", "None."),
+  // GFA BASIC is the dialect most ST source arrives in, so its spellings lead
+  // each entry; STOS and ST BASIC forms of the same command are named where
+  // they differ. Keys are the upper-case keyword as the scanner reports it.
+  const GFA_HELP = {
+    PROCEDURE: help("Begins a named procedure; RETURN ends it.", "PROCEDURE name[(parameters)]", "Every PROCEDURE needs one RETURN at its end, and it is called with @name or GOSUB name.", "Parameters are passed by value unless written VAR; LOCAL hides variables from the caller."),
+    RETURN: help("Ends a PROCEDURE, or returns from GOSUB in STOS and ST BASIC.", "RETURN", "In GFA BASIC a RETURN belongs to the PROCEDURE it closes; in a numbered listing it needs an active GOSUB.", "A FUNCTION returns its value with RETURN expression and ends with ENDFUNC."),
+    FUNCTION: help("Begins a named function that returns a value.", "FUNCTION name[(parameters)]", "Ends with ENDFUNC; the value comes from RETURN expression and is read with @name(...).", "GFA BASIC 3 only; GFA 2 has DEFFN for single-line functions."),
+    ENDFUNC: help("Ends a FUNCTION block.", "ENDFUNC", "A matching FUNCTION must be open."),
+    DEFFN: help("Defines a single-line function.", "DEFFN name[(parameters)]=expression", "Called as FN name(...) or @name(...). The definition must run before the first call."),
+    FN: help("Calls a DEFFN function.", "FN name(arguments)", "A matching DEFFN must have been executed."),
+    GOSUB: help("Calls a PROCEDURE by name, or a numbered subroutine in STOS and ST BASIC.", "GOSUB name  or  GOSUB line", "The procedure or line must exist; GFA BASIC also writes the call as @name."),
+    GOTO: help("Jumps to a label or a line number.", "GOTO label  or  GOTO line", "In GFA BASIC the destination is a label written label: on its own line; numbered dialects take a line number."),
+    LOCAL: help("Makes variables local to the enclosing PROCEDURE or FUNCTION.", "LOCAL variable[,variable...]", "Must appear inside the procedure before the variables are used.", "A local hides a global of the same name until RETURN."),
+    REPEAT: help("Starts a loop tested at its end.", "REPEAT", "A matching UNTIL condition ends the loop; the body runs at least once."),
+    UNTIL: help("Ends a REPEAT loop when its condition becomes true.", "UNTIL condition", "A matching REPEAT must be open."),
+    DO: help("Starts an endless loop that is left with EXIT IF or LOOP UNTIL.", "DO [WHILE condition | UNTIL condition]", "A matching LOOP ends the block; without EXIT IF or a condition it never ends."),
+    LOOP: help("Ends a DO loop.", "LOOP [WHILE condition | UNTIL condition]", "A matching DO must be open."),
+    EXIT: help("Leaves the innermost loop when a condition holds.", "EXIT IF condition", "Only valid inside FOR, WHILE, REPEAT or DO."),
+    WHILE: help("Starts a loop tested before each pass.", "WHILE condition", "A matching WEND ends the loop."),
+    WEND: help("Returns to the matching WHILE test.", "WEND", "A matching WHILE must be open."),
+    FOR: help("Starts a counted loop.", "FOR variable=start TO limit [STEP amount] [DOWNTO limit]", "A matching NEXT completes the loop."),
+    NEXT: help("Advances the active FOR loop.", "NEXT [variable]", "The named variable must belong to the active FOR loop."),
+    IF: help("Runs a block of statements when a condition holds.", "IF condition [THEN]\n ...\n[ELSE IF condition]\n[ELSE]\nENDIF", "In GFA BASIC IF always opens a block closed by ENDIF. STOS and ST BASIC also accept IF condition THEN statement on one line."),
+    ELSE: help("Starts the alternative branch of an IF block.", "ELSE  or  ELSE IF condition", "An IF block must be open."),
+    ENDIF: help("Closes an IF block.", "ENDIF", "An IF block must be open; STOS writes it END IF."),
+    SELECT: help("Chooses one of several CASE branches by value.", "SELECT expression\nCASE value[,value...] [TO value]\nDEFAULT\nENDSELECT", "Closed with ENDSELECT; values must match the expression's type."),
+    CASE: help("One branch of a SELECT block.", "CASE value[,value...] or CASE low TO high", "Must appear inside SELECT ... ENDSELECT."),
+    DEFAULT: help("The branch taken when no CASE matched.", "DEFAULT", "Must be the last branch of a SELECT block."),
+    ENDSELECT: help("Closes a SELECT block.", "ENDSELECT", "A SELECT block must be open."),
+    DIM: help("Reserves an array.", "DIM array(size[,size...])", "Indexes run from 0 to size. Enough free memory must remain; ERASE releases the array.", "GFA BASIC does not create arrays on first use, so an undimensioned reference is an error."),
+    ERASE: help("Releases an array.", "ERASE array()", "The array must have been dimensioned."),
+    INLINE: help("Reserves bytes inside the program for machine code or data.", "INLINE address%,length", "The bytes are entered in the GFA editor and saved with the program; call them with C: or CALL and read them with PEEK."),
+    CALL: help("Runs machine code at an address.", "CALL address%[(parameters)]  or  ~C:address%(parameters)", "The code must be valid 68000 code that ends in RTS and preserves the registers GFA BASIC expects.", "A wrong address takes the machine down; TT and Falcon code must also respect the 68030 caches."),
+    "~": help("Calls a function and discards its result.", "~function(arguments)", "Used for GEMDOS, BIOS, XBIOS and other functions whose return value is not wanted."),
+    PEEK: help("Reads one byte from an address.", "PEEK(address%)", "The address must exist; reading an unmapped address raises a bus error.", "DPEEK and LPEEK read a word and a long, and both need an even address on a 68000."),
+    DPEEK: help("Reads one 16-bit word from an even address.", "DPEEK(address%)", "The address must be even; an odd address raises an address error on a 68000."),
+    LPEEK: help("Reads one 32-bit long from an even address.", "LPEEK(address%)", "The address must be even; an odd address raises an address error on a 68000."),
+    POKE: help("Writes one byte to an address.", "POKE address%,value", "Writing to an address TOS owns, or to a hardware register, changes the machine state directly.", "DPOKE and LPOKE write a word and a long, and both need an even address. System variables above $400 can only be written in supervisor mode."),
+    DPOKE: help("Writes one 16-bit word to an even address.", "DPOKE address%,value", "The address must be even; an odd address raises an address error on a 68000."),
+    LPOKE: help("Writes one 32-bit long to an even address.", "LPOKE address%,value", "The address must be even; an odd address raises an address error on a 68000."),
+    SPOKE: help("Writes one byte in supervisor mode, so protected system variables can be changed.", "SPOKE address%,value", "Use SDPOKE and SLPOKE for a word and a long."),
+    GEMDOS: help("Calls a GEMDOS function through TRAP #1.", "GEMDOS(function[,argument...])", "Arguments are pushed as words; prefix a long with L: and an address with L:VARPTR or L:ADDR.", "The returned long is the value in D0; a negative value is a GEMDOS error code."),
+    BIOS: help("Calls a BIOS function through TRAP #13.", "BIOS(function[,argument...])", "Arguments are pushed as words unless prefixed with L:."),
+    XBIOS: help("Calls an XBIOS function through TRAP #14.", "XBIOS(function[,argument...])", "Arguments are pushed as words unless prefixed with L:.", "Calls above 63 need an STE, TT or Falcon and are refused with an error on an ST."),
+    GEMSYS: help("Calls an AES function through TRAP #2 using the GINTIN, GINTOUT, ADDRIN and ADDROUT arrays.", "GEMSYS [opcode]", "The opcode goes into CONTRL(0) when given; the other CONTRL words and the arrays must be filled first.", "GFA BASIC keeps the parameter block at GCONTRL, GINTIN, GINTOUT, ADDRIN and ADDROUT; ST BASIC uses CONTRL, GINTIN, GINTOUT, ADDRIN and ADDROUT."),
+    VDISYS: help("Calls a VDI function through TRAP #2 using the CONTRL, INTIN, PTSIN, INTOUT and PTSOUT arrays.", "VDISYS [opcode[,vertices,intin,subopcode]]", "CONTRL(0) is the opcode, CONTRL(1) the number of PTSIN pairs, CONTRL(3) the number of INTIN words and CONTRL(5) the escape or GDP sub-opcode.", "The VDI handle in CONTRL(6) is the one the desktop opened for BASIC."),
+    VSYNC: help("Waits for the next vertical blank.", "VSYNC", "Smooth animation changes the screen straight after VSYNC; it also paces a loop to 50 or 60 frames a second."),
+    SOUND: help("Programs one voice of the YM2149 sound chip.", "SOUND voice,volume,note,octave[,duration]", "The voice is 1 to 3, the volume 0 to 15, the note 1 to 12 and the octave 1 to 8; note 0 takes a period in the octave position."),
+    WAVE: help("Sets the sound chip's envelope and noise mixer.", "WAVE voices,envelope,shape,period[,duration]", "Both masks use bit 0 for voice 1; the shape is 0 to 15."),
+    PBOX: help("Draws a filled rectangle.", "PBOX x1,y1,x2,y2", "Uses the DEFFILL pattern and colour and the GRAPHMODE writing mode."),
+    BOX: help("Draws a rectangle outline.", "BOX x1,y1,x2,y2", "Uses the DEFLINE style and colour."),
+    RBOX: help("Draws a rounded rectangle outline.", "RBOX x1,y1,x2,y2", "PRBOX fills it."),
+    CIRCLE: help("Draws a circle outline, or an arc when angles are given.", "CIRCLE x,y,radius[,start,end]", "Angles are in tenths of a degree; PCIRCLE fills the shape. STOS and ST BASIC take the same arguments.", "ST BASIC: CIRCLE x,y,radius[,start,end] in degrees, PCIRCLE for a filled circle."),
+    PCIRCLE: help("Draws a filled circle or pie slice.", "PCIRCLE x,y,radius[,start,end]", "Uses the DEFFILL pattern and colour."),
+    ELLIPSE: help("Draws an ellipse outline, or an elliptical arc.", "ELLIPSE x,y,xradius,yradius[,start,end]", "PELLIPSE fills it."),
+    PLINE: help("Draws a polyline through points held in an array.", "PLINE count,array%()[,offset]", "The array holds x and y pairs; POLYLINE is the same statement in full."),
+    FILL: help("Flood fills from a point up to a boundary.", "FILL x,y[,boundary]", "The starting point must lie inside a closed area; uses the DEFFILL pattern and colour."),
+    DEFFILL: help("Sets the fill colour, pattern type and pattern index for filled shapes.", "DEFFILL [colour][,type[,index]]  or  DEFFILL colour,pattern%()", "Type 0 is hollow, 1 solid, 2 pattern and 3 hatch; the index runs from 1 to 24 for patterns and 1 to 12 for hatches."),
+    DEFLINE: help("Sets the line style, width and end shapes.", "DEFLINE [style][,width[,start,end]]", "Style 1 is solid, 2 long dash, 3 dot, 4 dash dot, 5 dash, 6 dash dot dot, or a 16-bit pattern above 255. The width must be odd."),
+    DEFTEXT: help("Sets the colour, effects, rotation and size for TEXT output.", "DEFTEXT [colour][,effects[,rotation[,size]]]", "Effects are bit 0 bold, 1 light, 2 italic, 3 underline, 4 outline, 5 shadow; rotation is in tenths of a degree; the size is in points, 4 to 32 on the system font."),
+    GRAPHMODE: help("Sets the VDI writing mode for drawing.", "GRAPHMODE mode", "1 replace, 2 transparent, 3 XOR, 4 reverse transparent."),
+    GET: help("Copies a screen rectangle into a string, or reads a record from a file.", "GET x1,y1,x2,y2,buffer$  or  GET #channel[,record]", "The string must be large enough; GET on a channel needs a record length given with OPEN."),
+    PUT: help("Draws a string saved with GET back onto the screen, or writes a record to a file.", "PUT x,y,buffer$[,mode]  or  PUT #channel[,record]", "The mode is a VDI logic operation 0 to 15; 3 replaces and 6 uses XOR."),
+    BITBLT: help("Copies a raster block between memory form definition blocks through vro_cpyfm.", "BITBLT source%(),destination%(),parameters%()  or  BITBLT array%()", "The MFDB arrays describe width, height and planes; a wrong plane count corrupts memory outside the screen."),
+    ALERT: help("Shows a GEM alert box and returns the button chosen.", "ALERT icon,message$,default,buttons$,result%", "The icon is 0 none, 1 exclamation, 2 question, 3 stop; lines in the message and buttons are separated by |.", "Up to five lines of 30 characters and three buttons of ten characters fit."),
+    FILESELECT: help("Shows the GEM file selector.", "FILESELECT [#title$,]path$,default$,result$", "The path must end in a mask such as \\*.*; the result is empty when Cancel is chosen. The title needs TOS 1.04 or later."),
+    MENU: help("Installs, polls or changes a GEM menu bar.", "MENU array$()  MENU OFF  MENU KILL  MENU index,state  ON MENU GOSUB name", "Titles and items come from the string array, with empty strings ending each column; ON MENU handles selection and MENU(0) reports the item chosen.", "STOS: MENU$(n)=title$ defines a title and MENU ON shows the bar."),
+    OPENW: help("Opens one of GFA BASIC's GEM windows.", "OPENW number[,x,y,w,h,attributes]", "Window numbers run 1 to 4; attributes are the AES window element bits. CLOSEW closes it.", "ST BASIC: OPENW n opens one of its four output windows."),
+    CLOSEW: help("Closes a GEM window opened with OPENW.", "CLOSEW number", "The window must be open."),
+    TITLEW: help("Sets a window's title.", "TITLEW number,title$", "The window must be open."),
+    CLEARW: help("Clears a window to the background colour.", "CLEARW number", "The window must be open."),
+    INFOW: help("Sets a window's information line.", "INFOW number,text$", "The window must have been opened with the INFO element bit."),
+    FULLW: help("Enlarges a window to the full screen.", "FULLW number", "The window must be open."),
+    RESERVE: help("Changes how much memory GFA BASIC keeps for itself, releasing the rest to TOS.", "RESERVE [bytes]", "Needed before EXEC or MALLOC so the called program or the allocation has memory to use; RESERVE alone restores the default.", "Reserving less than the program and its strings need crashes GFA BASIC."),
+    MALLOC: help("Allocates memory from GEMDOS and returns its address.", "MALLOC(bytes)", "Memory released with RESERVE is what GEMDOS can give; -1 reports the largest free block. Free it with MFREE.", "TOS limits a program to about 20 Malloc blocks, so allocate in large pieces."),
+    MFREE: help("Frees a block allocated with MALLOC.", "~MFREE(address%)", "The address must be one MALLOC returned."),
+    EXEC: help("Runs another program through Pexec.", "EXEC mode,program$,command$,environment$", "Mode 0 loads and runs; memory must have been released with RESERVE first. The command string starts with a length byte."),
+    CHAIN: help("Loads and runs another GFA BASIC program in place of this one.", 'CHAIN "program.gfa"', "The file must be a GFA BASIC program in the same saved format; variables are lost."),
+    BLOAD: help("Loads a file straight into memory.", 'BLOAD "file"[,address%]', "The memory must have been reserved; without an address the file loads where it was saved from.", "STOS: BLOAD name$,address or BLOAD name$,bank."),
+    BSAVE: help("Saves a block of memory to a file.", 'BSAVE "file",address%,length', "The destination must be writable.", "STOS: BSAVE name$,start TO end."),
+    OPEN: help("Opens a file or device on a numbered channel.", 'OPEN "mode",#channel,"file"[,record]', 'The mode is "I" input, "O" output, "A" append, "R" random or "U" update; the channel runs from 0 to 99.', 'STOS: OPEN IN #n,name$ or OPEN OUT #n,name$. ST BASIC: OPEN "I",#n,name$.'),
+    CLOSE: help("Closes one channel, or every channel when used bare.", "CLOSE [#channel]", "The channel must be open."),
+    "INPUT#": help("Reads values from an open channel.", "INPUT #channel,variable[,variable...]", "The channel must be open for input and hold textual data; LINE INPUT # reads a whole line."),
+    "PRINT#": help("Writes values to an open channel.", "PRINT #channel,expression[;expression...]", "The channel must be open for output; WRITE # quotes strings."),
+    SEEK: help("Moves a channel's read and write position.", "SEEK #channel,offset", "The channel must be open; a negative offset is relative to the end."),
+    LOF: help("Returns the length of an open file.", "LOF(#channel)", "The channel must be open."),
+    LOC: help("Returns the current position in an open file.", "LOC(#channel)", "The channel must be open."),
+    EOF: help("Reports whether a channel has reached its end.", "EOF(#channel)", "The channel must be open for input."),
+    DIR: help("Lists a directory to the screen or a channel.", 'DIR ["mask"] [TO "file"]', 'The mask follows GEMDOS wildcards, such as "*.PRG". DIR$(n) returns one entry at a time.', "STOS: DIR lists the current folder and DIR$ holds the current path."),
+    CHDIR: help("Changes the current directory, and the drive when one is given.", 'CHDIR "path"', "The path must exist.", "STOS and ST BASIC: CHDIR path$."),
+    MKDIR: help("Creates a directory.", 'MKDIR "path"', "The parent must exist and be writable."),
+    RMDIR: help("Removes an empty directory.", 'RMDIR "path"', "The directory must be empty."),
+    KILL: help("Deletes a file.", 'KILL "file"', "The file must exist and not be read-only."),
+    NAME: help("Renames or moves a file within a drive.", 'NAME "old" AS "new"', "The new name must not already exist."),
+    TOUCH: help("Sets a channel's file date and time stamp to the current time.", "TOUCH #channel", "The channel must be open for writing."),
+    PRINT: help("Writes values to the screen or the current window.", "PRINT [AT(column,line);] expression[;expression...]", "A semicolon joins items, a comma tabs to the next zone, and a trailing semicolon suppresses the line feed."),
+    TEXT: help("Writes graphic text at a pixel position using DEFTEXT.", "TEXT x,y[,width],text$", "Uses the VDI text attributes rather than the text cursor."),
+    INPUT: help("Reads values from the keyboard.", 'INPUT ["prompt",] variable[,variable...]', "Each value must be compatible with its variable; INPUT$(n) reads n characters without echo."),
+    CLS: help("Clears the screen or the current output window.", "CLS", "None."),
+    DATA: help("Stores constant values for READ.", "DATA value[,value...]", "READ variables must match the stored values; RESTORE repositions the stream, to a label in GFA BASIC."),
+    READ: help("Reads the next value from the program's DATA stream.", "READ variable[,variable...]", "Enough DATA values must remain."),
+    RESTORE: help("Moves the DATA read pointer to the start or to a label.", "RESTORE [label]", "A named label must exist."),
+    ON: help("Selects a branch by value, or installs an event handler.", "ON expression GOSUB name,name...  ON MENU GOSUB name  ON BREAK CONT  ON ERROR GOSUB name", "Branch destinations must exist; ON ERROR GOSUB routes every run-time error to a procedure until RESUME or RETURN."),
+    ERROR: help("Raises a run-time error with a numeric code.", "ERROR number", "The active ON ERROR handler may intercept it; ERR holds the code and ERR$(n) its text."),
+    RESUME: help("Continues after an error handler.", "RESUME [NEXT | label]", "Only valid inside an ON ERROR GOSUB handler."),
+    END: help("Ends the program.", "END", "Open channels are closed and windows restored."),
+    STOP: help("Halts the program and returns to the editor.", "STOP", "CONT resumes where STOP left off."),
+    REM: help("Introduces a comment; the rest of the line is ignored.", "REM comment  ' comment  ! trailing comment", "GFA BASIC also accepts ' at the start of a line and ! after a statement."),
+    RANDOMIZE: help("Reseeds the random number generator.", "RANDOMIZE [seed]", "Without a seed GFA BASIC uses the clock."),
+    SWAP: help("Exchanges the values of two variables of the same type.", "SWAP first,second", "Both variables must have the same type; arrays may be swapped whole."),
+    HIDEM: help("Hides the mouse pointer.", "HIDEM", "SHOWM shows it again; each HIDEM needs a SHOWM."),
+    SHOWM: help("Shows the mouse pointer.", "SHOWM", "None."),
+    MOUSE: help("Reads the mouse position and button state.", "MOUSE x,y,k", "k holds bit 0 for the left button and bit 1 for the right. MOUSEX, MOUSEY and MOUSEK are the same values as functions."),
+    SETCOLOR: help("Sets one palette register.", "SETCOLOR index,colour  or  SETCOLOR index,red,green,blue", "The index runs 0 to 15 and each component 0 to 7 on an ST, 0 to 15 on an STE.", "Writes the hardware register through Setcolor, so the VDI colour indexes may not match the register numbers."),
+    VSETCOLOR: help("Sets one VDI colour index in VDI order.", "VSETCOLOR index,red,green,blue", "Components run 0 to 7; the index is the VDI logical colour, not the hardware register."),
+    COLOR: help("Sets the drawing colour, or the text and background pens in STOS and ST BASIC.", "COLOR index  or  COLOR foreground[,background]", "The index must exist in the current resolution: 16 in low, 4 in medium, 2 in high.", "ST BASIC: COLOR text,fill,line[,pattern,style]."),
+    LINEF: help("Draws a line between two points (ST BASIC).", "LINEF x1,y1,x2,y2", "Uses the current COLOR line colour.", "GFA BASIC: LINE x1,y1,x2,y2. STOS: DRAW x1,y1 TO x2,y2."),
+    LINE: help("Draws a line between two points.", "LINE x1,y1,x2,y2", "Uses the DEFLINE style and colour."),
+    PLOT: help("Sets one pixel.", "PLOT x,y", "Uses the current COLOR. STOS and ST BASIC: PLOT x,y."),
+    DRAW: help("Draws from the current position, or along a path.", "DRAW [x1,y1] TO x2,y2  or  DRAW \"FD10 RT90\"", "The turtle string form accepts FD, BK, LT, RT, MA, TT and colour commands."),
+    GOTOXY: help("Moves the text cursor (ST BASIC).", "GOTOXY column,line", "The position must lie inside the output window.", "GFA BASIC: PRINT AT(column,line). STOS: LOCATE column,line."),
+    SYSTAB: help("Returns the address of ST BASIC's system table, which holds the GEM parameter block addresses.", "SYSTAB", "PEEK(SYSTAB+n) reads the table; offsets 8, 12, 16, 20 and 24 hold CONTRL, INTIN, PTSIN, INTOUT and PTSOUT."),
+    LOCATE: help("Moves the text cursor.", "LOCATE column,line", "The position must lie inside the screen or window."),
+    KEYDEF: help("Defines a function key string.", "KEYDEF key,text$", "Keys run 1 to 20, with 11 to 20 for shifted function keys."),
+    KEYTEST: help("Reports whether a key is held down.", "KEYTEST(scancode)", "Uses the scan code, not the character."),
+    INKEY$: help("Returns the key pressed, or an empty string.", "INKEY$", "A function or cursor key returns two characters, the first a null."),
+    VARPTR: help("Returns the address of a variable.", "VARPTR(variable)  or  V:variable", "The address is only valid until GFA BASIC moves its variables; ARRPTR gives an array's descriptor."),
+    ADDR: help("Returns the address of a string's characters or an array's data (GFA BASIC 3).", "ADDR(string$)  or  ADDR(array())", "The address is only valid until the string or array is reassigned."),
+    TIMER: help("Returns the 200 Hz system timer, the _hz_200 count.", "TIMER", "Counts in 1/200 second since boot; divide by 200 for seconds."),
+    PAUSE: help("Waits for a number of fiftieths of a second.", "PAUSE fiftieths", "The program is idle until the time passes; STOS WAIT n does the same."),
+    WAIT: help("Waits for a time, or for a vertical blank (STOS).", "WAIT fiftieths  or  WAIT VBL  or  WAIT KEY", "STOS WAIT VBL synchronises with the screen; WAIT KEY waits for any key."),
   };
 
+  // STOS spells many ST things its own way: memory banks, sprites and bobs,
+  // and its own sound and palette commands.
+  const STOS_HELP = {
+    SCREEN: help("Selects a logical or physical screen, or works on a screen held in a bank.", "SCREEN OPEN bank,width,height,mode  SCREEN COPY source TO destination  SCREEN SWAP  SCREEN CLOSE bank", "SCREEN OPEN needs a free bank; the mode is 0 low, 1 medium or 2 high.", "SCREEN SWAP exchanges the logical and physical screens at the next vertical blank, which is how STOS double-buffers."),
+    SPRITE: help("Shows one of STOS's 15 hardware-style sprites.", "SPRITE number,x,y,image  SPRITE OFF [number]", "The sprite bank (bank 1) must hold the image; sprites are drawn by an interrupt."),
+    BOB: help("Draws a software sprite (blitter object) into the logical screen.", "BOB number,x,y,image  BOB OFF", "Needs the Missing Link or STOS extension that adds bobs; the image comes from the sprite bank."),
+    ANIM: help("Animates a sprite through a sequence of images.", 'ANIM number,"(image,delay)(image,delay)..."  ANIM ON  ANIM OFF', "The sprite must exist; ANIM ON starts every defined animation."),
+    MOVE: help("Moves a sprite along a path in the background.", 'MOVE X number,"(speed,step,count)..."  MOVE Y number,"..."  MOVE ON  MOVE OFF', "The sprite must exist; MOVE ON starts the movement and MOVON(n) reports whether it is still moving."),
+    MUSIC: help("Plays music from the music bank.", "MUSIC number  MUSIC OFF  MUSIC FREQ value", "Bank 3 must hold music made with the STOS music editor."),
+    BOOM: help("Plays the built-in explosion sound.", "BOOM", "Uses all three voices of the sound chip."),
+    SHOOT: help("Plays the built-in shot sound.", "SHOOT", "Uses the sound chip noise generator."),
+    BELL: help("Plays the built-in bell sound.", "BELL", "None."),
+    PALETTE: help("Sets several palette registers at once.", "PALETTE colour0[,colour1,...]", "Each value is $RGB; up to sixteen may be given.", "ST BASIC and GFA BASIC use SETCOLOR for one register."),
+    COLOUR: help("Sets or reads one palette register.", "COLOUR index,value  or  COLOUR(index)", "The index runs 0 to 15 and the value is $RGB."),
+    FADE: help("Fades the palette to new colours over a number of frames.", "FADE speed[,colour0,colour1,...]", "Without colours FADE goes to black; the speed is in vertical blanks per step."),
+    RAINBOW: help("Installs a changing colour bar on one palette register.", "RAINBOW number,offset,line,height  RAINBOW DEL", "The rainbow data comes from SET RAINBOW; it is redrawn by the interrupt."),
+    SCROLL: help("Scrolls part of the screen as defined with DEF SCROLL.", "SCROLL number", "DEF SCROLL number,x1,y1 TO x2,y2,dx,dy must have defined the zone."),
+    WINDOW: help("Opens, selects or closes a text window.", "WINDOW number  WINDOPEN number,x,y,width,height[,border[,set]]  WINDOW OFF  WINDCLOSE", "Up to 13 windows; WINDOPEN defines one and WINDOW selects it."),
+    ZONE: help("Defines or tests a screen zone for the mouse.", "SET ZONE number,x1,y1 TO x2,y2  ZONE(number)  RESET ZONE", "Zones are tested with ZONE(0) for the mouse position or ZONE(n) for a sprite."),
+    LOAD: help("Loads a program, or a file into a memory bank.", 'LOAD "file"[,bank]', "A bank number loads the file into that bank, reserving it if necessary; without one the file replaces the program."),
+    SAVE: help("Saves the program, or a bank, to a file.", 'SAVE "file"[,bank]', "The destination must be writable; a bank saves with its type header."),
+    RESERVE: help("Reserves a memory bank for screens, sprites, music or data.", "RESERVE AS SCREEN bank  RESERVE AS DATA bank,length  RESERVE AS WORK bank,length  RESERVE AS SET bank,length", "Banks run 1 to 15; 1 is the sprite bank and 3 the music bank by convention. ERASE bank releases one.", "GFA BASIC: RESERVE bytes changes the memory left to TOS."),
+    ERASE: help("Releases a memory bank (STOS), or an array (GFA BASIC).", "ERASE bank  or  ERASE array()", "The bank or array must exist."),
+    DOKE: help("Writes one 16-bit word to an even address (STOS).", "DOKE address,value", "The address must be even on a 68000.", "GFA BASIC: DPOKE."),
+    LOKE: help("Writes one 32-bit long to an even address (STOS).", "LOKE address,value", "The address must be even on a 68000.", "GFA BASIC: LPOKE."),
+    DEEK: help("Reads one 16-bit word from an even address (STOS).", "DEEK(address)", "The address must be even on a 68000.", "GFA BASIC: DPEEK."),
+    LEEK: help("Reads one 32-bit long from an even address (STOS).", "LEEK(address)", "The address must be even on a 68000.", "GFA BASIC: LPEEK."),
+    DIR$: help("Holds the current directory path (STOS), or returns a directory entry (GFA BASIC).", "DIR$  or  DIR$(n)", "STOS: assign DIR$ to change folder. GFA BASIC: DIR$(n) returns the nth entry after DIR."),
+    START: help("Returns the start address of a memory bank.", "START(bank)", "The bank must be reserved."),
+    LENGTH: help("Returns the length of a memory bank.", "LENGTH(bank)", "The bank must be reserved."),
+    PHYSIC: help("Returns the address of the physical screen.", "PHYSIC", "Equivalent to Physbase; LOGIC is the logical screen and BACK the background screen."),
+    LOGIC: help("Returns the address of the logical screen STOS draws into.", "LOGIC", "Use SCREEN SWAP to show it."),
+    DREG: help("Holds a data register value for CALL or TRAP.", "DREG(n)=value  CALL address", "Registers 0 to 7; AREG(n) holds the address registers."),
+    AREG: help("Holds an address register value for CALL or TRAP.", "AREG(n)=value", "Registers 0 to 6."),
+    TRAP: help("Raises a 68000 TRAP with the DREG and AREG values loaded (STOS).", "TRAP number[,parameters...]", "TRAP 1 is GEMDOS, 13 the BIOS and 14 the XBIOS; the parameters are pushed like GEMDOS()."),
+  };
+
+  // Atari ST BASIC (the MetaComCo interpreter shipped with early STs) uses
+  // numbered lines, GEM windows and GEMSYS/VDISYS for the system.
+  const STBASIC_HELP = {
+    SYSTAB: GFA_HELP.SYSTAB,
+    GOTOXY: GFA_HELP.GOTOXY,
+    FULLW: GFA_HELP.FULLW,
+    CLEARW: GFA_HELP.CLEARW,
+    LINEF: GFA_HELP.LINEF,
+    PCIRCLE: GFA_HELP.PCIRCLE,
+    DEF: help("Defines a single-line function (ST BASIC).", "DEF FNname(x)=expression", "The definition must be executed before the function is called.", "GFA BASIC: DEFFN name(x)=expression."),
+    LET: help("Assigns a value to a variable.", "[LET] variable=expression", "The LET keyword is optional in every ST dialect."),
+    ELLIPSE: GFA_HELP.ELLIPSE,
+    PELLIPSE: help("Draws a filled ellipse.", "PELLIPSE x,y,xradius,yradius[,start,end]", "Uses the current fill settings."),
+    WIDTH: help("Sets the line width of a channel or the output window.", "WIDTH [#channel,] columns", "The channel must be open."),
+    WRITE: help("Writes values in comma-separated, quoted form.", "WRITE [#channel,] expression[,expression...]", "Intended to be read back by INPUT."),
+    RUN: help("Runs the current program, or loads and runs a named one.", 'RUN [line | "program"]', "A named target must be a program in the same dialect."),
+    NEW: help("Clears the program and variables.", "NEW", "Unsaved changes are lost."),
+    LIST: help("Lists the program.", "LIST [first][-last]", "None."),
+    TRON: help("Turns on line tracing.", "TRON", "TROFF turns it off."),
+    TROFF: help("Turns off line tracing.", "TROFF", "None."),
+    BREAK: help("Sets or clears break key handling (ST BASIC), or leaves a loop (GFA BASIC).", "BREAK ON  BREAK OFF  ON BREAK GOSUB name", "ST BASIC: BREAK OFF stops Control-G interrupting the program."),
+    QUIT: help("Leaves ST BASIC and returns to the desktop.", "QUIT", "Unsaved changes are lost."),
+    AUTO: help("Starts automatic line numbering in the editor.", "AUTO [start][,step]", "Only meaningful in a numbered dialect."),
+    RENUM: help("Renumbers the program lines.", "RENUM [new][,old][,step]", "GOTO, GOSUB and THEN destinations are rewritten."),
+    MERGE: help("Merges the lines of a saved program into the current one.", 'MERGE "program"', "The file must be a plain text listing."),
+    FILES: help("Lists the current directory (ST BASIC).", 'FILES ["mask"]', "The path must be readable.", "GFA BASIC: DIR. STOS: DIR."),
+  };
+
+  const BASIC_HELP = { ...STBASIC_HELP, ...STOS_HELP, ...GFA_HELP };
+
+  // The desktop reads DESKTOP.INF (TOS 1) or NEWDESK.INF (TOS 2 and later)
+  // at boot, one record per line introduced by # and a letter. MINT.CNF is
+  // the kernel's own configuration, read line by line before the AES starts.
   const SCRIPT_HELP = {
-    ADDBUFFERS: help("Adds cache buffers to a mounted drive.", "AddBuffers drive buffers", "Each buffer costs about 512 bytes of memory."),
-    ALIAS: help("Defines a Shell alias.", "Alias [name [string]]", "Aliases live only in the Shell that defined them."),
-    ASSIGN: help("Creates, removes or lists a logical device name.", "Assign [name: [target]]", "The target must exist unless DEFER or PATH is used.", "Assign name: target ADD adds a second directory to an existing assignment."),
-    AVAIL: help("Reports free Chip, Fast and total memory.", "Avail [CHIP|FAST|TOTAL|FLUSH]", "FLUSH expunges unused libraries and devices first."),
-    BINDDRIVERS: help("Loads the expansion drivers in SYS:Expansion.", "BindDrivers", "Normally issued once from the Startup-Sequence."),
-    BREAK: help("Sends a break signal to a background process.", "Break process [ALL|C|D|E|F]", "The process number comes from Status."),
-    CD: help("Changes or reports the current directory.", "CD [directory]", "The directory must exist and be readable."),
-    COPY: help("Copies files or whole directory trees.", "Copy [FROM] source [TO] destination [ALL] [CLONE]", "The destination must be writable.", "CLONE preserves the datestamp, protection bits and comment."),
-    DATE: help("Reads or sets the system date and time.", "Date [date] [time] [TO file]", "Setting the clock needs SetClock to make it permanent."),
-    DELETE: help("Deletes files or directories.", "Delete file [file…] [ALL] [QUIET] [FORCE]", "A delete-protected file needs FORCE, and a directory needs ALL unless it is empty."),
-    DIR: help("Lists a directory.", "Dir [directory] [OPT A|I|D]", "The directory must be readable."),
-    DISKCHANGE: help("Tells GEMDOS that a disk has been swapped.", "DiskChange device", "Needed for drives that cannot report a change themselves."),
-    ECHO: help("Writes a line of text.", 'Echo "text" [NOLINE] [FIRST n] [LEN n]', "None."),
-    ENDCLI: help("Closes the Shell it is issued in.", "EndCLI", "The Shell must not be the last one holding the program."),
-    EXECUTE: help("Runs an GEMDOS script.", "Execute script [arguments]", "The script must be readable.", "A script with its s protection bit set can be run by name alone."),
-    FAILAT: help("Sets the return code at which a script stops.", "FailAt code", "The default is 10; 21 tolerates warnings and errors below failure."),
-    FAULT: help("Explains a numeric GEMDOS error code.", "Fault code [code…]", "None."),
-    FILENOTE: help("Reads or sets a file's comment.", 'FileNote file "comment"', "The comment may be up to 79 characters."),
-    FORMAT: help("Initialises a volume.", "Format DRIVE device NAME name [FFS] [INTERNATIONAL] [DIRCACHE] [QUICK]", "Formatting destroys everything on the volume."),
-    GETENV: help("Prints an environment variable.", "GetEnv name", "The variable must exist in ENV:."),
-    IF: help("Runs the following lines only when a condition holds.", "IF [NOT] [WARN|ERROR|FAIL|EXISTS file|value EQ value]", "Used only in a script; closed with EndIf."),
-    INFO: help("Reports the size, use and state of mounted volumes.", "Info [device]", "None."),
-    INSTALL: help("Writes or checks a floppy boot block.", "Install [DRIVE] device [CHECK] [NOBOOT] [FFS]", "The disk must be writable; CHECK only reports."),
-    JOIN: help("Concatenates files into a new one.", "Join file file… AS destination", "The destination must not be one of the sources."),
-    LAB: help("Marks a destination for Skip inside a script.", "Lab name", "Used only in a script."),
-    LIST: help("Lists a directory with sizes, protection bits, dates and comments.", "List [directory] [pattern] [DATES] [KEYS]", "The directory must be readable."),
-    LOADWB: help("Starts Workbench.", "LoadWB [DELAY] [-DEBUG]", "Normally the last line of the Startup-Sequence."),
-    LOCK: help("Write protects or unprotects a mounted volume.", "Lock drive [ON|OFF] [password]", "The volume must be mounted."),
-    MAKEDIR: help("Creates a directory.", "MakeDir directory", "The parent must exist and be writable."),
-    MAKELINK: help("Creates a hard or soft link.", "MakeLink from to [HARD|SOFT] [FORCE]", "A hard link must stay on the same volume."),
-    MOUNT: help("Mounts a device described in DEVS:MountList or DEVS:DOSDrivers.", "Mount device", "The mount entry and its handler must be present."),
-    NEWSHELL: help("Opens another Shell window.", "NewShell [window] [FROM file]", "The window specification must be a valid CON: string."),
-    PATH: help("Reads or changes the command search path.", "Path [directory…] [ADD] [SHOW] [RESET]", "Each directory must exist."),
-    PROMPT: help("Sets the Shell prompt.", 'Prompt "string"', "%N is the process number and %S the current directory."),
-    PROTECT: help("Reads or sets a file's protection bits.", "Protect file [+|-][hsparwed]", "The r, w, e and d bits control read, write, execute and delete.", "The s bit marks a script so Execute is not needed to run it."),
-    QUIT: help("Ends a script with a chosen return code.", "Quit [code]", "Used only in a script."),
-    RELABEL: help("Renames a volume.", "Relabel drive name", "The volume must be writable."),
-    REMRAD: help("Removes the recoverable RAM disk.", "RemRad [device]", "RAD: must not be in use."),
-    RENAME: help("Renames or moves a file within a volume.", "Rename from TO to", "Both paths must be on the same volume."),
-    RESIDENT: help("Makes a command permanently resident in memory.", "Resident [name] [file] [REMOVE] [ADD] [PURE]", "The command must be marked pure."),
-    RUN: help("Starts a command as a background process.", "Run command [command…]", "The Shell returns immediately.", "Use >NIL: <NIL: so the process does not hold the Shell window open."),
-    SEARCH: help("Searches files for a string.", "Search [directory] [pattern] SEARCH string [ALL]", "The directories must be readable."),
-    SETCLOCK: help("Copies the system time to or from the battery-backed clock.", "SetClock LOAD|SAVE|RESET", "The machine must have a real-time clock."),
-    SETENV: help("Sets an environment variable.", "SetEnv name string", "ENV: must be assigned."),
-    SKIP: help("Jumps forward to a Lab inside a script.", "Skip [label] [BACK]", "Used only in a script."),
-    SORT: help("Sorts the lines of a file.", "Sort from TO to [COLSTART n]", "The destination must be writable."),
-    STACK: help("Reads or sets the stack size given to commands.", "Stack [size]", "The default is 4096 bytes.", "A game or a deeply recursive program often needs 8192 or more."),
-    STATUS: help("Lists the running processes.", "Status [process] [FULL] [TCB] [CLI|COM|SEGS]", "None."),
-    TYPE: help("Displays a file as text or as hexadecimal.", "Type file [TO destination] [OPT H|N]", "OPT H shows hexadecimal, OPT N adds line numbers."),
-    VERSION: help("Reports the version of Kickstart, Workbench or a named file.", "Version [file] [VERSION n] [REVISION n] [FULL]", "A named file must carry a $VER: string."),
-    WAIT: help("Pauses for a period or until a time.", "Wait [n] [SEC|MIN] [UNTIL time]", "Used mostly in a Startup-Sequence."),
-    WHICH: help("Reports where a command would be found on the path.", "Which command [NOALIAS] [RES] [ALL]", "None."),
-    WHY: help("Explains why the previous command failed.", "Why", "Only meaningful immediately after a failure."),
-  };
-
-  const LIBRARY_HELP = {
-    _LVOOPENLIBRARY: help("Opens a library and returns its base in D0.", "MOVEQ #version,D0 / LEA name,A1 / JSR _LVOOpenLibrary(A6)", "A6 must hold ExecBase, read from absolute address 4."),
-    _LVOCLOSELIBRARY: help("Closes a library opened with OpenLibrary.", "MOVEA.L base,A1 / JSR _LVOCloseLibrary(A6)", "A6 must hold ExecBase."),
-    _LVOALLOCMEM: help("Allocates memory of a requested type.", "MOVE.L size,D0 / MOVE.L requirements,D1 / JSR _LVOAllocMem(A6)", "A6 must hold ExecBase. D0 is zero when the request cannot be met.", "MEMF_CHIP is required for anything the custom chips must read."),
-    _LVOFREEMEM: help("Frees memory previously allocated with AllocMem.", "MOVEA.L block,A1 / MOVE.L size,D0 / JSR _LVOFreeMem(A6)", "The size must match the allocation exactly."),
-    _LVOFORBID: help("Stops task switching until Permit is called.", "JSR _LVOForbid(A6)", "A6 must hold ExecBase. Keep the forbidden section short."),
-    _LVOPERMIT: help("Allows task switching again after Forbid.", "JSR _LVOPermit(A6)", "One Permit is needed for each Forbid."),
-    _LVODISABLE: help("Disables interrupts until Enable is called.", "JSR _LVODisable(A6)", "Interrupts must be re-enabled quickly or the system will lose input and disk activity."),
-    _LVOENABLE: help("Re-enables interrupts after Disable.", "JSR _LVOEnable(A6)", "One Enable is needed for each Disable."),
-    _LVODOIO: help("Sends an I/O request and waits for it to finish.", "MOVEA.L request,A1 / JSR _LVODoIO(A6)", "The request must be initialised and its device opened."),
-    _LVOOPEN: help("Opens a file and returns a BCPL file handle in D0.", "MOVE.L name,D1 / MOVE.L mode,D2 / JSR _LVOOpen(A6)", "A6 must hold the dos.library base. D0 is zero on failure.", "The name is a C string pointer; the mode is MODE_OLDFILE, MODE_NEWFILE or MODE_READWRITE."),
-    _LVOCLOSE: help("Closes a file handle returned by Open.", "MOVE.L handle,D1 / JSR _LVOClose(A6)", "A6 must hold the dos.library base."),
-    _LVOREAD: help("Reads bytes from a file handle into a buffer.", "MOVE.L handle,D1 / MOVE.L buffer,D2 / MOVE.L length,D3 / JSR _LVORead(A6)", "D0 returns the count read, 0 at end of file and -1 on error."),
-    _LVOWRITE: help("Writes bytes from a buffer to a file handle.", "MOVE.L handle,D1 / MOVE.L buffer,D2 / MOVE.L length,D3 / JSR _LVOWrite(A6)", "D0 returns the count written, or -1 on error."),
-    _LVOOUTPUT: help("Returns the process's standard output handle.", "JSR _LVOOutput(A6)", "A6 must hold the dos.library base."),
-    _LVOINPUT: help("Returns the process's standard input handle.", "JSR _LVOInput(A6)", "A6 must hold the dos.library base."),
-    _LVOLOCK: help("Locks a file or directory and returns a lock in D0.", "MOVE.L name,D1 / MOVE.L mode,D2 / JSR _LVOLock(A6)", "The lock must be released with UnLock."),
-    _LVOUNLOCK: help("Releases a lock obtained from Lock.", "MOVE.L lock,D1 / JSR _LVOUnLock(A6)", "A6 must hold the dos.library base."),
-    _LVOOPENSCREEN: help("Opens an Intuition screen.", "LEA newScreen,A0 / JSR _LVOOpenScreen(A6)", "A6 must hold the intuition.library base."),
-    _LVOOPENWINDOW: help("Opens an Intuition window.", "LEA newWindow,A0 / JSR _LVOOpenWindow(A6)", "A6 must hold the intuition.library base."),
-    _LVOWAITTOF: help("Waits for the next vertical blank.", "JSR _LVOWaitTOF(A6)", "A6 must hold the graphics.library base."),
+    "#A": help("General desktop settings: the date format, blitter and write verify switches.", "#a 000000", "One record per file, first in DESKTOP.INF.", "The digits are read positionally; a TOS that does not know a position keeps its default."),
+    "#B": help("Desktop preferences: the confirm-delete and confirm-copy switches and the sort order.", "#b 000000", "One record per file."),
+    "#C": help("The desktop colour palette, sixteen colours as one hexadecimal digit per component.", "#c 7770007000600070005000400030002000000555075507550755070007000700", "One record per file; TOS writes it when Save Desktop is chosen."),
+    "#D": help("Icon and name for folders.", "#D FF 01 @ *.*@", "The two numbers are the icon index and an unused field; the text is the name mask."),
+    "#E": help("Desktop options: the resolution and blitter, sort and confirmation bits.", "#E 18 11", "The first number holds the view and sort mode, the second the resolution on a TOS 1 desktop.", "Changing the resolution value here is how a desktop boots into medium resolution."),
+    "#F": help("Icon and name mask for plain files.", "#F FF 04 @ *.*@", "Followed by the program assignments the desktop opens such files with."),
+    "#G": help("Assigns a GEM program to a document type so double-clicking the document starts the program.", "#G 03 FF PROGRAM.PRG@ *.DOC@", "The program must be on the boot drive's path; 03 FF are the icon indexes."),
+    "#I": help("An icon assigned to a file or program (NEWDESK.INF).", "#I 03 FF PROGRAM.PRG@ @", "NEWDESK.INF only."),
+    "#K": help("Keyboard shortcuts for desktop menu items (NEWDESK.INF).", "#K 4F 53 4C 00 46 42 43 57 45 58 00 53 48 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 @", "TOS 2.05 or later."),
+    "#M": help("A disk drive icon on the desktop.", "#M 00 00 00 FF A FLOPPY DISK@ @", "The first two numbers are the grid position, the fourth the icon index, then the drive letter and its label."),
+    "#N": help("Icon and name mask for files without an application (NEWDESK.INF).", "#N FF 04 000 @ *.*@", "NEWDESK.INF only."),
+    "#P": help("Assigns a TOS program to a document type.", "#P 03 FF PROGRAM.TOS@ *.TXT@", "The program runs in the TOS screen rather than under GEM."),
+    "#Q": help("Desk accessory loading flags (NEWDESK.INF).", "#Q 41 40 43 40 43 40", "TOS 2.05 or later."),
+    "#T": help("The trash can icon.", "#T 00 03 02 FF   TRASH@ @", "The numbers are the grid position and icon index."),
+    "#V": help("Video mode for a Falcon desktop (NEWDESK.INF).", "#V 0000 0000 0000 0000 0000 0000", "TOS 4 only."),
+    "#W": help("A desktop window: position, size, scroll position and path.", "#W 00 00 0E 01 1A 09 00 @", "Up to four windows on TOS 1, eight on TOS 2; the path is the folder it shows, with \\*.* at the end.", "A window record with a path on a drive that is not present is skipped at boot."),
+    "#X": help("Extended desktop options (NEWDESK.INF).", "#X 0000 0000 0000", "TOS 2.05 or later."),
+    "#Y": help("Assigns a TOS program that takes parameters (a TTP) to a document type.", "#Y 03 FF PROGRAM.TTP@ *.ARC@", "The document name is passed on the command line."),
+    "#Z": help("Starts a program automatically when the desktop appears (NEWDESK.INF).", "#Z 01 C:\\GEM\\PROGRAM.PRG@", "TOS 2.05 or later; 01 marks a GEM program and 00 a TOS program."),
+    INIT: help("Names the program MiNT runs as the shell or initial process.", "INIT=C:\\MINT\\SHELL.TOS", "Only one of INIT and GEM should be set; GEM starts an AES instead."),
+    GEM: help("Names the AES MiNT starts once the kernel is ready.", "GEM=C:\\MINT\\XAAES\\XAAES.KM", "The path must exist; a .km kernel module is loaded directly, a .prg is run."),
+    CON: help("Redirects the console during boot.", "CON=U:\\DEV\\MODEM1", "The device must exist in U:\\DEV."),
+    PRN: help("Redirects the printer device.", "PRN=U:\\DEV\\PRN", "The device must exist in U:\\DEV."),
+    AUX: help("Redirects the auxiliary serial device.", "AUX=U:\\DEV\\MODEM1", "The device must exist in U:\\DEV."),
+    BIOBUF: help("Sets the number of buffers for the BIOS.", "BIOBUF=20,20", "Two values: buffers for the largest and the smallest sector size."),
+    DEBUG_LEVEL: help("Sets how much the kernel reports while booting.", "DEBUG_LEVEL=2", "0 is silent and 4 traces everything; output goes to DEBUG_DEVNO."),
+    DEBUG_DEVNO: help("Selects the BIOS device debug output goes to.", "DEBUG_DEVNO=2", "2 is the console, 1 the serial port, 6 Modem 1."),
+    MAXMEM: help("Limits the memory a process may allocate.", "MAXMEM=4096", "In kilobytes; 0 removes the limit."),
+    SLICES: help("Sets the scheduler time slice.", "SLICES=2", "In 1/200 second ticks; 0 gives every process the whole tick."),
+    INITIALMEM: help("Sets the memory a process starts with when its program flags ask for protection.", "INITIALMEM=4096", "In kilobytes."),
+    NEWFATFS: help("Switches the kernel's own FAT file system on for drives.", "NEWFATFS=C,D,E", "Drive letters separated by commas; needed for VFAT long names and large partitions."),
+    VFAT: help("Enables VFAT long file names on drives using NEWFATFS.", "VFAT=C,D", "The drives must be listed in NEWFATFS."),
+    FASTLOAD: help("Skips clearing memory when programs are loaded.", "FASTLOAD=YES", "Programs that expect zeroed memory break; set per program with the fast-load flag instead."),
+    HIDE_B: help("Hides drive B when only one floppy is present.", "HIDE_B=YES", "Avoids the insert-disk alert for a missing second drive."),
+    WRITEPROTECT: help("Makes drives read-only to the kernel.", "WRITEPROTECT=C", "Drive letters separated by commas."),
+    CACHE: help("Sets the file system cache size.", "CACHE=200", "In kilobytes."),
+    SECURELEVEL: help("Sets how strictly the kernel separates users.", "SECURELEVEL=0", "0 is no security, 1 restricts Super, 2 requires root for privileged calls."),
+    MEMPROTECT: help("Turns memory protection on or off on a 68030 or later.", "MEMPROTECT=YES", "Needs a processor with an MMU; TT and Falcon programs that poke other processes' memory stop working."),
+    CLOCKMODE: help("Says whether the hardware clock keeps local time or UTC.", "CLOCKMODE=LOCAL", "LOCAL or UTC."),
+    SETENV: help("Sets an environment variable for every program MiNT starts.", "setenv PATH C:\\MINT;C:\\BIN", "The value follows the name after a space."),
+    ALIAS: help("Makes a drive letter point at a folder.", "alias X: U:\\C\\MINT", "The letter must be free and the folder must exist."),
+    SLN: help("Creates a symbolic link in the U: file system.", "sln u:\\c\\mint u:\\mint", "The target must exist."),
+    ECHO: help("Writes a line during boot.", "echo Starting MiNT", "None."),
+    CD: help("Changes the current directory during boot.", "cd c:\\mint", "The folder must exist."),
+    EXEC: help("Runs a program during boot and waits for it.", "exec c:\\mint\\program.prg arguments", "The program must exist; it runs before the AES."),
+    INCLUDE: help("Reads another configuration file at this point.", "include c:\\mint\\local.cnf", "The file must exist."),
+    REN: help("Renames a file during boot.", "ren c:\\old.txt c:\\new.txt", "Both paths must be on the same drive."),
   };
 
   const BASIC_KEYWORDS = BASIC_LANGUAGE?.KEYWORDS || new Set();
-  const SCRIPT_COMMANDS = new Set([...Object.keys(SCRIPT_HELP), ...BASIC_KEYWORDS]);
+  const SCRIPT_COMMANDS = new Set([...Object.keys(SCRIPT_HELP)]);
   const ASM_HELP = {
-    MOVE: help("Copies a value and sets the condition codes from it.", "MOVE.size source,destination", "The size suffix and both addressing modes must be legal for the operation."),
+    MOVE: help("Copies a value and sets the condition codes from it.", "MOVE.size source,destination", "The size suffix and both addressing modes must be legal for the operation.", "MOVE.W #n,-(SP) before a TRAP pushes a function number or a word argument."),
     MOVEQ: help("Loads a sign-extended byte constant into a data register.", "MOVEQ #value,Dn", "The value must be between -128 and 127."),
     MOVEA: help("Copies a value into an address register without touching the condition codes.", "MOVEA.W/L source,An", "A word source is sign-extended to the full 32 bits."),
     MOVEM: help("Saves or restores a set of registers in one instruction.", "MOVEM.size list,destination", "The same register list and size must be used to restore them."),
     LEA: help("Loads the effective address of an operand into an address register.", "LEA source,An", "The source must use a control addressing mode."),
-    JSR: help("Calls a subroutine, pushing the return address on the stack.", "JSR destination", "The destination must contain code that returns with RTS.", "A library call is written JSR offset(A6), where the offset is negative."),
+    PEA: help("Pushes the effective address of an operand onto the stack.", "PEA source", "A common way to pass a pointer argument to GEMDOS: PEA string then MOVE.W #9,-(SP) then TRAP #1."),
+    JSR: help("Calls a subroutine, pushing the return address on the stack.", "JSR destination", "The destination must contain code that returns with RTS."),
     BSR: help("Calls a subroutine at a displacement from the program counter.", "BSR[.B|.W] label", "The label must be within the displacement range."),
     JMP: help("Transfers control without pushing a return address.", "JMP destination", "The destination must contain executable code."),
     RTS: help("Returns from a subroutine.", "RTS", "The stack must hold a valid return address."),
-    RTE: help("Returns from an exception handler.", "RTE", "Only valid in supervisor mode with an intact exception frame."),
-    TRAP: help("Raises one of the sixteen TRAP exceptions.", "TRAP #vector", "The exception vector must be installed."),
+    RTE: help("Returns from an exception handler.", "RTE", "Only valid in supervisor mode with an intact exception frame; on a 68030 the frame carries a format word."),
+    TRAP: help("Raises one of the sixteen TRAP exceptions; TOS answers #1 (GEMDOS), #2 (AES and VDI), #13 (BIOS) and #14 (XBIOS).", "TRAP #vector", "The function number is the word on top of the stack; the caller removes the arguments afterwards with ADDQ.L or LEA n(SP),SP.", "TRAP #2 needs D0 = $C8 for the AES or $73 for the VDI and D1 pointing at the parameter block."),
     CMP: help("Compares two values by setting the condition codes.", "CMP.size source,Dn", "A conditional branch normally follows."),
     TST: help("Sets the condition codes from one operand.", "TST.size operand", "Useful for testing a value a MOVE did not already set flags for."),
     BEQ: help("Branches when the zero flag is set.", "BEQ[.B|.W] label", "The label must be within the displacement range."),
@@ -208,118 +306,348 @@ window.AtariCodeEditor = (() => {
     DBRA: help("Decrements a counter and loops until it passes -1.", "DBRA Dn,label", "The counter is the low word of Dn, so the loop runs count+1 times."),
     BTST: help("Tests one bit and sets the zero flag from it.", "BTST #bit,operand", "Bit numbering starts at zero from the least significant bit."),
     ADD: help("Adds a value and sets the condition codes.", "ADD.size source,destination", "ADDA is used when the destination is an address register."),
+    ADDQ: help("Adds a constant from 1 to 8.", "ADDQ.size #value,destination", "ADDQ.L #n,SP is how arguments are removed after a TRAP."),
     SUB: help("Subtracts a value and sets the condition codes.", "SUB.size source,destination", "SUBA is used when the destination is an address register."),
     ANDI: help("Combines an immediate value with a destination using AND.", "ANDI.size #value,destination", "ANDI to SR is privileged."),
     ORI: help("Combines an immediate value with a destination using OR.", "ORI.size #value,destination", "ORI to SR is privileged."),
+    CLR: help("Clears an operand to zero and sets the condition codes.", "CLR.size destination", "CLR.W -(SP) pushes a zero word argument."),
+    FMOVE: help("Moves a value to, from or between floating-point registers.", "FMOVE.fmt source,FPn", "Needs a 68881 or 68882, or the on-chip unit of a 68040 or 68060.", "A TT or Falcon without the optional coprocessor raises an F-line exception."),
   };
 
   const INLINE_ASSEMBLER_HELP = {
-    "DC.B": help("Places one or more bytes in the output.", 'DC.B value[,value…] or DC.B "text"', "Follow an odd number of bytes with EVEN before any word-sized data."),
-    "DC.W": help("Places one or more 16-bit words in the output.", "DC.W value[,value…]", "The address must be even."),
-    "DC.L": help("Places one or more 32-bit longs in the output.", "DC.L value[,value…]", "The address must be even."),
-    "DS.B": help("Reserves a number of bytes, filled with zero.", "DS.B count", "None."),
-    "DS.W": help("Reserves a number of words, filled with zero.", "DS.W count", "The address must be even."),
-    "DS.L": help("Reserves a number of longs, filled with zero.", "DS.L count", "The address must be even."),
+    "DC.B": help("Places one or more bytes in the output.", 'DC.B value[,value...] or DC.B "text",0', "Follow an odd number of bytes with EVEN before any word-sized data."),
+    "DC.W": help("Places one or more 16-bit words in the output.", "DC.W value[,value...]", "The address must be even.", "DC.W $A000 to $A00F invokes a Line-A routine."),
+    "DC.L": help("Places one or more 32-bit longs in the output.", "DC.L value[,value...]", "The address must be even."),
+    "DS.B": help("Reserves a number of bytes.", "DS.B count", "None."),
+    "DS.W": help("Reserves a number of words.", "DS.W count", "The address must be even."),
+    "DS.L": help("Reserves a number of longs.", "DS.L count", "The address must be even."),
     EVEN: help("Advances the assembly address to the next even address.", "EVEN", "Required after an odd number of bytes, because a 68000 word access must be even."),
     CNOP: help("Aligns the assembly address to a chosen boundary.", "CNOP offset,alignment", "The alignment is normally 2 or 4."),
     EQU: help("Gives a name to a constant value.", "name EQU value", "The value must be known when the line is assembled."),
-    SECTION: help("Starts a named hunk of code, data or BSS.", "SECTION name,CODE|DATA|BSS[_C|_F]", "_C requests Chip RAM and _F requests Fast RAM."),
+    TEXT: help("Starts the code section of a GEMDOS program.", "TEXT", "A .PRG has one text, one data and one BSS segment, in that order."),
+    DATA: help("Starts the initialised data section.", "DATA", "Data follows the text segment in the program file."),
+    BSS: help("Starts the uninitialised data section, which takes no space in the file.", "BSS", "Only DS directives may appear in it; TOS clears it when the program loads unless fast load is set."),
+    SECTION: help("Starts a named section of code, data or BSS.", "SECTION name,TEXT|DATA|BSS", "The linker joins sections of the same kind."),
     INCLUDE: help("Assembles the contents of another source file at this point.", 'INCLUDE "file"', "The file must be reachable through the assembler's include path."),
+    INCBIN: help("Includes the bytes of a binary file.", 'INCBIN "file"', "Follow with EVEN when the file has an odd length."),
     XREF: help("Declares a symbol defined in another object file.", "XREF name", "The linker resolves it."),
     XDEF: help("Makes a symbol visible to other object files.", "XDEF name", "The symbol must be defined in this file."),
-    OPT: help("Sets assembler options.", "OPT option[,option…]", "The accepted options depend on the assembler."),
+    OPT: help("Sets assembler options.", "OPT option[,option...]", "The accepted options depend on the assembler."),
+    RSRESET: help("Resets the structure offset counter used by RS directives.", "RSRESET", "Devpac and vasm."),
+    MACRO: help("Begins a macro definition.", "name MACRO ... ENDM", "Parameters are written \\1, \\2 and so on."),
   };
 
-  //: Absolute addresses an Atari program reaches without going through a
-  //: library, so a decoded operand can be named rather than left as a number.
-  const SYSTEM_ADDRESS_HELP = new Map([
-    [0x000004, "ExecBase"], [0xBFE001, "CIAA-PRA"], [0xBFD000, "CIAB-PRA"],
-    [0xDFF000, "BLTDDAT"], [0xDFF002, "DMACONR"], [0xDFF004, "VPOSR"],
-    [0xDFF006, "VHPOSR"], [0xDFF00A, "JOY0DAT"], [0xDFF00C, "JOY1DAT"],
-    [0xDFF010, "ADKCONR"], [0xDFF016, "POTGOR"], [0xDFF01A, "DSKBYTR"],
-    [0xDFF01C, "INTENAR"], [0xDFF01E, "INTREQR"], [0xDFF020, "DSKPTH"],
-    [0xDFF024, "DSKLEN"], [0xDFF02A, "VPOSW"], [0xDFF034, "POTGO"],
-    [0xDFF040, "BLTCON0"], [0xDFF042, "BLTCON1"], [0xDFF07E, "DSKSYNC"],
-    [0xDFF080, "COP1LCH"], [0xDFF084, "COP2LCH"], [0xDFF088, "COPJMP1"],
-    [0xDFF08E, "DIWSTRT"], [0xDFF090, "DIWSTOP"], [0xDFF092, "DDFSTRT"],
-    [0xDFF094, "DDFSTOP"], [0xDFF096, "DMACON"], [0xDFF09A, "INTENA"],
-    [0xDFF09C, "INTREQ"], [0xDFF09E, "ADKCON"], [0xDFF0A0, "AUD0LCH"],
-    [0xDFF100, "BPLCON0"], [0xDFF102, "BPLCON1"], [0xDFF104, "BPLCON2"],
-    [0xDFF108, "BPL1MOD"], [0xDFF10A, "BPL2MOD"], [0xDFF180, "COLOR00"],
-    [0xDFF182, "COLOR01"], [0xDFF1FC, "FMODE"],
+  //: The documented TOS system variables from $380 to $5FF, with the low
+  //: exception vectors TOS installs, so a decoded address can be named.
+  const SYSTEM_VARIABLES = Object.freeze([
+    [0x008, "bus error vector", "l", "exception vector 2"], [0x00C, "address error vector", "l", "exception vector 3"],
+    [0x010, "illegal instruction vector", "l", "exception vector 4"], [0x014, "divide by zero vector", "l", "exception vector 5"],
+    [0x020, "privilege violation vector", "l", "exception vector 8"], [0x024, "trace vector", "l", "exception vector 9"],
+    [0x028, "Line-A vector", "l", "exception vector 10, the $Axxx opcodes"], [0x02C, "Line-F vector", "l", "exception vector 11, the $Fxxx opcodes"],
+    [0x068, "HBL vector", "l", "level 2 autovector, horizontal blank"], [0x070, "VBL vector", "l", "level 4 autovector, vertical blank"],
+    [0x078, "MFP vector", "l", "level 6 autovector, the MFP 68901"],
+    [0x080, "TRAP #0 vector", "l", ""], [0x084, "TRAP #1 vector", "l", "GEMDOS"], [0x088, "TRAP #2 vector", "l", "AES and VDI"],
+    [0x08C, "TRAP #3 vector", "l", ""], [0x090, "TRAP #4 vector", "l", ""], [0x094, "TRAP #5 vector", "l", ""],
+    [0x098, "TRAP #6 vector", "l", ""], [0x09C, "TRAP #7 vector", "l", ""], [0x0A0, "TRAP #8 vector", "l", ""],
+    [0x0A4, "TRAP #9 vector", "l", ""], [0x0A8, "TRAP #10 vector", "l", ""], [0x0AC, "TRAP #11 vector", "l", ""],
+    [0x0B0, "TRAP #12 vector", "l", ""], [0x0B4, "TRAP #13 vector", "l", "BIOS"], [0x0B8, "TRAP #14 vector", "l", "XBIOS"],
+    [0x0BC, "TRAP #15 vector", "l", ""],
+    [0x100, "MFP interrupt vectors", "l", "vectors 64 to 79 for the MFP 68901"],
+    [0x380, "proc_lives", "l", "$12345678 when the processor state below is valid after a crash"],
+    [0x384, "proc_dregs", "l", "D0 to D7 saved at the last exception"], [0x3A4, "proc_aregs", "l", "A0 to A7 saved at the last exception"],
+    [0x3C4, "proc_enum", "l", "the exception number"], [0x3C8, "proc_usp", "l", "the user stack pointer at the exception"],
+    [0x3CC, "proc_stk", "w", "sixteen words from the stack at the exception"],
+    [0x400, "etv_timer", "l", "timer event vector, called every system tick"], [0x404, "etv_critic", "l", "critical error handler"],
+    [0x408, "etv_term", "l", "process termination vector"], [0x40C, "etv_xtra", "l", "reserved event vectors"],
+    [0x420, "memvalid", "l", "$752019F3 when the memory configuration is valid"], [0x424, "memcntlr", "b", "the memory controller configuration byte"],
+    [0x42E, "phystop", "l", "the end of ST RAM"], [0x432, "_membot", "l", "the bottom of the TPA"], [0x436, "_memtop", "l", "the top of the TPA"],
+    [0x43A, "memval2", "l", "$237698AA when the memory configuration is valid"], [0x440, "seekrate", "w", "the floppy seek rate"],
+    [0x442, "_timr_ms", "w", "the system timer period in milliseconds, 20"], [0x444, "_fverify", "w", "non-zero to verify floppy writes"],
+    [0x446, "_bootdev", "w", "the device the system booted from"], [0x448, "palmode", "w", "0 for NTSC 60 Hz, non-zero for PAL 50 Hz"],
+    [0x44A, "defshiftmd", "b", "the default resolution after a monitor change"], [0x44C, "sshiftmd", "w", "the current shifter mode: 0 low, 1 medium, 2 high"],
+    [0x44E, "_v_bas_ad", "l", "the logical screen base address"], [0x452, "vblsem", "w", "the VBL semaphore; 0 disables the VBL handler"],
+    [0x454, "nvbls", "w", "the number of entries in the VBL queue"], [0x456, "_vblqueue", "l", "pointer to the VBL queue"],
+    [0x45A, "colorptr", "l", "a palette to load at the next VBL, or 0"], [0x45E, "screenpt", "l", "a physical screen base to set at the next VBL, or 0"],
+    [0x462, "_vbclock", "l", "the number of VBLs since boot"], [0x466, "_frclock", "l", "the number of VBLs processed"],
+    [0x46A, "hdv_init", "l", "hard disk initialisation vector"], [0x46E, "swv_vec", "l", "the monitor change vector"],
+    [0x472, "hdv_bpb", "l", "the Getbpb vector"], [0x476, "hdv_rw", "l", "the Rwabs vector"], [0x47A, "hdv_boot", "l", "the boot vector"],
+    [0x47E, "hdv_mediach", "l", "the Mediach vector"], [0x482, "_cmdload", "w", "non-zero to load COMMAND.PRG at boot"],
+    [0x484, "conterm", "b", "console attributes: bit 0 key click, bit 1 key repeat, bit 2 bell, bit 3 return shift state from Bconin"],
+    [0x48E, "themd", "l", "the memory descriptor TOS boots with"], [0x49E, "_md", "l", "space for additional memory descriptors"],
+    [0x4A2, "savptr", "l", "pointer to the BIOS register save area"], [0x4A6, "_nflops", "w", "the number of floppy drives, 0 to 2"],
+    [0x4A8, "con_state", "l", "the VT52 emulator state vector"], [0x4AC, "save_row", "w", "saved cursor row for the VT52 emulator"],
+    [0x4AE, "sav_context", "l", "pointer to the saved processor context"], [0x4B2, "_bufl", "l", "the two GEMDOS buffer list pointers"],
+    [0x4BA, "_hz_200", "l", "the 200 Hz system timer count"], [0x4BC, "the_env", "l", "the default environment string"],
+    [0x4C2, "_drvbits", "l", "a bit for each drive present, bit 0 for A:"], [0x4C6, "_dskbufp", "l", "pointer to the 1 KiB disk buffer"],
+    [0x4CA, "_autopath", "l", "pointer to the AUTO folder path"], [0x4CE, "_vbl_list", "l", "the eight default VBL queue slots"],
+    [0x4EE, "_dumpflg", "w", "non-zero when Alt-Help asked for a screen dump"], [0x4F0, "_prtabt", "w", "the printer abort flag"],
+    [0x4F2, "_sysbase", "l", "pointer to the OS header, which holds the TOS version and date"], [0x4F6, "_shell_p", "l", "pointer to the shell's own data"],
+    [0x4FA, "end_os", "l", "the end of the operating system's RAM"], [0x4FE, "exec_os", "l", "the address of the AES entry point"],
+    [0x502, "scr_dump", "l", "the screen dump vector"], [0x506, "prv_lsto", "l", "the printer status vector"], [0x50A, "prv_lst", "l", "the printer output vector"],
+    [0x50E, "prv_auxo", "l", "the auxiliary status vector"], [0x512, "prv_aux", "l", "the auxiliary output vector"],
+    [0x516, "pun_ptr", "l", "pointer to the AHDI partition table (the PUN_INFO)"], [0x51A, "memval3", "l", "$5555AAAA when TT RAM is valid (TOS 1.02 or later)"],
+    [0x51E, "xconstat", "l", "the eight Bconstat vectors"], [0x53E, "xconin", "l", "the eight Bconin vectors"],
+    [0x55E, "xcostat", "l", "the eight Bcostat vectors"], [0x57E, "xconout", "l", "the eight Bconout vectors"],
+    [0x59E, "_longframe", "w", "non-zero when the processor uses long exception frames (68010 or later)"],
+    [0x5A0, "_p_cookies", "l", "pointer to the cookie jar"], [0x5A2, "ramtop", "l", "the end of TT RAM"],
+    [0x5A6, "ramvalid", "l", "$1357BD13 when ramtop is valid"], [0x5A8, "bell_hook", "l", "the bell sound vector"],
+    [0x5AC, "kcl_hook", "l", "the key click vector"],
   ]);
 
-  const normaliseHelpKey = value => String(value || "").trim().replace(/[^A-Za-z0-9$_.]/g, "").toUpperCase();
-  const COMMAND_CASE = Object.freeze({ basic: "upper", script: "mixed", "68000": "upper", "68010": "upper", "68020": "upper", "68030": "upper", "68040": "upper", "68060": "upper", m68k: "upper" });
-  const dictionary = language => language === "basic" ? { ...BASIC_HELP, ...INLINE_ASSEMBLER_HELP, ...ASM_HELP, ...LIBRARY_HELP } : language === "script" ? { ...SCRIPT_HELP, ...BASIC_HELP } : { ...INLINE_ASSEMBLER_HELP, ...ASM_HELP, ...LIBRARY_HELP };
+  //: Hardware registers at $FF8000 and above, reached at $FFFF8xxx when the
+  //: assembler sign-extends a short absolute address.
+  const HARDWARE_REGISTERS = Object.freeze([
+    [0xFF8001, "memory configuration", "MMU bank sizes"],
+    [0xFF8201, "video base high", "bits 23-16 of the screen address"], [0xFF8203, "video base mid", "bits 15-8 of the screen address"],
+    [0xFF8205, "video address counter high", ""], [0xFF8207, "video address counter mid", ""], [0xFF8209, "video address counter low", ""],
+    [0xFF820A, "sync mode", "bit 1 selects 50 Hz, bit 0 external sync"], [0xFF820D, "video base low", "STE: bits 7-1 of the screen address"],
+    [0xFF820F, "line offset", "STE: words skipped at the end of each line"], [0xFF8240, "palette register 0", "$RGB"],
+    [0xFF8242, "palette register 1", "$RGB"], [0xFF8244, "palette register 2", "$RGB"], [0xFF8246, "palette register 3", "$RGB"],
+    [0xFF8248, "palette register 4", "$RGB"], [0xFF824A, "palette register 5", "$RGB"], [0xFF824C, "palette register 6", "$RGB"],
+    [0xFF824E, "palette register 7", "$RGB"], [0xFF8250, "palette register 8", "$RGB"], [0xFF8252, "palette register 9", "$RGB"],
+    [0xFF8254, "palette register 10", "$RGB"], [0xFF8256, "palette register 11", "$RGB"], [0xFF8258, "palette register 12", "$RGB"],
+    [0xFF825A, "palette register 13", "$RGB"], [0xFF825C, "palette register 14", "$RGB"], [0xFF825E, "palette register 15", "$RGB"],
+    [0xFF8260, "shifter mode", "0 low, 1 medium, 2 high"], [0xFF8265, "horizontal scroll", "STE: pixel offset 0 to 15"],
+    [0xFF8266, "Falcon shift mode", "Falcon VIDEL"], [0xFF82C0, "VIDEL clock", "Falcon"],
+    [0xFF8604, "DMA sector count and data", "floppy and ACSI"], [0xFF8606, "DMA status and mode", "floppy and ACSI"],
+    [0xFF8609, "DMA base high", ""], [0xFF860B, "DMA base mid", ""], [0xFF860D, "DMA base low", ""],
+    [0xFF8800, "PSG register select", "YM2149; reading returns the selected register"], [0xFF8802, "PSG register data", "YM2149 write"],
+    [0xFF8900, "DMA sound control", "STE: bit 0 play, bit 1 repeat"], [0xFF8903, "DMA sound frame start high", "STE"],
+    [0xFF8905, "DMA sound frame start mid", "STE"], [0xFF8907, "DMA sound frame start low", "STE"],
+    [0xFF890F, "DMA sound frame end high", "STE"], [0xFF8911, "DMA sound frame end mid", "STE"], [0xFF8913, "DMA sound frame end low", "STE"],
+    [0xFF8921, "DMA sound mode", "STE: bits 0-1 rate, bit 7 mono"], [0xFF8922, "microwire data", "STE: volume and tone"], [0xFF8924, "microwire mask", "STE"],
+    [0xFF8A00, "blitter halftone RAM", ""], [0xFF8A20, "blitter source x increment", ""], [0xFF8A22, "blitter source y increment", ""],
+    [0xFF8A24, "blitter source address", ""], [0xFF8A28, "blitter endmask 1", ""], [0xFF8A2A, "blitter endmask 2", ""], [0xFF8A2C, "blitter endmask 3", ""],
+    [0xFF8A2E, "blitter destination x increment", ""], [0xFF8A30, "blitter destination y increment", ""], [0xFF8A32, "blitter destination address", ""],
+    [0xFF8A36, "blitter x count", ""], [0xFF8A38, "blitter y count", ""], [0xFF8A3A, "blitter halftone operation", ""],
+    [0xFF8A3B, "blitter logic operation", ""], [0xFF8A3C, "blitter control", "bit 7 busy, bit 6 hog, bit 5 smudge"], [0xFF8A3D, "blitter skew", ""],
+    [0xFF9200, "joypad fire buttons", "STE and Falcon enhanced joystick ports"], [0xFF9202, "joypad directions and paddles", "STE and Falcon"],
+    [0xFF9800, "Falcon palette", "256 longs of $RRGGBB00"],
+    [0xFFFA01, "MFP GPIP", "general purpose I/O: bit 0 Centronics busy, 1 RS-232 DCD, 2 RS-232 CTS, 3 blitter done, 4 ACIA interrupt, 5 DMA done, 6 RS-232 RI, 7 monochrome monitor"],
+    [0xFFFA03, "MFP AER", "active edge register"], [0xFFFA05, "MFP DDR", "data direction register"],
+    [0xFFFA07, "MFP IERA", "interrupt enable A: timers A and B, RS-232"], [0xFFFA09, "MFP IERB", "interrupt enable B: timers C and D, GPIP"],
+    [0xFFFA0B, "MFP IPRA", "interrupt pending A"], [0xFFFA0D, "MFP IPRB", "interrupt pending B"],
+    [0xFFFA0F, "MFP ISRA", "interrupt in service A"], [0xFFFA11, "MFP ISRB", "interrupt in service B"],
+    [0xFFFA13, "MFP IMRA", "interrupt mask A"], [0xFFFA15, "MFP IMRB", "interrupt mask B"], [0xFFFA17, "MFP VR", "vector register"],
+    [0xFFFA19, "MFP TACR", "timer A control"], [0xFFFA1B, "MFP TBCR", "timer B control"], [0xFFFA1D, "MFP TCDCR", "timers C and D control"],
+    [0xFFFA1F, "MFP TADR", "timer A data"], [0xFFFA21, "MFP TBDR", "timer B data"], [0xFFFA23, "MFP TCDR", "timer C data, the 200 Hz system timer"],
+    [0xFFFA25, "MFP TDDR", "timer D data, the RS-232 baud rate"], [0xFFFA27, "MFP SCR", "sync character"], [0xFFFA29, "MFP UCR", "USART control"],
+    [0xFFFA2B, "MFP RSR", "receiver status"], [0xFFFA2D, "MFP TSR", "transmitter status"], [0xFFFA2F, "MFP UDR", "USART data"],
+    [0xFFFA81, "TT MFP GPIP", "the second MFP of a TT"],
+    [0xFFFC00, "keyboard ACIA control and status", "IKBD"], [0xFFFC02, "keyboard ACIA data", "IKBD"],
+    [0xFFFC04, "MIDI ACIA control and status", ""], [0xFFFC06, "MIDI ACIA data", ""],
+    [0xFFFC20, "real-time clock", "Mega ST RP5C15 registers"],
+  ]);
+
+  const SYSTEM_ADDRESS_HELP = new Map();
+  const SYSTEM_ADDRESS_DETAIL = new Map();
+  for (const [address, name, size, meaning] of SYSTEM_VARIABLES) {
+    SYSTEM_ADDRESS_HELP.set(address, name);
+    SYSTEM_ADDRESS_DETAIL.set(address, { name, size, meaning, kind: /vector/.test(name) ? "vector" : "variable" });
+  }
+  for (const [address, name, meaning] of HARDWARE_REGISTERS) {
+    SYSTEM_ADDRESS_HELP.set(address, name);
+    SYSTEM_ADDRESS_DETAIL.set(address, { name, size: "", meaning, kind: "register" });
+  }
+  const SYSTEM_VARIABLE_HELP = Object.fromEntries(SYSTEM_VARIABLES
+    .filter(([, name]) => /^[_a-z]/.test(name) && !/\s/.test(name))
+    .map(([address, name, size, meaning]) => [name.toUpperCase(), help(
+      `TOS system variable at $${address.toString(16).toUpperCase()}: ${meaning || name}.`,
+      `${size === "w" ? "MOVE.W" : size === "b" ? "MOVE.B" : "MOVE.L"} $${address.toString(16).toUpperCase()}.W,${size === "w" ? "D0" : size === "b" ? "D0" : "D0"}`,
+      "Readable only in supervisor mode on a 68000 TOS, because addresses below $800 are protected; use Super or Supexec.",
+    )]));
+
+  // A short absolute address is sign-extended by the processor, so $FFFA01
+  // and $FFFFFA01 are the same register. Both spellings are folded to one.
+  function canonicalAddress(value) {
+    if (!Number.isFinite(value)) return null;
+    let address = value >>> 0;
+    if (address >= 0xFFFF8000) address &= 0xFFFFFF;
+    if (address >= 0xFF8000 && address <= 0xFFFFFF) return address;
+    return address;
+  }
+
+  function describeAddress(value) {
+    const address = canonicalAddress(value);
+    if (address == null) return null;
+    const detail = SYSTEM_ADDRESS_DETAIL.get(address);
+    if (detail) return { address, ...detail };
+    // A palette write lands on a register even when the address is odd by
+    // one, and the MFP registers sit on odd bytes of word slots.
+    if (address >= 0xFF8240 && address <= 0xFF825F) return { address, name: `palette register ${(address - 0xFF8240) >> 1}`, size: "w", meaning: "$RGB", kind: "register" };
+    return null;
+  }
+
+  const formatAddress = value => `$${canonicalAddress(value).toString(16).toUpperCase()}`;
+
+  // TOS calls by name, for hovering Fopen or v_opnvwk in source or a
+  // disassembly comment.
+  const SYSTEM_CALL_HELP = (() => {
+    const table = {};
+    const families = [["GEMDOS", CALL_CATALOGUE?.GEMDOS, 1], ["BIOS", CALL_CATALOGUE?.BIOS, 13], ["XBIOS", CALL_CATALOGUE?.XBIOS, 14]];
+    for (const [family, entries, trap] of families) {
+      for (const [number, spec] of Object.entries(entries || {})) {
+        const value = Number(number);
+        const words = (spec.parameters || []).reduce((total, parameter) => total + (parameter.size === "l" ? 4 : 2), 2);
+        table[spec.name.toUpperCase()] = help(
+          `${family} ${value} (\$${value.toString(16).toUpperCase()}): ${spec.summary}.`,
+          `${(spec.parameters || []).map(parameter => `${parameter.size === "l" ? "MOVE.L" : "MOVE.W"} ${parameter.name},-(SP)`).reverse().join(" / ")}${spec.parameters?.length ? " / " : ""}MOVE.W #${value},-(SP) / TRAP #${trap}${words > 2 ? ` / ${words <= 8 ? `ADDQ.L #${words},SP` : `LEA ${words}(SP),SP`}` : " / ADDQ.L #2,SP"}`,
+          spec.requires ? `Requires ${spec.requires}.` : `Any TOS; the result is returned in D0.`,
+        );
+      }
+    }
+    for (const [number, spec] of Object.entries(CALL_CATALOGUE?.AES || {})) {
+      table[spec.name.toUpperCase()] = help(`AES ${number}: ${spec.summary}.`, `control[0]=${number} / MOVE.L #$C8,D0 / LEA aespb,A0 / MOVE.L A0,D1 / TRAP #2`, spec.requires ? `Requires ${spec.requires}.` : "An AES must be running; a TOS program started from the desktop has one.");
+    }
+    for (const [number, spec] of Object.entries(CALL_CATALOGUE?.VDI || {})) {
+      if (spec.subfunctions) {
+        for (const [sub, inner] of Object.entries(spec.subfunctions)) {
+          table[inner.name.toUpperCase()] = help(`VDI ${number}/${sub}: ${inner.summary}.`, `contrl[0]=${number} / contrl[5]=${sub} / MOVE.L #$73,D0 / LEA vdipb,A0 / MOVE.L A0,D1 / TRAP #2`, "A VDI workstation handle in contrl[6].");
+        }
+      } else {
+        table[spec.name.toUpperCase()] = help(`VDI ${number}: ${spec.summary}.`, `contrl[0]=${number} / MOVE.L #$73,D0 / LEA vdipb,A0 / MOVE.L A0,D1 / TRAP #2`, spec.requires ? `Requires ${spec.requires}.` : "A VDI workstation handle in contrl[6].");
+      }
+    }
+    return table;
+  })();
+
+  const normaliseHelpKey = value => String(value || "").trim().replace(/[^A-Za-z0-9$_.#~]/g, "").toUpperCase();
+  const COMMAND_CASE = Object.freeze(Object.fromEntries([["basic", "upper"], ["script", "mixed"], ...M68K_TARGETS.map(target => [target, "upper"])]));
+  const isAssemblyLanguage = language => M68K_TARGETS.includes(String(language || "").toLowerCase()) || /^680[0-9]0(?:[+-]fpu)?$/i.test(String(language || ""));
+  const dictionary = language => language === "basic"
+    ? { ...BASIC_HELP }
+    : language === "script"
+      ? { ...SCRIPT_HELP }
+      : { ...INLINE_ASSEMBLER_HELP, ...ASM_HELP, ...SYSTEM_CALL_HELP, ...SYSTEM_VARIABLE_HELP };
   const lookup = (language, key) => {
     const normal = normaliseHelpKey(key);
     const found = dictionary(language)[normal];
     if (found) return { key: normal, ...found };
-    if (language === "script" && /^[A-Z][A-Z0-9-]*$/.test(normal)) {
-      return { key: normal, ...help("GEMDOS command.", `${normal} [arguments]`, "The command must be resident, on the current path, or in C:.") };
+    if (language === "script" && /^#[A-Z]$/.test(normal)) {
+      return { key: normal, ...help("A desktop information record.", `${normal.toLowerCase()} ...`, "DESKTOP.INF or NEWDESK.INF; unknown record letters are ignored by the desktop.") };
     }
-    if (language === "basic" && BASIC_KEYWORDS.has(normal)) return { key: normal, ...help("ST BASIC keyword.", normal, "Syntax and availability depend on the ST BASIC version.") };
-    if (ASSEMBLY_LANGUAGE?.isMnemonic(language, normal)) return { key: normal, ...help(`${language.toUpperCase()} processor instruction.`, normal, "Operands and addressing modes must be valid for the selected processor variant.") };
-    if (M68K_TARGETS.includes(language) && /^[A-Z][A-Z0-9.]*$/.test(normal)) {
-      return { key: normal, ...help(`${language.toUpperCase()} instruction or assembler pseudo-operation.`, normal, "The decoded operands, processor variant and execution context determine its exact effect.") };
+    if (language === "script" && /^[A-Z][A-Z0-9_]*$/.test(normal)) {
+      return { key: normal, ...help("Configuration directive.", `${normal}=value`, "The kernel or desktop that reads this file must understand it; unknown lines are ignored.") };
+    }
+    if (language === "basic" && BASIC_KEYWORDS.has(normal)) return { key: normal, ...help("BASIC keyword.", normal, "Syntax and availability depend on the dialect: GFA BASIC, STOS or ST BASIC.") };
+    if (isAssemblyLanguage(language)) {
+      const base = normal.replace(/\.(?:B|W|L|S|X|D|P)$/, "");
+      if (ASSEMBLY_LANGUAGE?.isMnemonic(language, base)) {
+        const fpu = ASSEMBLY_LANGUAGE.isFpuMnemonic?.(base);
+        return { key: normal, ...help(`${fpu ? "Floating-point coprocessor" : language.toUpperCase().replace("+FPU", " with FPU")} instruction.`, normal, fpu ? "A 68881 or 68882, or a 68040 or later with its own floating-point unit." : "Operands and addressing modes must be valid for the selected processor.") };
+      }
+      if (ASSEMBLY_LANGUAGE?.isFpuMnemonic?.(base)) {
+        return { key: normal, ...help("Floating-point coprocessor instruction.", normal, "A 68881 or 68882 fitted to a TT or Falcon, or a 68040 or later.", "The configured processor has no floating-point unit, so this raises an F-line exception on it.") };
+      }
+      if (/^[A-Z_][A-Z0-9_.]*$/.test(normal)) {
+        return { key: normal, ...help(`${language.toUpperCase()} instruction or assembler pseudo-operation.`, normal, "The decoded operands, processor and execution context determine its exact effect.") };
+      }
     }
     return null;
   };
 
-  //: The library vectors this build can name, keyed by offset, so a decoded
-  //: JSR through A6 can be explained without knowing which library is open.
-  const VECTOR_HELP = Object.freeze(Object.fromEntries(Object.entries(CALL_CATALOGUE?.EXEC || {}).map(([offset, spec]) => [offset, spec.summary])));
-  const CUSTOM_REGISTER_HELP = Object.freeze(Object.fromEntries(Object.entries(CALL_CATALOGUE?.GRAPHICS || {}).map(([offset, spec]) => [offset, spec.summary])));
-
+  // Numbers as GFA BASIC, STOS and a 68000 assembler write them: $ or &H
+  // for hexadecimal, % or &X for binary, &O for octal, and plain decimal.
   const sourceNumber = value => {
-    const match = String(value || "").trim().match(/^(-?)(?:&([0-9a-f]+)|0x([0-9a-f]+)|(\d+))/i);
+    const match = String(value || "").trim().match(/^(-?)(?:(?:&H|\$|0x)([0-9a-f]+)|(?:&X|%)([01]+)|&O([0-7]+)|&([0-9a-f]+)|(\d+))/i);
     if (!match) return null;
-    const number = Number.parseInt(match[2] || match[3] || match[4], match[2] || match[3] ? 16 : 10);
+    const number = match[2] != null ? Number.parseInt(match[2], 16)
+      : match[3] != null ? Number.parseInt(match[3], 2)
+        : match[4] != null ? Number.parseInt(match[4], 8)
+          : match[5] != null ? Number.parseInt(match[5], 16)
+            : Number.parseInt(match[6], 10);
     return match[1] ? -number : number;
   };
 
-  function constantNumbers(value) {
-    const numbers = [];
-    let remaining = String(value || "").trim();
-    while (remaining) {
-      const match = remaining.match(/^(-?(?:&[0-9a-f]+|0x[0-9a-f]+|\d+))/i);
-      if (!match) break;
-      numbers.push(sourceNumber(match[1]));
-      const separator = remaining.slice(match[0].length).match(/^(\s*,\s*|\s+)/);
-      if (!separator) break;
-      remaining = remaining.slice(match[0].length + separator[0].length);
+  const NUMBER_PATTERN = /^-?(?:(?:&H|\$|0x)[0-9a-f]+|(?:&X|%)[01]+|&O[0-7]+|&[0-9a-f]+|\d+)/i;
+
+  // The comma-separated arguments of a statement or call, each proved to a
+  // number or left null. A GFA L: or W: size prefix is dropped, parentheses
+  // are respected and a string stops nothing.
+  function argumentValues(text) {
+    let source = String(text || "").trim();
+    if (source.startsWith("(")) source = source.slice(1);
+    const parts = [];
+    let depth = 0;
+    let quoted = false;
+    let current = "";
+    for (const character of source) {
+      if (character === '"') quoted = !quoted;
+      if (!quoted) {
+        if (character === "(") depth += 1;
+        if (character === ")") { if (depth === 0) break; depth -= 1; }
+        if (character === ":" && depth === 0 && !/[LWVB]$/i.test(current.trim())) break;
+        if (character === "!" && depth === 0) break;
+        if (character === "," && depth === 0) { parts.push(current); current = ""; continue; }
+      }
+      current += character;
     }
-    return numbers;
+    parts.push(current);
+    return parts.map(part => {
+      const bare = part.trim().replace(/^[LWVB]:/i, "").trim();
+      return NUMBER_PATTERN.test(bare) && /^-?(?:&[HXO]?[0-9a-f]+|\$[0-9a-f]+|0x[0-9a-f]+|%[01]+|\d+)$/i.test(bare) ? sourceNumber(bare) : null;
+    });
   }
 
-  function preceding68000Registers(line, relativeStart) {
-    const registers = {};
-    const prefix = line.slice(0, relativeStart);
-    for (const match of prefix.matchAll(/\bLD([AXY])\s*#\s*(&[0-9a-f]+|0x[0-9a-f]+|\d+)/gi)) registers[match[1].toUpperCase()] = sourceNumber(match[2]);
-    return registers;
+  function constantNumbers(value) {
+    return argumentValues(value).filter(number => number != null);
   }
 
-  const PLATFORM_NAMES = Object.freeze({
-    a500: "Atari 500", a500plus: "Atari 500+", a600: "Atari 600",
-    a1200: "Atari 1200", a2000: "Atari 2000", a3000: "Atari 3000",
-    a4000: "Atari 4000", cd32: "Atari CD32", tos: "TOS hard drive",
-  });
+  // The values a program pushed before a TRAP, read back from the lines that
+  // precede it. The nearest push is the function number; the ones before it
+  // are its arguments, in stack order.
+  function precedingPushes(lines, lineIndex, relativeStart) {
+    const pushes = [];
+    let d0 = null;
+    let reads = 0;
+    const consider = statement => {
+      const text = statement.replace(/;.*$/, "").trim();
+      if (!text) return true;
+      if (/^\s*trap\b/i.test(text) && reads > 0) return false;
+      let match = text.match(/^(?:move|movea)\.([wl])\s+#\s*([^,]+),\s*-\(\s*(?:sp|a7)\s*\)/i);
+      if (match) { pushes.push({ size: match[1].toLowerCase(), value: sourceNumber(match[2]), symbol: match[2].trim() }); return true; }
+      match = text.match(/^clr\.([wl])\s+-\(\s*(?:sp|a7)\s*\)/i);
+      if (match) { pushes.push({ size: match[1].toLowerCase(), value: 0 }); return true; }
+      match = text.match(/^(?:move|movea)\.([wl])\s+([^,#]+),\s*-\(\s*(?:sp|a7)\s*\)/i);
+      if (match) { pushes.push({ size: match[1].toLowerCase(), value: sourceNumber(match[2].replace(/\.[wl]$/i, "")) }); return true; }
+      match = text.match(/^pea(?:\.l)?\s+(.+)$/i);
+      if (match) { pushes.push({ size: "l", value: /^[$&%\d-]/.test(match[1].trim()) && !/\(/.test(match[1]) ? sourceNumber(match[1]) : null }); return true; }
+      match = text.match(/^(?:move(?:\.[wl])?|moveq(?:\.l)?)\s+#\s*([^,]+),\s*d0\b/i);
+      if (match && d0 == null) { d0 = sourceNumber(match[1]); return true; }
+      return true;
+    };
+    const statementsOf = line => line.replace(/^\s*[A-Za-z_.][A-Za-z0-9_.]*:\s*/, "").split(/(?<!\S)\s*;(?!\S)/)[0].split(/\s*:\s*(?=[a-z])/i);
+    const current = lines[lineIndex].slice(0, relativeStart);
+    let keepGoing = statementsOf(current).reverse().every(statement => { reads += 1; return consider(statement); });
+    for (let index = lineIndex - 1; keepGoing && index >= 0 && index >= lineIndex - 16; index -= 1) {
+      keepGoing = statementsOf(lines[index]).reverse().every(statement => { reads += 1; return consider(statement); });
+    }
+    return { pushes, d0 };
+  }
 
   function configuredPlatform(profile = {}) {
     const identify = value => {
       const text = String(value || "").toLowerCase();
-      if (/cd32/.test(text)) return "cd32";
-      if (/a(?:miga[ -]*)?4000|tos/.test(text)) return "a4000";
-      if (/a(?:miga[ -]*)?3000/.test(text)) return "a3000";
-      if (/a(?:miga[ -]*)?2000/.test(text)) return "a2000";
-      if (/a(?:miga[ -]*)?1200/.test(text)) return "a1200";
-      if (/a(?:miga[ -]*)?600/.test(text)) return "a600";
-      if (/a(?:miga[ -]*)?500[ ]*\+|a500plus/.test(text)) return "a500plus";
-      if (/a(?:miga[ -]*)?500/.test(text)) return "a500";
+      if (!text) return "";
+      if (/falcon/.test(text)) return "falcon030";
+      if (/\btt\b|tt030|tt-|tt_/.test(text)) return "tt030";
+      if (/mega\s*-?\s*ste|megaste/.test(text)) return "megaste";
+      if (/\bste\b|1040ste|520ste|\bste[-_]/.test(text)) return "ste";
+      if (/mega\s*-?\s*st\b|megast\b/.test(text)) return "megast";
+      if (/\bst\b|stfm|\bstf\b|520st|1040st|^st[-_]/.test(text)) return "st";
       return "";
     };
-    return identify(profile.machine) || identify(profile.targetHardware) || "auto";
+    return identify(profile.machine) || identify(profile.targetHardware) || identify(profile.name) || "auto";
+  }
+
+  // The processor a profile implies: 68000 on every ST and STE, 68030 on the
+  // TT and Falcon, with the FPU overlay when the profile says one is fitted.
+  function processorFor(profile = {}) {
+    const platform = configuredPlatform(profile);
+    const explicit = String(profile.processor || "").toLowerCase().replace(/^mc/, "");
+    const base = /^680[0-9]0$/.test(explicit) ? explicit : MACHINE_PROCESSORS[platform] || "68000";
+    const fpu = Boolean(profile.fpu) || /688[12]/.test(String(profile.fpu || profile.coprocessor || ""));
+    return fpu && ["68030", "68020"].includes(base) ? `${base}+fpu` : base;
   }
 
   function platformHelp(result, profile = {}) {
@@ -327,11 +655,11 @@ window.AtariCodeEditor = (() => {
     const targetName = platform === "auto" ? "the automatic target" : PLATFORM_NAMES[platform];
     const documented = result?.platforms || [];
     const requirements = result?.requires ? ` Requirements: ${result.requires}.` : "";
-    if (platform === "auto") return `The workbench target is automatic, so compatibility cannot be confirmed.${requirements}`;
+    if (platform === "auto") return `The hardware profile is automatic, so compatibility cannot be confirmed.${requirements}`;
     if (!documented.length) return `The catalogue cannot prove that this machine-specific operation is supported by the configured ${targetName} target.${requirements}`;
     if (!documented.includes(platform)) {
       const designedFor = documented.map(item => PLATFORM_NAMES[item] || item).join(", ");
-      return `Target warning: this operation is documented for ${designedFor}, not the configured ${targetName} target. It was not designed for the current platform and, if accepted at all, may cause unexpected behaviour.${requirements}`;
+      return `Target warning: this operation is documented for ${designedFor}, not the configured ${targetName} target. It is outside the target profile and, if accepted at all, may cause unexpected behaviour.${requirements}`;
     }
     return `The configured ${targetName} target is within the documented platform scope.${requirements}`;
   }
@@ -339,7 +667,21 @@ window.AtariCodeEditor = (() => {
   function catalogueText(result, profile) {
     if (!result) return "";
     const detail = (result.details || []).filter(Boolean).join(". ");
-    return `${result.summary}.${detail ? ` ${detail}.` : ""} ${platformHelp(result, profile)}`;
+    const warnings = (result.warnings || []).filter(Boolean).join(" ");
+    return `${result.summary}.${detail ? ` ${detail}.` : ""}${warnings ? ` ${warnings}` : ""} ${platformHelp(result, profile)}`;
+  }
+
+  const WORD_POKES = new Set(["DPOKE", "LPOKE", "SDPOKE", "SLPOKE", "DOKE", "LOKE"]);
+  const WORD_PEEKS = new Set(["DPEEK", "LPEEK", "DEEK", "LEEK"]);
+  const ALL_POKES = new Set(["POKE", "SPOKE", ...WORD_POKES]);
+  const ALL_PEEKS = new Set(["PEEK", ...WORD_PEEKS]);
+
+  function addressNote(address, verb) {
+    const detail = describeAddress(address);
+    if (!detail) return "";
+    const what = detail.kind === "register" ? `the ${detail.name} hardware register` : detail.kind === "vector" ? `the ${detail.name}` : `the TOS system variable ${detail.name}`;
+    const meaning = detail.meaning ? ` (${detail.meaning})` : "";
+    return `Address ${formatAddress(address)} is ${what}${meaning}, so this ${verb} ${detail.kind === "register" ? "goes directly to the hardware" : "touches the operating system's own state"} rather than program memory.`;
   }
 
   function sourceContextHelp(source, language, start, end, key, targetProfile = {}) {
@@ -353,81 +695,98 @@ window.AtariCodeEditor = (() => {
     const tail = line.slice(relativeEnd);
     const normal = normaliseHelpKey(key);
     const additions = [];
-    if (normal === "LIBRARY" && ["basic", "script"].includes(language)) {
-      const name = tail.match(/^\s*"([^"]*)"/)?.[1];
-      if (name) {
-        additions.push(`This opens ${JSON.stringify(name)}, whose functions become callable once a matching ${name.replace(/\.library$/i, "")}.bmap file is present in the current directory or in LIBS:.`);
-      }
-    }
-    if (["POKE", "POKEW", "POKEL"].includes(normal) && language === "basic") {
-      const [address] = constantNumbers(tail.split(":", 1)[0]);
-      const register = address == null ? null : SYSTEM_ADDRESS_HELP.get(address);
-      if (register) additions.push(`Address &${address.toString(16).toUpperCase()} is ${register}, so this writes directly to the hardware rather than to program memory.`);
-      if (["POKEW", "POKEL"].includes(normal) && address != null && address % 2) {
-        additions.push(`Address &${address.toString(16).toUpperCase()} is odd, and a 68000 word or long access must be even.`);
-      }
-    }
-    if (["PEEK", "PEEKW", "PEEKL"].includes(normal) && language === "basic") {
-      const [address] = constantNumbers(tail.replace(/^\s*\(/, "").split(")", 1)[0]);
-      const register = address == null ? null : SYSTEM_ADDRESS_HELP.get(address);
-      if (register) additions.push(`Address &${address.toString(16).toUpperCase()} is ${register}.`);
-    }
-    if (["SOUND", "WAVE", "SAY", "PALETTE", "OBJECT"].includes(normal) && language === "basic") {
-      const statement = tail.split(":", 1)[0];
-      const decoded = CALL_CATALOGUE?.explainBasicCall(normal, constantNumbers(statement));
+    const assembly = isAssemblyLanguage(language);
+    if (language === "basic" && ["GEMDOS", "BIOS", "XBIOS", "GEMSYS", "VDISYS", "SOUND", "WAVE", "SETCOLOR", "VSYNC"].includes(normal)) {
+      const decoded = CALL_CATALOGUE?.explainBasicCall(normal, argumentValues(tail));
       if (decoded) additions.push(catalogueText(decoded, targetProfile));
     }
-    if (normal === "SCREEN" && language === "basic") {
-      const [, , , depth, mode] = constantNumbers(tail.split(":", 1)[0]);
-      if (Number.isFinite(depth)) {
-        additions.push(`A depth of ${depth} gives ${2 ** depth} colours and needs ${depth} bitplanes of Chip RAM for every displayed line.`);
-      }
-      if (mode === 3 || mode === 4) additions.push(`Mode ${mode} is interlaced, so the display will flicker on a monitor without a scan doubler.`);
+    if (language === "basic" && normal === "TRAP") {
+      const [vector, ...rest] = argumentValues(tail);
+      if (vector != null) additions.push(catalogueText(CALL_CATALOGUE?.explainTrapCall(vector, rest[0], rest.slice(1)), targetProfile));
     }
-    if (normal === "COLOR" && language === "basic") {
-      const [foreground, background] = constantNumbers(tail.split(":", 1)[0]);
-      if (Number.isFinite(foreground)) {
-        additions.push(background == null
-          ? `Pen ${foreground} becomes the foreground; PALETTE decides what colour that pen actually is.`
-          : `Pen ${foreground} becomes the foreground and pen ${background} the background; PALETTE decides what colours those pens actually are.`);
-      }
-    }
-    if (normal === "STACK" && language === "script") {
-      const [size] = constantNumbers(tail);
-      if (Number.isFinite(size)) {
-        additions.push(size < 4096
-          ? `A stack of ${size} bytes is below the GEMDOS default of 4096 and will crash anything that recurses.`
-          : `Commands started after this line run with a ${size}-byte stack.`);
-      }
-    }
-    if (["EXECUTE", "RUN"].includes(normal) && language === "script") {
-      const target = tail.trim().split(/\s+/)[0];
-      if (target) {
-        additions.push(normal === "EXECUTE"
-          ? `This runs ${JSON.stringify(target)} as an GEMDOS script, so its lines are read as commands rather than loaded as code.`
-          : `This starts ${JSON.stringify(target)} as a background process; add >NIL: <NIL: so it does not hold this Shell open.`);
-      }
-    }
-    if (["JSR", "JMP"].includes(normal) && M68K_TARGETS.includes(language)) {
-      const registers = preceding68000Registers(line, relativeStart);
-      const vector = tail.match(/^\s*(-?(?:&|\$|0x)?[0-9a-f]+)\s*\(\s*A6\s*\)/i);
-      if (vector) {
-        const offset = sourceNumber(vector[1].replace("$", "&"));
-        if (offset != null) {
-          additions.push(`This is a library call through the base in A6: ${catalogueText(CALL_CATALOGUE?.explainLibraryCall(offset, registers.library, [registers.D0, registers.D1, registers.A0, registers.A1]), targetProfile)}`);
+    if (language === "basic" && ALL_POKES.has(normal)) {
+      const [address] = argumentValues(tail);
+      if (address != null) {
+        const note = addressNote(address, "write");
+        if (note) additions.push(note);
+        if (WORD_POKES.has(normal) && address % 2) {
+          additions.push(`Address ${formatAddress(address)} is odd, and a 68000 word or long access must be even; this raises an address error on an ST.`);
+        }
+        if (address >= 0x400 && address < 0x800 && !/^S/.test(normal) && normal !== "DOKE" && normal !== "LOKE") {
+          additions.push("Addresses below $800 are supervisor-only on a 68000 TOS, so a plain POKE here raises a bus error; use SPOKE, SDPOKE or SLPOKE.");
         }
       }
-      const absolute = tail.match(/^\s*(?:&|\$)([0-9a-f]+)/i);
-      const named = absolute ? SYSTEM_ADDRESS_HELP.get(Number.parseInt(absolute[1], 16)) : null;
-      if (named) additions.push(`The destination &${absolute[1].toUpperCase()} is ${named}.`);
     }
-    if (["MOVE", "MOVEA", "MOVEQ"].includes(normal) && M68K_TARGETS.includes(language)) {
-      const absolute = tail.match(/(?:&|\$)([0-9a-f]+)(?:\.[WL])?\s*(?:,|$)/i);
-      const named = absolute ? SYSTEM_ADDRESS_HELP.get(Number.parseInt(absolute[1], 16)) : null;
-      if (named) {
-        additions.push(named === "ExecBase"
-          ? "Absolute address 4 holds ExecBase, so this is how almost every Atari program reaches exec.library."
-          : `Address &${absolute[1].toUpperCase()} is the ${named} hardware register.`);
+    if (language === "basic" && ALL_PEEKS.has(normal)) {
+      const [address] = argumentValues(tail);
+      if (address != null) {
+        const note = addressNote(address, "read");
+        if (note) additions.push(note);
+        if (WORD_PEEKS.has(normal) && address % 2) {
+          additions.push(`Address ${formatAddress(address)} is odd, and a 68000 word or long access must be even; this raises an address error on an ST.`);
+        }
+      }
+    }
+    if (language === "basic" && normal === "XBIOS") {
+      const [number] = argumentValues(tail);
+      if (number === 5) additions.push("Setscreen with a resolution other than -1 changes the shifter mode for every program until it is changed back.");
+    }
+    if (language === "script" && /^#[A-Z]$/.test(normal)) {
+      const path = tail.match(/([A-Z]:\\[^@\s]*)/i)?.[1];
+      if (path) additions.push(`This record refers to ${JSON.stringify(path)}; the desktop skips it at boot when that drive is not present.`);
+    }
+    if (language === "script" && ["INIT", "GEM", "EXEC"].includes(normal)) {
+      const target = tail.replace(/^\s*=?\s*/, "").trim().split(/\s+/)[0];
+      if (target) additions.push(`${normal === "GEM" ? "The AES" : "The program"} ${JSON.stringify(target)} must exist at that path when MiNT boots; ${normal === "INIT" ? "it becomes the first process and MiNT ends when it does" : normal === "GEM" ? "MiNT waits for it before the desktop appears" : "MiNT waits for it to finish before reading the next line"}.`);
+    }
+    if (assembly && normal === "TRAP") {
+      const vector = sourceNumber(tail.replace(/^\s*#\s*/, ""));
+      if (vector != null) {
+        const lines = source.split("\n");
+        const lineIndex = source.slice(0, lineStart).split("\n").length - 1;
+        const { pushes, d0 } = precedingPushes(lines, lineIndex, relativeStart);
+        if (vector === 2) {
+          additions.push(catalogueText(CALL_CATALOGUE?.explainGemTrap(d0, null), targetProfile));
+        } else if (vector === 1 || vector === 13 || vector === 14) {
+          const [number, ...stack] = pushes;
+          const values = stack.map(push => push.value);
+          // A function number is often written as its name, Cconws or
+          // Fopen, through an equate; the catalogue knows those names.
+          const named = number?.value == null && number?.symbol ? CALL_CATALOGUE?.lookupName(number.symbol) : null;
+          if (named && named.family === CALL_CATALOGUE.TRAPS[vector].name && number) number.value = named.number;
+          additions.push(number && number.value != null
+            ? `This is a ${CALL_CATALOGUE?.TRAPS[vector].name} call: ${catalogueText(CALL_CATALOGUE?.explainTrapCall(vector, number.value, values), targetProfile)}`
+            : `This is a ${CALL_CATALOGUE?.TRAPS[vector].name} call whose function number was not proved: the word pushed last before the TRAP selects the function.`);
+        } else {
+          additions.push(catalogueText(CALL_CATALOGUE?.explainTrapCall(vector, null, []), targetProfile));
+        }
+      }
+    }
+    if (assembly && /^DC\.W$/.test(normal)) {
+      const [value] = argumentValues(tail);
+      if (value != null && value >= 0xA000 && value <= 0xA00F) additions.push(catalogueText(CALL_CATALOGUE?.explainLineA(value), targetProfile));
+    }
+    if (assembly && !/^DC\.|^DS\./.test(normal)) {
+      const operands = tail.replace(/;.*$/, "");
+      const comma = operands.search(/,(?![^(]*\))/);
+      const sourceText = comma >= 0 ? operands.slice(0, comma) : operands;
+      const destinationText = comma >= 0 ? operands.slice(comma + 1) : "";
+      const absolute = text => [...text.matchAll(/(?<![\w#])(?:\$|&H)([0-9a-f]+)(?:\.[wl])?(?![\w(])/gi)].map(match => Number.parseInt(match[1], 16));
+      for (const address of absolute(sourceText)) {
+        const detail = describeAddress(address);
+        if (!detail) continue;
+        const what = detail.kind === "register" ? `the ${detail.name} hardware register` : detail.kind === "vector" ? `the ${detail.name}` : `the TOS system variable ${detail.name}`;
+        additions.push(`Absolute address ${formatAddress(address)} holds ${what}${detail.meaning ? `, ${detail.meaning}` : ""}.${detail.kind === "variable" || detail.kind === "vector" ? " Reading it needs supervisor mode on a 68000 TOS." : ""}`);
+      }
+      for (const address of absolute(destinationText)) {
+        const detail = describeAddress(address);
+        if (!detail) continue;
+        const what = detail.kind === "register" ? `the ${detail.name} hardware register` : detail.kind === "vector" ? `the ${detail.name}` : `the TOS system variable ${detail.name}`;
+        additions.push(`This writes ${what} at ${formatAddress(address)}${detail.meaning ? ` (${detail.meaning})` : ""}.${detail.kind === "register" ? "" : " Writing it needs supervisor mode on a 68000 TOS."}`);
+      }
+      if (ASSEMBLY_LANGUAGE?.isFpuMnemonic?.(normal.replace(/\.[A-Z]$/, ""))) {
+        const processor = processorFor(targetProfile);
+        if (!/\+fpu$|^680[46]0$/.test(processor)) additions.push(`Target warning: this is a floating-point instruction and the configured ${PLATFORM_NAMES[configuredPlatform(targetProfile)] || "target"} profile has no 68881 or 68882, so it raises an F-line exception there.`);
       }
     }
     if (!additions.length) return base;
@@ -439,7 +798,7 @@ window.AtariCodeEditor = (() => {
     const operand = String(row?.operand || "").trim();
     const known = lookup(architecture, mnemonic);
     let summary = known?.summary || `${architecture.toUpperCase()} decoded operation.`;
-    if (M68K_TARGETS.includes(architecture) && !ASM_HELP[mnemonic] && !INLINE_ASSEMBLER_HELP[mnemonic]) {
+    if (isAssemblyLanguage(architecture) && !ASM_HELP[mnemonic] && !INLINE_ASSEMBLER_HELP[mnemonic]) {
       const base = mnemonic.replace(/\.(?:B|W|L|S)$/, "");
       if (/^MOVE/.test(base)) summary = "Moves the decoded source value to the destination register or memory location.";
       else if (/^LEA$/.test(base)) summary = "Loads the effective address of the operand into an address register.";
@@ -450,14 +809,20 @@ window.AtariCodeEditor = (() => {
       else if (/^(B|DB|S)(?:RA|SR|CC|CS|EQ|F|GE|GT|HI|LE|LS|LT|MI|NE|PL|T|VC|VS)/.test(base)) summary = "Applies the encoded condition to branch, loop or set a result byte.";
       else if (/^(JMP|JSR|RTS|RTE|RTR|LINK|UNLK|MOVEM)$/.test(base)) summary = "Changes control flow, or saves and restores a subroutine's registers and stack frame.";
       else if (/^(TRAP|TRAPV|CHK|STOP|RESET|NOP|ILLEGAL)$/.test(base)) summary = "Invokes a processor exception, or a control operation that is often privileged.";
+      else if (/^F/.test(base)) summary = "A floating-point coprocessor operation.";
     }
     let addressing = "No explicit operand; the operation uses implied processor state.";
     if (operand) {
-      if (operand.startsWith("#")) addressing = `Immediate operand ${operand}.`;
+      const trap = mnemonic === "TRAP" ? sourceNumber(operand.replace(/^#/, "")) : null;
+      const absolute = operand.match(/(?<![\w#])\$([0-9a-f]+)(?:\.[wl])?/i);
+      const named = absolute ? describeAddress(Number.parseInt(absolute[1], 16)) : null;
+      if (trap != null && CALL_CATALOGUE?.TRAPS[trap]) addressing = `TRAP #${trap} enters ${CALL_CATALOGUE.TRAPS[trap].name}; the function number is the word on top of the stack.`;
+      else if (trap === 2) addressing = "TRAP #2 enters GEM: D0 selects the AES ($C8) or the VDI ($73) and D1 points at the parameter block.";
+      else if (operand.startsWith("#")) addressing = `Immediate operand ${operand}.`;
       else if (/\(a\d\)\+/i.test(operand)) addressing = `Post-increment through ${operand}.`;
-      else if (/-\(a\d\)/i.test(operand)) addressing = `Pre-decrement through ${operand}.`;
+      else if (/-\((?:a\d|sp)\)/i.test(operand)) addressing = `Pre-decrement through ${operand}${/-\((?:a7|sp)\)/i.test(operand) ? ", a push onto the stack" : ""}.`;
       else if (/\([^)]*pc[^)]*\)/i.test(operand)) addressing = `Program-counter relative operand ${operand}, so the code is position independent.`;
-      else if (/-?\$?[0-9a-f]+\(\s*a6\s*\)/i.test(operand)) addressing = `Library vector ${operand}: the base in A6 decides which library it belongs to.`;
+      else if (named) addressing = `Absolute operand ${operand} is ${named.kind === "register" ? `the ${named.name} hardware register` : named.name}${named.meaning ? ` (${named.meaning})` : ""}.`;
       else if (/\([^)]*a\d[^)]*\)/i.test(operand)) addressing = `Address-register operand ${operand}.`;
       else addressing = `Decoded operand: ${operand}.`;
     }
@@ -469,50 +834,104 @@ window.AtariCodeEditor = (() => {
       key: mnemonic,
       summary,
       syntax: `${mnemonic}${operand ? ` ${operand}` : ""}`,
-      requirements: known?.requirements || `Valid ${architecture.toUpperCase()} code for the selected processor variant.`,
+      requirements: known?.requirements || `Valid ${architecture.toUpperCase()} code for the selected processor.`,
       notes: [known?.notes, ...context].filter(Boolean).join(" "),
     };
   }
 
   const token = (type, text, start, helpKey = "", helpLanguage = "") => ({ type, text, start, end: start + text.length, helpKey, helpLanguage });
 
-  // Help keys deliberately discard punctuation, but ST BASIC's trailing `%`
-  // is semantic: it marks an integer variable. Keep lexical classification
-  // separate so names such as page%, load% and print% cannot be mistaken for
-  // the STACK, LOAD and PRINT commands during highlighting or refactoring.
-  const isBasicKeywordToken = (raw, key) => BASIC_LANGUAGE?.isKeywordToken(raw) ?? (!/%$/.test(raw) && BASIC_KEYWORDS.has(key));
+  // Help keys deliberately discard punctuation, but a BASIC trailing `%`,
+  // `$`, `&`, `!` or `#` is semantic: it types the variable. Keep lexical
+  // classification separate so names such as page%, load% and print% cannot
+  // be mistaken for commands during highlighting or refactoring.
+  const isBasicKeywordToken = (raw, key) => BASIC_LANGUAGE?.isKeywordToken(raw) ?? (!/[%$&!#|]$/.test(raw) && BASIC_KEYWORDS.has(key));
 
-  function inlineMnemonic(raw, architecture) {
+  function assemblerMnemonic(raw, architecture) {
     const key = normaliseHelpKey(raw);
-    if (architecture === "m68k") {
-      if (ASSEMBLY_LANGUAGE.isMnemonic("m68k", key)) return key;
-      const withoutCondition = key.replace(/(?:EQ|NE|CS|HS|CC|LO|MI|PL|VS|VC|HI|LS|GE|LT|GT|LE|AL)$/, "").replace(/S$/, "");
-      return ASSEMBLY_LANGUAGE.isMnemonic("m68k", withoutCondition) ? withoutCondition : "";
-    }
-    if (architecture === "m68k") {
-      const base = key.replace(/\.(?:B|W|L|S)$/, "");
-      return ASSEMBLY_LANGUAGE.isMnemonic("m68k", key) || ASSEMBLY_LANGUAGE.isMnemonic("m68k", base) ? key : "";
-    }
-    return ASSEMBLY_LANGUAGE.isMnemonic(architecture, key) ? key : "";
+    const base = key.replace(/\.(?:B|W|L|S|X|D|P)$/, "");
+    if (ASSEMBLY_LANGUAGE?.isMnemonic(architecture, base) || ASSEMBLY_LANGUAGE?.isFpuMnemonic?.(base)) return key;
+    return "";
   }
+
+  // Built-in functions a BASIC scanner may or may not list as keywords; none
+  // of them is an array, however it is tokenised.
+  const BASIC_BUILTIN_FUNCTIONS = new Set((
+    "TAB SPC AT PEEK DPEEK LPEEK DEEK LEEK CHR$ STR$ LEFT$ RIGHT$ MID$ INSTR ASC VAL LEN ABS INT SQR SIN COS TAN ATN LOG EXP RND RANDOM "
+    + "MAX MIN HEX$ BIN$ OCT$ SPACE$ STRING$ UPPER$ LOWER$ TRIM$ LTRIM$ RTRIM$ POINT XBIOS BIOS GEMDOS INP OUT FRE MALLOC VARPTR ARRPTR ADDR "
+    + "TIMER KEYTEST FIX FRAC SGN TRUNC ROUND CINT CVI CVL CVS CVD MKI$ MKL$ MKS$ MKD$ INKEY$ INPUT$ LOF LOC EOF DIR$ MOUSEX MOUSEY MOUSEK "
+    + "PRED SUCC EVEN ODD SHL SHR ROL ROR BYTE CARD WORD SWAP XOR IMP EQV MOD DIV AND OR NOT TRUE FALSE PI CRSCOL CRSLIN POS CSRLIN "
+    + "ERR ERR$ ERL DATE$ TIME$ START LENGTH PHYSIC LOGIC BACK SCREEN HSCROLL JOY FKEY ZONE SCANCODE ASC$ DEC$ DEG RAD BIT COLOUR COLOR "
+    + "FN EXIST DFREE STICK STRIG VSETCOLOR SETCOLOR OPENW ARRAYFILL DIM? TYPE WINDTAB W_HAND V~H GB GCONTRL GINTIN GINTOUT ADDRIN ADDROUT CONTRL INTIN PTSIN INTOUT PTSOUT"
+  ).split(/\s+/));
 
   function sourceTokens(text, language, inlineAssemblyLanguage = "68000") {
     const tokens = [];
     let lineStart = 0;
-    let inlineAssembler = false;
+    const assembly = isAssemblyLanguage(language);
     for (const line of String(text).split("\n")) {
       let offset = 0;
-      let assemblerStatementStart = inlineAssembler;
-      const number = language === "basic" ? line.match(/^\s*(\d+)/) : null;
-      if (number) tokens.push(token("line-number", number[1], lineStart + number.index + number[0].lastIndexOf(number[1])));
-      while (offset < line.length) {
-        if (language === "basic" && line[offset] === "[") { inlineAssembler = true; assemblerStatementStart = true; offset += 1; continue; }
-        if (language === "basic" && inlineAssembler && line[offset] === "]") { inlineAssembler = false; assemblerStatementStart = false; offset += 1; continue; }
-        if (language === "basic" && inlineAssembler && line[offset] === "\\") {
-          tokens.push(token("comment", line.slice(offset), lineStart + offset));
-          break;
+      const indent = line.match(/^\s*/)?.[0].length || 0;
+      if (assembly) {
+        // A label starts the line; a comment starts with ; or a * in the
+        // first column; everything else is a mnemonic, a directive, an
+        // absolute address or a system call name.
+        if (/^\s*[;*]/.test(line)) { tokens.push(token("comment", line.slice(indent), lineStart + indent)); lineStart += line.length + 1; continue; }
+        let statementStart = true;
+        while (offset < line.length) {
+          const character = line[offset];
+          if (character === ";") { tokens.push(token("comment", line.slice(offset), lineStart + offset)); break; }
+          if (character === '"' || character === "'") {
+            let end = offset + 1;
+            while (end < line.length && line[end] !== character) end += 1;
+            tokens.push(token("string", line.slice(offset, end + 1), lineStart + offset));
+            offset = end + 1;
+            continue;
+          }
+          const word = line.slice(offset).match(/^(?:[A-Za-z_.][A-Za-z0-9_.]*|\$[0-9A-Fa-f]+|%[01]+|\d+)/);
+          if (!word) { offset += 1; continue; }
+          const raw = word[0];
+          const key = normaliseHelpKey(raw);
+          if (/^\$/.test(raw)) {
+            const named = describeAddress(Number.parseInt(raw.slice(1), 16));
+            tokens.push(named ? token("api", raw, lineStart + offset, named.name.toUpperCase().replace(/\s+/g, "_"), language) : token("number", raw, lineStart + offset));
+          } else if (/^[%\d]/.test(raw)) tokens.push(token("number", raw, lineStart + offset));
+          else if (offset === 0 && !/^\s/.test(line[0] || "") && !assemblerMnemonic(raw, language) && !INLINE_ASSEMBLER_HELP[key]) {
+            tokens.push(token("symbol", raw, lineStart + offset));
+          } else if (assemblerMnemonic(raw, language)) { tokens.push(token("keyword", raw, lineStart + offset, assemblerMnemonic(raw, language), language)); statementStart = false; }
+          else if (INLINE_ASSEMBLER_HELP[key]) { tokens.push(token("keyword", raw, lineStart + offset, key, language)); statementStart = false; }
+          else if (SYSTEM_CALL_HELP[key] || SYSTEM_VARIABLE_HELP[key]) tokens.push(token("api", raw, lineStart + offset, key, language));
+          else if (statementStart && /^[A-Za-z]/.test(raw) && offset > 0) { tokens.push(token("keyword", raw, lineStart + offset, key, language)); statementStart = false; }
+          offset += raw.length;
         }
-        if (line[offset] === '"') {
+        lineStart += line.length + 1;
+        continue;
+      }
+      if (language === "script") {
+        // A desktop record is # and one letter; a MINT.CNF directive is the
+        // first word, with or without an = after it; # followed by anything
+        // else is a comment.
+        const record = line.match(/^\s*(#[A-Za-z])(?=\s|$)/);
+        if (record) {
+          tokens.push(token("keyword", record[1], lineStart + line.indexOf(record[1]), record[1].toUpperCase()));
+          const path = line.match(/[A-Za-z]:\\[^@\s]*/);
+          if (path) tokens.push(token("string", path[0], lineStart + path.index));
+        } else if (/^\s*#/.test(line)) {
+          tokens.push(token("comment", line.slice(indent), lineStart + indent));
+        } else {
+          const directive = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)/);
+          if (directive) tokens.push(token("keyword", directive[1], lineStart + indent, normaliseHelpKey(directive[1])));
+          for (const match of line.matchAll(/"[^"]*"/g)) tokens.push(token("string", match[0], lineStart + match.index));
+          for (const match of line.matchAll(/(?<![\w.])\d+(?![\w.])/g)) tokens.push(token("number", match[0], lineStart + match.index));
+        }
+        lineStart += line.length + 1;
+        continue;
+      }
+      const number = language === "basic" ? line.match(/^\s*(\d+)\s/) : null;
+      if (number) { tokens.push(token("line-number", number[1], lineStart + number.index + number[0].lastIndexOf(number[1]))); offset = number[0].length; }
+      while (offset < line.length) {
+        const character = line[offset];
+        if (character === '"') {
           let end = offset + 1;
           while (end < line.length) {
             if (line[end] === '"') { end += 1; break; }
@@ -522,50 +941,43 @@ window.AtariCodeEditor = (() => {
           offset = end;
           continue;
         }
-        const remainder = line.slice(offset);
-        const basicLexeme = language === "basic" && !inlineAssembler && /^[A-Za-z]/.test(remainder)
-          ? BASIC_LANGUAGE?.lexemeAt(remainder)
-          : "";
-        const word = basicLexeme ? [basicLexeme] : remainder.match(/^(?:[A-Za-z_][A-Za-z0-9_$%.]*|&[0-9A-Fa-f]+|\$[0-9A-Fa-f]+|\d+(?:\.\d+)?)/);
-        if (!word) {
-          if (inlineAssembler && line[offset] === ":") assemblerStatementStart = true;
+        if (language === "basic" && (character === "'" || (character === "!" && /\s/.test(line[offset - 1] || " ")))) {
+          tokens.push(token("comment", line.slice(offset), lineStart + offset));
+          break;
+        }
+        if (language === "basic" && character === "@") {
+          const name = line.slice(offset + 1).match(/^[A-Za-z_][A-Za-z0-9_.]*/);
+          if (name) { tokens.push(token("symbol", `@${name[0]}`, lineStart + offset, "PROCEDURE")); offset += name[0].length + 1; continue; }
+        }
+        if (language === "basic" && character === "~" && /^\s*[A-Za-z]/.test(line.slice(offset + 1))) {
+          tokens.push(token("keyword", "~", lineStart + offset, "~"));
           offset += 1;
           continue;
         }
+        const remainder = line.slice(offset);
+        const basicLexeme = language === "basic" && /^[A-Za-z]/.test(remainder) ? BASIC_LANGUAGE?.lexemeAt(remainder) : "";
+        const word = basicLexeme ? [basicLexeme] : remainder.match(/^(?:[A-Za-z_][A-Za-z0-9_$%&!#|.]*|&[HXO]?[0-9A-Fa-f]+|\$[0-9A-Fa-f]+|\d+(?:\.\d+)?)/);
+        if (!word) { offset += 1; continue; }
         const raw = word[0];
         const key = normaliseHelpKey(raw);
-        if (language === "basic" && !inlineAssembler && key === "REM" && isBasicKeywordToken(raw, key)) {
+        if (language === "basic" && key === "REM" && isBasicKeywordToken(raw, key)) {
           tokens.push(token("comment", line.slice(offset), lineStart + offset, "REM"));
           break;
         }
-        const isNumber = /^\d|^&/.test(raw);
-        if (language === "basic" && inlineAssembler) {
-          const mnemonic = /^[A-Za-z]+$/.test(raw) && line[offset - 1] !== "." ? inlineMnemonic(raw, inlineAssemblyLanguage) : "";
-          const api = /^_?[A-Za-z][A-Za-z0-9_]*$/.test(raw) && LIBRARY_HELP[key]
-            ? key
-            : (/^(?:&|\$)[0-9A-F]+$/i.test(raw) ? SYSTEM_ADDRESS_HELP.get(Number.parseInt(raw.slice(1), 16)) : "");
-          if (api && inlineAssemblyLanguage === "68000") tokens.push(token("api", raw, lineStart + offset, api, "68000"));
-          else if (mnemonic) { tokens.push(token("keyword", raw, lineStart + offset, mnemonic, inlineAssemblyLanguage)); assemblerStatementStart = false; }
-          else if (INLINE_ASSEMBLER_HELP[key]) { tokens.push(token("keyword", raw, lineStart + offset, key, inlineAssemblyLanguage)); assemblerStatementStart = false; }
-          else if (assemblerStatementStart && /^[A-Za-z]+$/.test(raw) && line[offset - 1] !== ".") {
-            tokens.push(token("keyword", raw, lineStart + offset, key, inlineAssemblyLanguage));
-            assemblerStatementStart = false;
-          }
-          else if (isNumber) tokens.push(token("number", raw, lineStart + offset));
-          if (/[$%]$/.test(raw) && /^\s*=/.test(line.slice(offset + raw.length))) assemblerStatementStart = false;
-          offset += raw.length;
-          continue;
-        }
-        // An GEMDOS command has no sigil, so a Shell line is recognised by
-        // its first word rather than by punctuation.
-        const isKeyword = language === "basic"
-          ? isBasicKeywordToken(raw, key)
-          : language === "script"
-            ? (SCRIPT_COMMANDS.has(key) || offset === (line.match(/^\s*/)?.[0].length || 0))
-            : false;
+        const isNumber = /^\d|^&|^\$/.test(raw);
+        // The scanner decides what a keyword is; the help table is the
+        // fallback for a dialect word it does not list, so GFA and STOS
+        // commands highlight whichever scanner build is loaded.
+        const isKeyword = language === "basic" && (isBasicKeywordToken(raw, key) || (Boolean(BASIC_HELP[key]) && !/[$%&!#|]$/.test(raw)));
         if (isNumber) tokens.push(token("number", raw, lineStart + offset));
-        else if (isKeyword) tokens.push(token("keyword", raw, lineStart + offset, key));
-        else if (/^(?:SUB|FN)/i.test(raw)) tokens.push(token("symbol", raw, lineStart + offset, raw.match(/^(SUB|FN)/i)?.[1]));
+        else if (isKeyword) {
+          tokens.push(token("keyword", raw, lineStart + offset, key));
+          // INPUT # and PRINT # have their own help entries.
+          if (["INPUT", "PRINT"].includes(key) && /^\s*#/.test(line.slice(offset + raw.length))) tokens.at(-1).helpKey = `${key}#`;
+        } else if (/^(?:FN)[A-Za-z]/i.test(raw)) tokens.push(token("symbol", raw, lineStart + offset, "FN"));
+        else if (language === "basic" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(raw) && /^:/.test(line.slice(offset + raw.length)) && offset === indent) {
+          tokens.push(token("symbol", raw, lineStart + offset, "GOTO"));
+        }
         offset += raw.length;
       }
       lineStart += line.length + 1;
@@ -602,91 +1014,135 @@ window.AtariCodeEditor = (() => {
     });
   }
 
-  function basicInlineAssemblerLines(text) {
-    let inside = false;
-    return String(text).split("\n").map(line => {
-      let flagged = inside;
-      let quoted = false;
-      for (let index = 0; index < line.length; index += 1) {
-        if (line[index] === '"') {
-          if (quoted && line[index + 1] === '"') { index += 1; continue; }
-          quoted = !quoted;
-          continue;
-        }
-        if (quoted) continue;
-        if (!inside && /^REM(?![$%])/i.test(line.slice(index)) && (index === 0 || /[^A-Za-z0-9_$%]/.test(line[index - 1]))) break;
-        if (inside && line[index] === "\\") break;
-        if (line[index] === "[") { inside = true; flagged = true; }
-        else if (inside && line[index] === "]") { flagged = true; inside = false; }
-      }
-      return flagged;
-    });
+  // GFA BASIC source has no line numbers; STOS and ST BASIC listings do. The
+  // dialect decides when it is known, and the listing itself otherwise.
+  function usesLineNumbers(text, dialect) {
+    const exact = BASIC_LANGUAGE?.DIALECTS?.[dialect];
+    if (exact && typeof exact.lineNumbers === "boolean") return exact.lineNumbers;
+    const name = `${dialect || ""} ${exact?.id || ""}`.toLowerCase();
+    if (/gfa/.test(name)) return false;
+    if (/stos|st[ -]?basic|stbasic/.test(name)) return true;
+    const first = String(text).split("\n").find(line => line.trim());
+    return Boolean(first && /^\s*\d+\s/.test(first));
   }
 
-  function diagnostics(text, language, dialect = "ST BASIC 1.0") {
+  // GFA BASIC has no inline assembler; machine code arrives through INLINE
+  // and is called with C: or CALL. Nothing in a BASIC listing is assembler.
+  function basicInlineAssemblerLines(text) {
+    return String(text).split("\n").map(() => false);
+  }
+
+  function blockIssues(rows, lineOffsets) {
+    const issues = [];
+    const stack = [];
+    const closers = { procedure: "RETURN", function: "ENDFUNC", for: "NEXT", while: "WEND", repeat: "UNTIL", do: "LOOP", if: "ENDIF", select: "ENDSELECT" };
+    rows.forEach((row, lineIndex) => row.events.forEach(event => {
+      if (event.kind === "open") { stack.push({ ...event, lineIndex }); return; }
+      if (event.kind !== "close") return;
+      const stackIndex = stack.findLastIndex(item => item.type === event.type);
+      if (stackIndex < 0) {
+        // A bare RETURN outside any PROCEDURE is a GOSUB return in a
+        // numbered dialect, so only the structural closers are reported.
+        if (event.type !== "procedure") issues.push({ severity: "warning", line: lineIndex + 1, offset: lineOffsets[lineIndex], message: `${closers[event.type]} has no open ${event.type === "if" ? "IF" : event.type === "select" ? "SELECT" : event.type.toUpperCase()} block to close.` });
+        return;
+      }
+      const unclosed = stack.splice(stackIndex + 1);
+      unclosed.forEach(item => issues.push({ severity: "warning", line: item.lineIndex + 1, offset: lineOffsets[item.lineIndex], message: `${item.label} on line ${item.lineIndex + 1} has no ${closers[item.type]} before the enclosing block closes.` }));
+      stack.pop();
+    }));
+    stack.forEach(item => issues.push({ severity: "warning", line: item.lineIndex + 1, offset: lineOffsets[item.lineIndex], message: `${item.label} on line ${item.lineIndex + 1} has no ${closers[item.type]}.` }));
+    return issues;
+  }
+
+  function diagnostics(text, language, dialect = "GFA BASIC 3.0") {
     const issues = [];
     const add = (severity, line, message, offset = 0) => issues.push({ severity, line, message, offset });
     const lines = String(text).split("\n");
     const lineOffsets = [];
     lines.reduce((offset, line) => { lineOffsets.push(offset); return offset + line.length + 1; }, 0);
     lines.forEach((line, index) => {
-      const quotes = (line.match(/"/g) || []).length;
+      if (language === "script") {
+        if (/^\s*#[A-Za-z]\s/.test(line) && !/@\s*$/.test(line) && /^\s*#[DFGIMNPTWYZ]/.test(line)) add("warning", index + 1, "A desktop record normally ends with @; the desktop may read the next line as part of this one.", lineOffsets[index]);
+        if (/^\s*GEM\s*=/i.test(line) && lines.some(other => /^\s*INIT\s*=/i.test(other))) add("warning", index + 1, "Both GEM= and INIT= are set; MiNT starts only one of them.", lineOffsets[index]);
+        if (/^\s*(?:INIT|GEM|EXEC)\b/i.test(line) && /[A-Za-z]:\/[^\s]*/.test(line)) add("warning", index + 1, "GEMDOS paths use a backslash; a forward slash here is read as part of the name by TOS.", lineOffsets[index]);
+        return;
+      }
+      const code = language === "basic" ? line.replace(/'.*$/, "").replace(/\s!.*$/, "") : line;
+      const quotes = (code.match(/"/g) || []).length;
       if (quotes % 2) add("error", index + 1, "String quotation mark is not closed.", lineOffsets[index] + line.indexOf('"'));
-      if (language === "script" && /(^|:)\s*[RL]\./i.test(line)) add("warning", index + 1, "R. or L. is filing-system dependent; use RUN or LOAD when moving this script to FFS.", lineOffsets[index]);
-      if (language === "script" && /\bCHAIN\s*"!?BOOT"/i.test(line)) add("warning", index + 1, "CHAIN expects tokenised BASIC. A command-script Startup-Sequence normally needs *EXEC.", lineOffsets[index]);
     });
     if (language !== "basic") return issues;
     const numbered = [];
     const lineSet = new Set();
-    lines.forEach((line, index) => {
-      if (!line.trim()) return;
-      const match = line.match(/^\s*(\d+)\s/);
-      if (!match) return add("error", index + 1, "ST BASIC source lines require a line number followed by a space.", lineOffsets[index]);
-      const value = Number(match[1]);
-      if (lineSet.has(value)) add("error", index + 1, `Line number ${value} is duplicated.`, lineOffsets[index]);
-      lineSet.add(value);
-      if (numbered.length && value <= numbered.at(-1).value) add("error", index + 1, `Line ${value} is not greater than the preceding line number.`, lineOffsets[index]);
-      numbered.push({ value, index: index + 1, text: line, offset: lineOffsets[index] });
-    });
-    numbered.forEach(row => {
-      for (const match of row.text.matchAll(/\b(?:GOTO|GOSUB|RESTORE)\s+(\d+)/gi)) {
-        if (!lineSet.has(Number(match[1]))) add("error", row.index, `Referenced line ${match[1]} does not exist.`, row.offset + match.index);
-      }
-    });
-    // ST BASIC names a subprogram with SUB … END SUB and a single-line
-    // function with DEF FN, so both are checked for a matching definition.
-    const definitions = new Set([...text.matchAll(/\bSUB\s+([A-Za-z][A-Za-z0-9_.]*)/gi)].map(match => match[1].toUpperCase()));
-    for (const match of text.matchAll(/\bCALL\s+([A-Za-z][A-Za-z0-9_.]*)/gi)) {
-      if (!definitions.has(match[1].toUpperCase())) {
-        add("warning", text.slice(0, match.index).split("\n").length, `Subprogram ${match[1]} has no SUB definition in this file.`, match.index);
-      }
+    const lineNumbers = usesLineNumbers(text, dialect);
+    if (lineNumbers) {
+      lines.forEach((line, index) => {
+        if (!line.trim()) return;
+        const match = line.match(/^\s*(\d+)\s/);
+        if (!match) return add("error", index + 1, `${dialect} source lines require a line number followed by a space.`, lineOffsets[index]);
+        const value = Number(match[1]);
+        if (lineSet.has(value)) add("error", index + 1, `Line number ${value} is duplicated.`, lineOffsets[index]);
+        lineSet.add(value);
+        if (numbered.length && value <= numbered.at(-1).value) add("error", index + 1, `Line ${value} is not greater than the preceding line number.`, lineOffsets[index]);
+        numbered.push({ value, index: index + 1, text: line, offset: lineOffsets[index] });
+      });
+      numbered.forEach(row => {
+        for (const match of row.text.matchAll(/\b(?:GOTO|GOSUB|RESTORE)\s+(\d+)/gi)) {
+          if (!lineSet.has(Number(match[1]))) add("error", row.index, `Referenced line ${match[1]} does not exist.`, row.offset + match.index);
+        }
+      });
     }
     const masked = sourceMask(text, language);
-    for (const match of text.matchAll(/\bSUB\s+([A-Za-z][A-Za-z0-9_.]*)|\bDEF\s*(FN[A-Za-z][A-Za-z0-9_]*)/gi)) {
-      const name = match[1] || match[2];
-      const calls = [...masked.matchAll(new RegExp(`\\b${name}\\b`, "gi"))].filter(call => call.index !== match.index);
-      if (calls.length <= 1) add("info", text.slice(0, match.index).split("\n").length, `${name.toUpperCase()} is defined but not called in this file.`, match.index);
+    // A GFA procedure is defined once with PROCEDURE and called with @name or
+    // GOSUB name; a function is defined with FUNCTION or DEFFN and called with
+    // @name(...) or FN name(...).
+    const procedures = new Set([...masked.matchAll(/^\s*PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)/gim)].map(match => match[1].toUpperCase()));
+    const functions = new Set([...masked.matchAll(/^\s*(?:FUNCTION|DEFFN)\s+([A-Za-z_][A-Za-z0-9_.]*)/gim)].map(match => match[1].toUpperCase()));
+    const labels = new Set([...masked.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*$/gm)].map(match => match[1].toUpperCase()));
+    const lineOf = index => text.slice(0, index).split("\n").length;
+    for (const match of masked.matchAll(/(?<![A-Za-z0-9_$%])@([A-Za-z_][A-Za-z0-9_.]*)/g)) {
+      const name = match[1].toUpperCase();
+      if (!procedures.has(name) && !functions.has(name)) add("warning", lineOf(match.index), `Procedure ${match[1]} has no PROCEDURE or FUNCTION definition in this file.`, match.index);
     }
-    const subprogramDefinitions = [...masked.matchAll(/\bSUB\s+[A-Za-z][A-Za-z0-9_.]*/gi)].length;
-    const subprogramEnds = [...masked.matchAll(/\bEND\s+SUB\b/gi)].length;
-    if (subprogramDefinitions !== subprogramEnds) add("warning", 1, `${subprogramDefinitions} SUB definition${subprogramDefinitions === 1 ? "" : "s"} but ${subprogramEnds} END SUB statement${subprogramEnds === 1 ? "" : "s"} were found.`, 0);
-    numbered.forEach((row, index) => {
-      if (!/\b(?:END|STOP|GOTO\s*\d+)\s*$/i.test(row.text)) return;
-      const next = numbered[index + 1];
-      if (next && ![...masked.matchAll(/\b(?:GOTO|GOSUB|RESTORE|THEN)\s*(\d+)/gi)].some(match => Number(match[1]) === next.value)) {
-        add("info", next.index, `Line ${next.value} may be unreachable after an unconditional transfer.`, next.offset);
+    for (const match of masked.matchAll(/\bGOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)/gi)) {
+      const name = match[1].toUpperCase();
+      if (!procedures.has(name) && !labels.has(name) && !(lineNumbers && /^\d/.test(name))) add("warning", lineOf(match.index), `Procedure ${match[1]} has no PROCEDURE definition in this file.`, match.index);
+    }
+    for (const match of masked.matchAll(/\bFN\s+([A-Za-z_][A-Za-z0-9_.]*)/gi)) {
+      if (!functions.has(match[1].toUpperCase())) add("warning", lineOf(match.index), `Function ${match[1]} has no DEFFN or FUNCTION definition in this file.`, match.index);
+    }
+    if (!lineNumbers) {
+      for (const match of masked.matchAll(/\bGOTO\s+([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+        if (!labels.has(match[1].toUpperCase())) add("error", lineOf(match.index), `Label ${match[1]} does not exist in this file.`, match.index);
       }
-    });
+    }
+    for (const match of masked.matchAll(/^\s*(?:PROCEDURE|FUNCTION|DEFFN)\s+([A-Za-z_][A-Za-z0-9_.]*)/gim)) {
+      const name = match[1];
+      const calls = [...masked.matchAll(new RegExp(`(?<![A-Za-z0-9_.])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_.])`, "gi"))].filter(call => call.index < match.index || call.index > match.index + match[0].length);
+      if (!calls.length) add("info", lineOf(match.index), `${name} is defined but not called in this file.`, match.index);
+    }
+    issues.push(...blockIssues(basicStructureRows(text), lineOffsets));
+    if (lineNumbers) {
+      numbered.forEach((row, index) => {
+        if (!/\b(?:END|STOP|GOTO\s*\d+)\s*$/i.test(row.text)) return;
+        const next = numbered[index + 1];
+        if (next && ![...masked.matchAll(/\b(?:GOTO|GOSUB|RESTORE|THEN)\s*(\d+)/gi)].some(match => Number(match[1]) === next.value)) {
+          add("info", next.index, `Line ${next.value} may be unreachable after an unconditional transfer.`, next.offset);
+        }
+      });
+    }
     if (BASIC_LANGUAGE) {
       issues.push(...advancedBasicDiagnostics(text));
-      const profile = BASIC_LANGUAGE.dialectProfile(dialect);
-      BASIC_LANGUAGE.scan(text).filter(token => token.type === "keyword").forEach(token => {
-        const required = Number(BASIC_LANGUAGE.KEYWORD_GENERATION[token.name] || 1);
-        if (required > Number(profile.generation || 2)) issues.push({
-          severity: "warning", line: token.line, offset: token.start,
-          message: `${token.name} needs ST BASIC 1.2; this file is ${dialect}.`,
+      const exact = BASIC_LANGUAGE.DIALECTS?.[dialect];
+      if (exact && BASIC_LANGUAGE.KEYWORD_GENERATION) {
+        BASIC_LANGUAGE.scan(text).filter(item => item.type === "keyword").forEach(item => {
+          const required = Number(BASIC_LANGUAGE.KEYWORD_GENERATION[item.name] || 0);
+          if (required && required > Number(exact.generation || 0)) issues.push({
+            severity: "warning", line: item.line, offset: item.start,
+            message: `${item.name} needs a later release than ${dialect}.`,
+          });
         });
-      });
+      }
     }
     return issues;
   }
@@ -701,35 +1157,37 @@ window.AtariCodeEditor = (() => {
     text.split("\n").reduce((offset, line) => { lineOffsets.push(offset); return offset + line.length + 1; }, 0);
     text.split("\n").forEach((line, index) => {
       const lineOffset = lineOffsets[index];
-      const code = masked.slice(lineOffset, lineOffset + line.length).replace(/^\s*\d+\s*/, "");
+      const code = masked.slice(lineOffset, lineOffset + line.length).replace(/^\s*\d+\s*/, "").replace(/'.*$/, "").replace(/\s!.*$/, "");
       const lineEnd = lineOffset + line.length;
-      const lineTokens = scannedTokens.filter(token => token.start >= lineOffset && token.start < lineEnd);
-      for (const [tokenIndex, token] of lineTokens.entries()) {
-        if (token.type !== "identifier" || !/^\s*\(/.test(masked.slice(token.end, lineEnd))) continue;
-        const name = token.text.toUpperCase();
+      const lineTokens = scannedTokens.filter(item => item.start >= lineOffset && item.start < lineEnd);
+      for (const [tokenIndex, item] of lineTokens.entries()) {
+        if (item.type !== "identifier" || !/^\s*\(/.test(masked.slice(item.end, lineEnd))) continue;
+        const name = item.text.toUpperCase();
         const previous = lineTokens[tokenIndex - 1];
-        const followsDim = previous?.type === "keyword" && previous.name === "DIM";
-        // FNname(...) is an indivisible user symbol in the scanner, not an
-        // array. Built-in functions such as TAB(...) are keyword tokens, which
-        // also prevents compact PRINT TAB(...) being mistaken for an array
-        // reference.
-        if (followsDim) dimmed.add(name);
-        else if (!/^FN.+/i.test(token.text) && !dimmed.has(name)) {
-          issues.push({ severity: "warning", line: index + 1, offset: token.start, message: `${token.text} is used as an array before a preceding DIM was found.` });
+        const before = text.slice(Math.max(0, item.start - 1), item.start);
+        const previousName = String(previous?.name || previous?.text || "").toUpperCase();
+        const followsDim = /^(?:DIM|ERASE|LOCAL|ARRAYFILL|PROCEDURE|FUNCTION|DEFFN|SWAP|INSERT|DELETE|QSORT|SSORT|DSORT)$/.test(previousName);
+        // FN name(...) and @name(...) call functions, built-ins such as
+        // TAB(...) are not arrays whichever way the scanner types them, and
+        // anything named in a DIM, LOCAL or parameter list is declared.
+        if (followsDim) { dimmed.add(name); continue; }
+        if (before === "@" || /^FN.+/i.test(item.text) || BASIC_BUILTIN_FUNCTIONS.has(name) || BASIC_BUILTIN_FUNCTIONS.has(name.replace(/[$%&!#|]$/, ""))) continue;
+        if (previousName === "FN") continue;
+        if (!dimmed.has(name)) {
+          issues.push({ severity: "warning", line: index + 1, offset: item.start, message: `${item.text} is used as an array before a preceding DIM was found.` });
         }
       }
-      for (const match of code.matchAll(/\bFOR\s*([A-Za-z][A-Za-z0-9_]*[$%]?)/gi)) forStack.push({ name: match[1].toUpperCase(), line: index + 1 });
-      for (const match of code.matchAll(/\bNEXT\s*([A-Za-z][A-Za-z0-9_]*[$%]?)/gi)) {
+      for (const match of code.matchAll(/\bFOR\s*([A-Za-z_][A-Za-z0-9_.]*[$%&!#|]?)/gi)) forStack.push({ name: match[1].toUpperCase(), line: index + 1 });
+      for (const match of code.matchAll(/\bNEXT\s+([A-Za-z_][A-Za-z0-9_.]*[$%&!#|]?)/gi)) {
         const active = forStack.pop();
         if (active && active.name !== match[1].toUpperCase()) issues.push({ severity: "warning", line: index + 1, offset: lineOffset + match.index, message: `NEXT ${match[1]} closes the active FOR ${active.name} from line ${active.line}.` });
       }
     });
-    // A, A% and A$ are deliberately distinct variables in ST BASIC, so
-    // sharing a base name across types is not itself suspicious. Likewise, do
-    // not report apparently unused assignments: a variable can be read by a
-    // SUB, by a CHAINed program that was given it with COMMON, or by machine
-    // code reached through CALL, so the absence of a later textual read is not
-    // evidence of a defect.
+    // a, a% and a$ are deliberately distinct variables in every ST dialect,
+    // so sharing a base name across types is not itself suspicious. Likewise,
+    // do not report apparently unused assignments: a variable can be read by
+    // a PROCEDURE, by a CHAINed program, or by machine code reached through
+    // CALL, so the absence of a later textual read is not evidence of a defect.
     return issues.slice(0, 500);
   }
 
@@ -737,26 +1195,39 @@ window.AtariCodeEditor = (() => {
     const rows = [];
     if (language === "basic") {
       for (const match of text.matchAll(/^\s*(\d+)\s/gm)) rows.push({ name: `Line ${match[1]}`, kind: "line", offset: match.index });
-      for (const match of text.matchAll(/\bSUB\s+([A-Za-z][A-Za-z0-9_.]*)/gi)) rows.push({ name: `SUB ${match[1]}`, kind: "definition", offset: match.index });
-      for (const match of text.matchAll(/\bDEF\s*(FN[A-Za-z][A-Za-z0-9_]*)/gi)) rows.push({ name: match[1].toUpperCase(), kind: "definition", offset: match.index });
+      for (const match of text.matchAll(/^\s*(PROCEDURE|FUNCTION|DEFFN)\s+([A-Za-z_][A-Za-z0-9_.]*)/gim)) rows.push({ name: `${match[1].toUpperCase()} ${match[2]}`, kind: "definition", offset: match.index });
+      for (const match of text.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*$/gm)) rows.push({ name: `${match[1]}:`, kind: "label", offset: match.index });
     } else if (language === "script") {
-      for (const match of text.matchAll(/^\s*(CD|ASSIGN|EXECUTE|RUN|PATH|LAB|STACK|MOUNT)\s+([^\r\n]+)/gim)) rows.push({ name: `${match[1].toUpperCase()} ${match[2].trim()}`, kind: "command", offset: match.index });
+      for (const match of text.matchAll(/^\s*(#[GPYZFD])\s+(?:[0-9A-F]+\s+)*([^@\s]+)@/gim)) rows.push({ name: `${match[1].toUpperCase()} ${match[2].trim()}`, kind: "record", offset: match.index });
+      for (const match of text.matchAll(/^\s*(INIT|GEM|EXEC|SETENV|ALIAS|INCLUDE|CD)\s*=?\s*([^\r\n]+)/gim)) rows.push({ name: `${match[1].toUpperCase()} ${match[2].trim()}`, kind: "directive", offset: match.index });
+    } else if (isAssemblyLanguage(language)) {
+      for (const match of text.matchAll(/^([A-Za-z_.][A-Za-z0-9_.]*):?(?=\s|$)/gm)) rows.push({ name: match[1], kind: "label", offset: match.index });
     }
     return rows.slice(0, 500);
   }
 
   function identifierAt(text, offset, language) {
-    const allowed = language === "basic" ? /[A-Za-z0-9_$%]/ : /[A-Za-z0-9_.$]/;
+    const allowed = language === "basic" ? /[A-Za-z0-9_$%&!#|.@]/ : /[A-Za-z0-9_.$]/;
     let start = Math.max(0, Math.min(offset, text.length));
     let end = start;
     while (start > 0 && allowed.test(text[start - 1])) start -= 1;
     while (end < text.length && allowed.test(text[end])) end += 1;
     const name = text.slice(start, end);
-    return /^[A-Za-z_.][A-Za-z0-9_.$%]*$/.test(name) ? { name, start, end } : null;
+    return /^@?[A-Za-z_.][A-Za-z0-9_.$%&!#|]*$/.test(name) ? { name, start, end } : null;
   }
 
   function sourceMask(text, language) {
-    if (language === "basic" && BASIC_LANGUAGE) return BASIC_LANGUAGE.maskStringsAndComments(text);
+    if (language === "basic" && BASIC_LANGUAGE) {
+      const masked = BASIC_LANGUAGE.maskStringsAndComments(text);
+      // GFA BASIC also comments with ' at a statement start and ! after one.
+      return masked.split("\n").map(line => {
+        const apostrophe = line.search(/(?:^|:)\s*'/);
+        let cut = apostrophe >= 0 ? line.indexOf("'", apostrophe) : -1;
+        const bang = line.search(/\s!/);
+        if (bang >= 0 && (cut < 0 || bang < cut)) cut = bang;
+        return cut >= 0 ? `${line.slice(0, cut)}${" ".repeat(line.length - cut)}` : line;
+      }).join("\n");
+    }
     const mask = [...text].map(character => character === "\n" ? "\n" : character);
     let quoted = false;
     for (let index = 0; index < text.length; index += 1) {
@@ -765,7 +1236,8 @@ window.AtariCodeEditor = (() => {
       if (quoted) { mask[index] = " "; continue; }
       const rest = text.slice(index);
       if ((language === "basic" && /^REM(?![$%])/i.test(rest)) ||
-          (language === "script" && /^\|/.test(rest))) {
+          (language === "script" && /^#(?![A-Za-z](?:\s|$))/.test(rest)) ||
+          (isAssemblyLanguage(language) && (/^;/.test(rest) || (/^\*/.test(rest) && (index === 0 || text[index - 1] === "\n"))))) {
         while (index < text.length && text[index] !== "\n") { mask[index] = " "; index += 1; }
         index -= 1;
       }
@@ -777,29 +1249,27 @@ window.AtariCodeEditor = (() => {
     const selected = identifierAt(text, offset, language);
     if (!selected) return { name: "", rows: [] };
     const masked = sourceMask(text, language);
-    const escaped = selected.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(`(?<![A-Za-z0-9_.$%])${escaped}(?![A-Za-z0-9_.$%])`, "giu");
+    const bare = selected.name.replace(/^@/, "");
+    const escaped = bare.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(?<![A-Za-z0-9_.$%&!#|])${escaped}(?![A-Za-z0-9_.$%&!#|])`, "giu");
     const rows = [...masked.matchAll(pattern)].map(match => ({
       offset: match.index,
       line: text.slice(0, match.index).split("\n").length,
       context: text.slice(text.lastIndexOf("\n", match.index - 1) + 1, text.indexOf("\n", match.index) < 0 ? text.length : text.indexOf("\n", match.index)).trim(),
     }));
-    return { name: selected.name, rows };
+    return { name: bare, rows };
   }
 
+  // The block structure of a listing, as GFA BASIC, STOS and ST BASIC write
+  // it: PROCEDURE ... RETURN, FUNCTION ... ENDFUNC, FOR ... NEXT, WHILE ...
+  // WEND, REPEAT ... UNTIL, DO ... LOOP, IF ... ENDIF and SELECT ...
+  // ENDSELECT. A one-line IF ... THEN statement opens nothing.
   function basicStructureRows(text) {
-    let assembler = false;
     return String(text).split("\n").map(line => {
       const masked = [...line];
       let quoted = false;
       for (let index = 0; index < line.length; index += 1) {
         const character = line[index];
-        if (assembler) {
-          masked[index] = " ";
-          if (character === "\\") { masked.fill(" ", index); break; }
-          if (character === "]") assembler = false;
-          continue;
-        }
         if (character === '"') {
           masked[index] = " ";
           if (quoted && line[index + 1] === '"') { masked[index + 1] = " "; index += 1; continue; }
@@ -807,7 +1277,8 @@ window.AtariCodeEditor = (() => {
           continue;
         }
         if (quoted) { masked[index] = " "; continue; }
-        if (character === "[") { masked[index] = " "; assembler = true; continue; }
+        if (character === "'" && /^\s*$|:\s*$/.test(line.slice(0, index))) { masked.fill(" ", index); break; }
+        if (character === "!" && /\s/.test(line[index - 1] || " ") && index > 0) { masked.fill(" ", index); break; }
         if (/^REM(?![$%])/i.test(line.slice(index)) && (index === 0 || /[^A-Za-z0-9_$%]/.test(line[index - 1]))) {
           masked.fill(" ", index);
           break;
@@ -815,32 +1286,40 @@ window.AtariCodeEditor = (() => {
       }
       const code = masked.join("").replace(/^\s*\d+\s*/, "");
       const events = [];
+      // A line holding only name: is a GOTO label, not a statement.
+      if (/^\s*[A-Za-z_][A-Za-z0-9_]*:\s*$/.test(code)) return { line, events };
       code.split(":").forEach((part, statementIndex) => {
         const statement = part.trim();
         if (!statement) return;
         const event = { leading: statementIndex === 0, statement };
-        let match = statement.match(/^SUB\s+([A-Za-z][A-Za-z0-9_.]*)/i);
-        if (match) return events.push({ ...event, kind: "open", type: "subprogram", label: `SUB ${match[1]}` });
-        match = statement.match(/^DEF\s*FN([A-Za-z][A-Za-z0-9_]*)/i);
-        if (match) {
-          const remainder = statement.slice(match[0].length);
-          if (!remainder.includes("=")) events.push({ ...event, kind: "open", type: "function", label: `FN${match[1]}` });
+        let match = statement.match(/^PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)/i);
+        if (match) return events.push({ ...event, kind: "open", type: "procedure", label: `PROCEDURE ${match[1]}` });
+        match = statement.match(/^FUNCTION\s+([A-Za-z_][A-Za-z0-9_.]*)/i);
+        if (match) return events.push({ ...event, kind: "open", type: "function", label: `FUNCTION ${match[1]}` });
+        if (/^ENDFUNC\b/i.test(statement)) return events.push({ ...event, kind: "close", type: "function" });
+        if (/^RETURN(?![$%!#&|A-Za-z0-9_])/i.test(statement)) return events.push({ ...event, kind: "close", type: "procedure" });
+        match = statement.match(/^FOR\s*([A-Za-z_][A-Za-z0-9_.$%!#&|]*)(?=\s*=)/i);
+        if (match) return events.push({ ...event, kind: "open", type: "for", label: `FOR ${match[1]}` });
+        if (/^NEXT(?![$%!#&|])(?:\b|(?=[A-Za-z]))/i.test(statement)) return events.push({ ...event, kind: "close", type: "for" });
+        if (/^WHILE(?![$%!#&|])(?:\b|(?=[A-Za-z(]))/i.test(statement)) return events.push({ ...event, kind: "open", type: "while", label: "WHILE loop" });
+        if (/^WEND(?![$%!#&|])/i.test(statement)) return events.push({ ...event, kind: "close", type: "while" });
+        if (/^REPEAT(?![$%!#&|A-Za-z0-9_])/i.test(statement)) return events.push({ ...event, kind: "open", type: "repeat", label: "REPEAT loop" });
+        if (/^UNTIL(?![$%!#&|])(?:\b|(?=[A-Za-z(]))/i.test(statement)) return events.push({ ...event, kind: "close", type: "repeat" });
+        if (/^DO(?![$%!#&|A-Za-z0-9_])/i.test(statement)) return events.push({ ...event, kind: "open", type: "do", label: "DO loop" });
+        if (/^LOOP(?![$%!#&|A-Za-z0-9_])/i.test(statement)) return events.push({ ...event, kind: "close", type: "do" });
+        if (/^IF(?![$%!#&|])(?:\b|(?=[A-Za-z(]))/i.test(statement)) {
+          // IF cond THEN statement on one line is complete; IF cond, or IF
+          // cond THEN with nothing after it, opens a block.
+          const then = statement.match(/\bTHEN\b(.*)$/i);
+          const opensBlock = !then || !then[1].trim();
+          if (opensBlock) return events.push({ ...event, kind: "open", type: "if", label: "IF block" });
           return;
         }
-        if (/^END\s+SUB\b/i.test(statement)) return events.push({ ...event, kind: "close", type: "subprogram" });
-        if (/^=/.test(statement)) return events.push({ ...event, kind: "close", type: "function" });
-        match = statement.match(/^FOR\s*([A-Za-z][A-Za-z0-9_$%!#]*)(?=\s*=)/i);
-        if (match) return events.push({ ...event, kind: "open", type: "for", label: `${match[1]} loop` });
-        if (/^NEXT(?![$%!#])(?:\b|(?=[A-Za-z]))/i.test(statement)) return events.push({ ...event, kind: "close", type: "for" });
-        if (/^IF(?![$%!#])(?:\b|(?=[A-Za-z]))/i.test(statement) && /\bTHEN\s*$/i.test(statement)) return events.push({ ...event, kind: "open", type: "if", label: "IF block" });
-        if (/^ELSEIF\b/i.test(statement)) return events.push({ ...event, kind: "branch", type: "if" });
-        if (/^ELSE(?![$%!#])/i.test(statement)) return events.push({ ...event, kind: "branch", type: "if" });
-        if (/^END\s+IF\b/i.test(statement)) return events.push({ ...event, kind: "close", type: "if" });
-        if (/^SELECT\s+CASE\b/i.test(statement)) return events.push({ ...event, kind: "open", type: "select", label: "SELECT CASE block" });
-        if (/^CASE(?![$%!#])(?:\b|(?=[A-Za-z]))/i.test(statement)) return events.push({ ...event, kind: "branch", type: "select" });
-        if (/^END\s+SELECT\b/i.test(statement)) return events.push({ ...event, kind: "close", type: "select" });
-        if (/^WHILE(?![$%!#])(?:\b|(?=[A-Za-z]))/i.test(statement)) return events.push({ ...event, kind: "open", type: "while", label: "WHILE loop" });
-        if (/^WEND(?![$%!#])/i.test(statement)) events.push({ ...event, kind: "close", type: "while" });
+        if (/^ELSE\s+IF\b|^ELSEIF\b|^ELSE(?![$%!#&|A-Za-z0-9_])/i.test(statement)) return events.push({ ...event, kind: "branch", type: "if" });
+        if (/^END\s*IF\b/i.test(statement)) return events.push({ ...event, kind: "close", type: "if" });
+        if (/^SELECT(?![$%!#&|])(?:\b|(?=[A-Za-z(]))/i.test(statement)) return events.push({ ...event, kind: "open", type: "select", label: "SELECT block" });
+        if (/^CASE(?![$%!#&|])(?:\b|(?=[A-Za-z(]))/i.test(statement) || /^DEFAULT(?![$%!#&|A-Za-z0-9_])/i.test(statement)) return events.push({ ...event, kind: "branch", type: "select" });
+        if (/^END\s*SELECT\b/i.test(statement)) return events.push({ ...event, kind: "close", type: "select" });
       });
       return { line, events };
     });
@@ -923,7 +1402,7 @@ window.AtariCodeEditor = (() => {
         if (assignment) {
           actionAt = [...beforeElse.matchAll(/(?:^|\s)([A-Za-z][A-Za-z0-9_]*[$%]?(?:\([^)]*\))?)\s*=/g)].at(-1) || null;
         } else {
-          actionAt = [...beforeElse.matchAll(/(?:^|\s)(PRINT|CALL|CHAIN|GOTO|GOSUB|RETURN|RUN|SCREEN|WINDOW|SOUND|WAVE|SAY|LINE|CIRCLE|PSET|PRESET|PAINT|PALETTE|COLOR|CLS|LOCATE|INPUT|READ|RESTORE|ERROR|STOP|END|POKE|POKEW|POKEL|PUT|GET|OPEN|CLOSE|WRITE|KILL|NAME|SLEEP|SYSTEM)\b/gi)].at(-1) || null;
+          actionAt = [...beforeElse.matchAll(/(?:^|\s)(PRINT|CALL|CHAIN|GOTO|GOSUB|RETURN|RUN|SCREEN|WINDOW|SOUND|WAVE|LINE|LINEF|CIRCLE|PCIRCLE|PLOT|DRAW|FILL|PALETTE|COLOR|COLOUR|CLS|LOCATE|GOTOXY|INPUT|READ|RESTORE|ERROR|STOP|END|POKE|DPOKE|LPOKE|DOKE|LOKE|PUT|GET|OPEN|CLOSE|WRITE|KILL|NAME|WAIT|PAUSE|VSYNC|SPRITE|BOB|MUSIC|BOOM|SHOOT|BELL|FADE|SCROLL|OPENW|CLOSEW|CLEARW|FULLW|GEMSYS|VDISYS|QUIT|BLOAD|BSAVE|LOAD|SAVE)\b/gi)].at(-1) || null;
         }
         if (!actionAt) return null;
         const leadingSpace = /^\s/.test(actionAt[0]) ? 1 : 0;
@@ -963,7 +1442,7 @@ window.AtariCodeEditor = (() => {
     // A listing commonly omits the space between a command and its first
     // argument: PRINT"A", COLOR1, CHAINf$ and so on. These are statements, not
     // computed line-number expressions after THEN.
-    return /^(?:BEEP|CALL|CHAIN|CIRCLE|CLEAR|CLOSE|CLS|COLOR|DATA|DECLARE|DEF|DIM|ERASE|ERROR|FIELD|FILES|FOR|GET|GOSUB|GOTO|IF|INPUT|KILL|LET|LIBRARY|LINE|LOAD|LOCATE|LSET|MENU|MERGE|MID\$|NAME|NEXT|ON|OPEN|PAINT|PALETTE|PATTERN|POKE|POKEW|POKEL|PRESET|PRINT|PSET|PUT|RANDOMIZE|READ|REM|RESET|RESTORE|RESUME|RETURN|RSET|RUN|SAVE|SAY|SCREEN|SLEEP|SOUND|STOP|SUB|SWAP|SYSTEM|TIMER|WAVE|WEND|WHILE|WIDTH|WINDOW|WRITE)/i.test(value);
+    return /^(?:BELL|BLOAD|BOB|BOOM|BSAVE|CALL|CHAIN|CHDIR|CIRCLE|CLEAR|CLEARW|CLOSE|CLOSEW|CLS|COLOR|COLOUR|DATA|DEF|DIM|DOKE|DPOKE|DRAW|ERASE|ERROR|FADE|FILES|FILL|FOR|FULLW|GEMSYS|GET|GOSUB|GOTO|GOTOXY|IF|INPUT|KILL|LET|LINE|LINEF|LOAD|LOCATE|LOKE|LPOKE|MENU|MERGE|MID\$|MUSIC|NAME|NEXT|ON|OPEN|OPENW|PALETTE|PAUSE|PCIRCLE|PLOT|POKE|PRINT|PUT|QUIT|RANDOMIZE|READ|REM|RESTORE|RESUME|RETURN|RUN|SAVE|SCREEN|SCROLL|SETCOLOR|SHOOT|SOUND|SPRITE|STOP|SWAP|VDISYS|VSYNC|WAIT|WAVE|WEND|WHILE|WIDTH|WINDOW|WRITE)/i.test(value);
   }
 
   function inlineIfExpansion(statements, nextNumber) {
@@ -984,7 +1463,7 @@ window.AtariCodeEditor = (() => {
     if (withThen) {
       [, condition, action] = withThen;
     } else {
-      // ST BASIC permits THEN to be omitted. Only split when the beginning of
+      // STOS and ST BASIC permit THEN to be omitted. Only split when the beginning of
       // the consequent is a proven statement command; guessing where an
       // arbitrary assignment starts could change the condition.
       const actionAt = [...statement.matchAll(/\s+/g)]
@@ -1012,7 +1491,7 @@ window.AtariCodeEditor = (() => {
   function tangledBasicLine(line, nextNumber = null) {
     const match = String(line).match(/^\s*(\d+)\s+(.*)$/);
     if (!match) return null;
-    // ST BASIC does not accept an empty numbered source line. A colon by
+    // A numbered listing does not accept an empty numbered source line. A colon by
     // itself is the executable no-op used for visual separators, so preserve
     // it exactly instead of producing an invalid blank line.
     if (/^\s*:+\s*$/.test(match[2])) {
@@ -1134,7 +1613,7 @@ window.AtariCodeEditor = (() => {
   }
 
   function basicCondenseBoundaryBefore(body) {
-    return /^\s*(?:ELSE|WHEN|OTHERWISE|ENDIF|ENDCASE|ENDWHILE)(?![$%])/i.test(maskedBasicCode(body));
+    return /^\s*(?:ELSE|CASE|DEFAULT|ENDIF|END\s+IF|ENDSELECT|END\s+SELECT|WEND|UNTIL|LOOP|NEXT|RETURN|ENDFUNC|PROCEDURE|FUNCTION)(?![$%])/i.test(maskedBasicCode(body));
   }
 
   function basicCondenseBoundaryAfter(body) {
@@ -1142,7 +1621,7 @@ window.AtariCodeEditor = (() => {
     if (/\bIF(?![$%])/i.test(mask) || /^\s*ON\s+ERROR(?![$%])/i.test(mask)) return true;
     if (String(body).replace(/"(?:[^"]|"")*"/g, "").match(/\bREM(?![$%])/i)) return true;
     const finalStatement = basicStatements(body).at(-1) || "";
-    return /^(?:GOTO|RETURN|END|STOP|CHAIN|RUN|ERROR|RESUME|SYSTEM)(?![$%!#])/i.test(finalStatement);
+    return /^(?:GOTO|RETURN|END|STOP|CHAIN|RUN|ERROR|RESUME|QUIT|FOR|WHILE|REPEAT|DO|SELECT|PROCEDURE|FUNCTION)(?![$%!#])/i.test(finalStatement);
   }
 
   function rebuildBasic(lines, expansions, { startAt = null, fromIndex = 0, step = 10 } = {}) {
@@ -1178,11 +1657,16 @@ window.AtariCodeEditor = (() => {
     // Detokenised listings often join a structural keyword directly to its
     // expression or loop variable. At statement start these forms are
     // unambiguous and a separating space materially improves readability.
-    const body = match[2].replace(/^\s*(IF|FOR|NEXT|WHILE|WEND|CASE|SUB)(?![$%!#])(?=\S)/i, (_whole, keyword) => `${keyword} `);
+    const body = match[2].replace(/^\s*(IF|FOR|NEXT|WHILE|WEND|CASE|REPEAT|UNTIL|SELECT|PROCEDURE)(?![$%!#])(?=\S)/i, (_whole, keyword) => `${keyword} `);
     return `${match[1]}${body}`;
   }
 
-  const languageName = language => ({ basic: "ST BASIC", script: "GEMDOS script", text: "plain text", "68000": "MC68000 assembly", "68010": "MC68010 assembly", "68020": "MC68020 assembly", "68030": "MC68030 assembly", "68040": "MC68040 assembly", "68060": "MC68060 assembly", m68k: "MC68000 assembly" }[language] || language);
+  const languageName = language => {
+    const names = { basic: "BASIC (GFA, STOS, ST BASIC)", script: "TOS configuration", text: "plain text", m68k: "MC68000 assembly", fpu: "MC68881 floating-point" };
+    if (names[language]) return names[language];
+    const match = String(language || "").match(/^(680[0-9]0)(\+fpu)?$/i);
+    return match ? `MC${match[1]} assembly${match[2] ? " with FPU" : ""}` : language;
+  };
 
   function helpMarkup(item) {
     if (!item) return '<p class="code-empty-message">No built-in help is available for that token.</p>';
@@ -1253,7 +1737,7 @@ window.AtariCodeEditor = (() => {
     root.addEventListener("code-editor-destroy", hide, { once: true });
   }
 
-  function enhance({ textarea, root, language = "text", dialect = "ST BASIC 1.0", inlineAssemblyLanguage = "68000", validateBasic = null, packBasic = null, initialHistory = [], targetProfile = {} }) {
+  function enhance({ textarea, root, language = "text", dialect = "GFA BASIC 3.0", inlineAssemblyLanguage = "68000", validateBasic = null, packBasic = null, initialHistory = [], targetProfile = {} }) {
     if (!textarea || !root || textarea.closest(".code-editor-surface")) return null;
     const surface = document.createElement("div");
     surface.className = "code-editor-surface";
@@ -1277,10 +1761,10 @@ window.AtariCodeEditor = (() => {
     foldView.setAttribute("aria-label", "Collapsed code outline. Double-click a visible line to expand all blocks and edit it.");
     textarea.before(surface);
     surface.append(gutter, guides, visual, textarea, hit, foldView);
-    const drawer = document.createElement("section");
-    drawer.className = "code-intelligence-drawer";
-    drawer.hidden = true;
-    root.insertBefore(drawer, root.querySelector(".editor-status"));
+    const panel = document.createElement("section");
+    panel.className = "code-intelligence-drawer";
+    panel.hidden = true;
+    root.insertBefore(panel, root.querySelector(".editor-status"));
     let state = { tokens: [], issues: [], symbols: [], blocks: [] };
     const collapsedBlocks = new Set();
     let structureGuides = language === "basic" ? { size: 4 } : null;
@@ -1443,38 +1927,38 @@ window.AtariCodeEditor = (() => {
       syncScroll();
       textarea.dispatchEvent(new Event("click", { bubbles: true }));
     };
-    const closeDrawer = () => { drawer.hidden = true; };
-    const renderDrawer = (title, body) => {
-      drawer.hidden = false;
-      drawer.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-drawer-close" aria-label="Close code help">×</button></header><div class="code-drawer-body">${body}</div>`;
-      drawer.querySelector(".code-drawer-close").onclick = closeDrawer;
-      drawer.querySelectorAll("[data-code-offset]").forEach(button => button.onclick = () => goTo(Number(button.dataset.codeOffset)));
-      drawer.querySelectorAll("[data-code-help]").forEach(button => button.onclick = () => renderDrawer(button.dataset.codeHelp, helpMarkup(lookup(language, button.dataset.codeHelp))));
-      drawer.querySelectorAll("[data-code-completion]").forEach(button => button.onclick = () => {
+    const closePanel = () => { panel.hidden = true; };
+    const renderPanel = (title, body) => {
+      panel.hidden = false;
+      panel.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-drawer-close" aria-label="Close code help">×</button></header><div class="code-drawer-body">${body}</div>`;
+      panel.querySelector(".code-drawer-close").onclick = closePanel;
+      panel.querySelectorAll("[data-code-offset]").forEach(button => button.onclick = () => goTo(Number(button.dataset.codeOffset)));
+      panel.querySelectorAll("[data-code-help]").forEach(button => button.onclick = () => renderPanel(button.dataset.codeHelp, helpMarkup(lookup(language, button.dataset.codeHelp))));
+      panel.querySelectorAll("[data-code-completion]").forEach(button => button.onclick = () => {
         const selected = identifierAt(textarea.value, textarea.selectionStart, language);
         const start = selected?.start ?? textarea.selectionStart;
         const end = selected?.end ?? textarea.selectionEnd;
         const value = button.dataset.codeCompletion;
         textarea.setRangeText(value, start, end, "end");
         textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        closeDrawer();
+        closePanel();
         textarea.focus();
       });
-      drawer.querySelectorAll("[data-code-snippet]").forEach(button => button.onclick = () => {
+      panel.querySelectorAll("[data-code-snippet]").forEach(button => button.onclick = () => {
         const value = button.dataset.codeSnippet;
         textarea.setRangeText(value, textarea.selectionStart, textarea.selectionEnd, "end");
         textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        closeDrawer();
+        closePanel();
         textarea.focus();
       });
-      const filter = drawer.querySelector("[data-code-reference-filter]");
-      if (filter) filter.oninput = () => drawer.querySelectorAll("[data-code-help]").forEach(button => button.hidden = !button.textContent.toLowerCase().includes(filter.value.toLowerCase()));
+      const filter = panel.querySelector("[data-code-reference-filter]");
+      if (filter) filter.oninput = () => panel.querySelectorAll("[data-code-help]").forEach(button => button.hidden = !button.textContent.toLowerCase().includes(filter.value.toLowerCase()));
     };
-    const showCustom = (title, body) => renderDrawer(title, body);
+    const showCustom = (title, body) => renderPanel(title, body);
     const overview = () => {
       const recognised = [...new Set(state.tokens.map(item => item.helpKey).filter(Boolean))];
       const profile = BASIC_LANGUAGE?.dialectProfile(dialect);
-      renderDrawer(`${languageName(language)} overview`, `<div class="code-overview"><p>This file contains <strong>${textarea.value.split("\n").length.toLocaleString()} lines</strong>, <strong>${state.symbols.length.toLocaleString()} navigable symbols</strong> and <strong>${state.issues.length.toLocaleString()} diagnostics</strong>.</p><p>${language === "basic" ? `Detected dialect: <strong>${esc(dialect)}</strong>. Numbered source is tokenised when saved. ${profile ? `Its inline assembler targets ${esc(profile.processor)} and ${profile.structured ? "supports" : "predates"} structured CASE/WHILE syntax.` : ""} Line destinations and local procedure definitions are checked while you type.` : language === "script" ? "Commands are executed in order by *EXEC or the boot process. Filing-system dependencies and ambiguous OFS abbreviations are highlighted." : "Readable text is preserved as Latin-1. Syntax-specific checks are intentionally not imposed."}</p>${recognised.length ? `<h4>Commands used in this file</h4><div class="code-command-chips">${recognised.map(key => `<button type="button" data-code-help="${esc(key)}">${esc(key)}</button>`).join("")}</div>` : ""}</div>`);
+      renderPanel(`${languageName(language)} overview`, `<div class="code-overview"><p>This file contains <strong>${textarea.value.split("\n").length.toLocaleString()} lines</strong>, <strong>${state.symbols.length.toLocaleString()} navigable symbols</strong> and <strong>${state.issues.length.toLocaleString()} diagnostics</strong>.</p><p>${language === "basic" ? `Detected dialect: <strong>${esc(dialect)}</strong>. ${usesLineNumbers(textarea.value, dialect) ? "Numbered source is tokenised when saved and line destinations are checked while you type." : "GFA BASIC source has no line numbers; PROCEDURE, FUNCTION and label definitions are checked while you type."} ${profile?.processor ? `Machine code it calls runs on a ${esc(profile.processor)}.` : ""} Block structure (IF/ENDIF, FOR/NEXT, WHILE/WEND, REPEAT/UNTIL, DO/LOOP, SELECT/ENDSELECT, PROCEDURE/RETURN) is checked for missing closers.` : language === "script" ? "Desktop records (DESKTOP.INF, NEWDESK.INF) and MINT.CNF directives are read in order at boot. Paths that would be skipped and directives that contradict one another are highlighted." : "Readable text is preserved as Atari ST character set. Syntax-specific checks are intentionally not imposed."}</p>${recognised.length ? `<h4>Commands used in this file</h4><div class="code-command-chips">${recognised.map(key => `<button type="button" data-code-help="${esc(key)}">${esc(key)}</button>`).join("")}</div>` : ""}</div>`);
     };
     const helpAtCursor = () => {
       const offset = textarea.selectionStart;
@@ -1482,10 +1966,10 @@ window.AtariCodeEditor = (() => {
       const found = state.tokens.find(item => item.start <= offset && item.end >= offset && item.helpKey)
         || state.tokens.filter(item => item.start >= lineStart && item.end <= offset && item.helpKey).at(-1);
       const item = found ? sourceContextHelp(textarea.value, found.helpLanguage || language, found.start, found.end, found.helpKey, targetProfile) : null;
-      renderDrawer(item?.key || "Help at cursor", helpMarkup(item));
+      renderPanel(item?.key || "Help at cursor", helpMarkup(item));
     };
-    const showProblems = () => renderDrawer("Problems", state.issues.length ? `<div class="code-problem-list">${state.issues.map(item => `<button type="button" data-code-offset="${item.offset}"><b class="${esc(item.severity)}">${esc(item.severity)}</b><span>Line ${item.line}: ${esc(item.message)}</span></button>`).join("")}</div>` : '<p class="code-empty-message">No problems were found by the live checks.</p>');
-    const showSymbols = () => renderDrawer("Document symbols", state.symbols.length ? `<div class="code-symbol-list">${state.symbols.map(item => `<button type="button" data-code-offset="${item.offset}"><b>${esc(item.kind)}</b><span>${esc(item.name)}</span></button>`).join("")}</div>` : '<p class="code-empty-message">No navigable symbols were found in this file.</p>');
+    const showProblems = () => renderPanel("Problems", state.issues.length ? `<div class="code-problem-list">${state.issues.map(item => `<button type="button" data-code-offset="${item.offset}"><b class="${esc(item.severity)}">${esc(item.severity)}</b><span>Line ${item.line}: ${esc(item.message)}</span></button>`).join("")}</div>` : '<p class="code-empty-message">No problems were found by the live checks.</p>');
+    const showSymbols = () => renderPanel("Document symbols", state.symbols.length ? `<div class="code-symbol-list">${state.symbols.map(item => `<button type="button" data-code-offset="${item.offset}"><b>${esc(item.kind)}</b><span>${esc(item.name)}</span></button>`).join("")}</div>` : '<p class="code-empty-message">No navigable symbols were found in this file.</p>');
     const showCompletions = () => {
       const selected = identifierAt(textarea.value, textarea.selectionStart, language);
       const prefix = String(selected?.name || "").toUpperCase();
@@ -1497,15 +1981,16 @@ window.AtariCodeEditor = (() => {
         .filter(value => !prefix || value.toUpperCase().startsWith(prefix))
         .sort((left, right) => left.localeCompare(right)).slice(0, 200);
       const snippets = language === "basic" ? [
-        ["FOR loop", "FOR i%=1 TO 10:NEXT i%"], ["WHILE loop", "WHILE condition:WEND"],
-        ["Conditional", "IF condition THEN statement"], ["Subprogram", "SUB name STATIC:END SUB"],
-        ["Open a library", 'LIBRARY "graphics.library"'],
+        ["FOR loop", "FOR i%=1 TO 10\nNEXT i%"], ["REPEAT loop", "REPEAT\nUNTIL condition"],
+        ["DO loop", "DO\n  EXIT IF condition\nLOOP"], ["Conditional", "IF condition\nENDIF"],
+        ["Procedure", "PROCEDURE name\n  LOCAL a%\nRETURN"], ["GEMDOS call", "~GEMDOS(9,L:ADDR(a$))"],
+        ["Wait for the vertical blank", "VSYNC"],
       ] : language === "script" ? [
-        ["Set the stack", "Stack 8192"], ["Run a script", "Execute Startup-Sequence"],
-        ["Start in the background", "Run >NIL: <NIL: program"],
-        ["Change directory", "CD Games"], ["Make an assignment", "Assign MENU: SYS:"],
+        ["Start an AES", "GEM=C:\\MINT\\XAAES\\XAAES.KM"], ["Set a variable", "setenv PATH C:\\MINT;C:\\BIN"],
+        ["Run a program at boot", "exec c:\\mint\\program.prg"],
+        ["Auto-start a desktop program", "#Z 01 C:\\GEM\\PROGRAM.PRG@"],
       ] : [];
-      renderDrawer("Completion and snippets", `<p class="code-empty-message">${prefix ? `Candidates beginning with ${esc(prefix)}.` : "Choose a known command, identifier or template."}</p><div class="code-completion-list">${candidates.map(value => `<button type="button" data-code-completion="${esc(value)}">${esc(value)}</button>`).join("") || "<small>No matching candidates.</small>"}</div>${snippets.length ? `<h4 class="code-drawer-section-title">Templates</h4><div class="code-snippet-list">${snippets.map(([label, value]) => `<button type="button" data-code-snippet="${esc(value)}"><b>${esc(label)}</b><code>${esc(value)}</code></button>`).join("")}</div>` : ""}`);
+      renderPanel("Completion and snippets", `<p class="code-empty-message">${prefix ? `Candidates beginning with ${esc(prefix)}.` : "Choose a known command, identifier or template."}</p><div class="code-completion-list">${candidates.map(value => `<button type="button" data-code-completion="${esc(value)}">${esc(value)}</button>`).join("") || "<small>No matching candidates.</small>"}</div>${snippets.length ? `<h4 class="code-drawer-section-title">Templates</h4><div class="code-snippet-list">${snippets.map(([label, value]) => `<button type="button" data-code-snippet="${esc(value)}"><b>${esc(label)}</b><code>${esc(value)}</code></button>`).join("")}</div>` : ""}`);
     };
     const formatCode = async () => {
       if (textarea.readOnly) return false;
@@ -1545,7 +2030,7 @@ window.AtariCodeEditor = (() => {
     };
     const findReferences = () => {
       const result = symbolReferences(textarea.value, textarea.selectionStart, language);
-      renderDrawer(result.name ? `References to ${result.name}` : "Find all references", result.rows.length
+      renderPanel(result.name ? `References to ${result.name}` : "Find all references", result.rows.length
         ? `<p>${result.rows.length.toLocaleString()} code occurrence${result.rows.length === 1 ? "" : "s"}; strings and comments are excluded.</p><div class="code-reference-results">${result.rows.map(row => `<button type="button" data-code-offset="${row.offset}"><b>Line ${row.line}</b><code>${esc(row.context)}</code></button>`).join("")}</div>`
         : '<p class="code-empty-message">Place the cursor on a symbol or variable to find its references.</p>');
     };
@@ -1553,7 +2038,7 @@ window.AtariCodeEditor = (() => {
       if (textarea.readOnly) return;
       const result = symbolReferences(textarea.value, textarea.selectionStart, language);
       if (!result.name || !result.rows.length) return alertNotice("Rename a symbol", "Place the cursor on a symbol or variable first.");
-      if (language === "basic" && BASIC_KEYWORDS.has(result.name.toUpperCase())) return alertNotice("Rename a symbol", `${result.name} is an ST BASIC command, and commands cannot be renamed.`);
+      if (language === "basic" && BASIC_KEYWORDS.has(result.name.toUpperCase())) return alertNotice("Rename a symbol", `${result.name} is a BASIC command, and commands cannot be renamed.`);
       const replacement = await promptValue(`Rename ${result.name}`, "New name", {
         value: result.name,
         message: `${result.rows.length} code occurrence${result.rows.length === 1 ? "" : "s"} will be renamed.`,
@@ -1574,15 +2059,15 @@ window.AtariCodeEditor = (() => {
     };
     const showOutline = () => {
       if (language !== "basic") return showSymbols();
-      const definitions = [...textarea.value.matchAll(/\bSUB\s+([A-Za-z][A-Za-z0-9_.]*)|\bDEF\s*(FN[A-Za-z][A-Za-z0-9_]*)/gi)].map(match => ({
-        name: (match[1] || match[2]).toUpperCase(), offset: match.index,
-        calls: [...sourceMask(textarea.value, language).matchAll(new RegExp(`\\b${match[1] || match[2]}\\b`, "gi"))].filter(call => call.index !== match.index),
+      const definitions = [...textarea.value.matchAll(/^\s*(?:PROCEDURE|FUNCTION|DEFFN)\s+([A-Za-z_][A-Za-z0-9_.]*)/gim)].map(match => ({
+        name: match[1].toUpperCase(), offset: match.index,
+        calls: [...sourceMask(textarea.value, language).matchAll(new RegExp(`(?<![A-Za-z0-9_.])${match[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_.])`, "gi"))].filter(call => call.index < match.index || call.index > match.index + match[0].length),
       }));
-      renderDrawer("Program outline and call graph", definitions.length
+      renderPanel("Program outline and call graph", definitions.length
         ? `<div class="code-outline-list">${definitions.map(item => `<article><button type="button" data-code-offset="${item.offset}"><b>${esc(item.name)}</b><span>${item.calls.length} call${item.calls.length === 1 ? "" : "s"}</span></button>${item.calls.map(call => `<button type="button" data-code-offset="${call.index}">Called at physical line ${textarea.value.slice(0, call.index).split("\n").length}</button>`).join("")}</article>`).join("")}</div>`
-        : '<p class="code-empty-message">No subprograms or functions were defined in this file.</p>');
+        : '<p class="code-empty-message">No procedures or functions were defined in this file.</p>');
     };
-    const showHistory = () => renderDrawer("Editor history", editorHistory.length
+    const showHistory = () => renderPanel("Editor history", editorHistory.length
       ? `<div class="code-history-list">${[...editorHistory].reverse().map(item => `<article><time>${esc(new Date(item.time).toLocaleTimeString())}</time><b>${esc(item.action)}</b><span>${esc(item.detail)}</span></article>`).join("")}</div>`
       : '<p class="code-empty-message">No transformations or symbol changes have been made in this editor window.</p>');
     const compareWith = baseline => {
@@ -1591,23 +2076,23 @@ window.AtariCodeEditor = (() => {
       const maximum = Math.max(before.length, after.length);
       const rows = Array.from({ length: maximum }, (_unused, index) => ({ before: before[index] ?? "", after: after[index] ?? "" }))
         .map((row, index) => `<div class="code-inline-diff-row${row.before === row.after ? "" : " changed"}"><span>${index + 1}</span><pre>${esc(row.before) || " "}</pre><pre>${esc(row.after) || " "}</pre></div>`).join("");
-      renderDrawer("Current source compared with saved file", `<div class="code-inline-diff"><header><span></span><b>Saved</b><b>Current</b></header>${rows}</div>`);
+      renderPanel("Current source compared with saved file", `<div class="code-inline-diff"><header><span></span><b>Saved</b><b>Current</b></header>${rows}</div>`);
     };
     const verifyRoundTrip = async () => {
       if (!validateBasic) return;
       try {
         const result = await validateBasic(textarea.value, textarea.dataset.savedValue || "");
-        renderDrawer("BASIC round-trip verification", `<div class="code-verification"><p class="${result.roundTripExact ? "pass" : "warn"}"><strong>${result.roundTripExact ? "Exact token round trip" : "Review required"}</strong></p><dl><dt>Lines</dt><dd>${Number(result.lineCount || 0).toLocaleString()}</dd><dt>Tokenised size</dt><dd>${Number(result.byteLength || 0).toLocaleString()} bytes</dd><dt>Destinations</dt><dd>${(result.destinations || []).length.toLocaleString()}</dd></dl>${(result.warnings || []).map(message => `<p>${esc(message)}</p>`).join("") || "<p>The listing tokenises, detokenises and reproduces identical token bytes.</p>"}</div>`);
+        renderPanel("BASIC round-trip verification", `<div class="code-verification"><p class="${result.roundTripExact ? "pass" : "warn"}"><strong>${result.roundTripExact ? "Exact token round trip" : "Review required"}</strong></p><dl><dt>Lines</dt><dd>${Number(result.lineCount || 0).toLocaleString()}</dd><dt>Tokenised size</dt><dd>${Number(result.byteLength || 0).toLocaleString()} bytes</dd><dt>Destinations</dt><dd>${(result.destinations || []).length.toLocaleString()}</dd></dl>${(result.warnings || []).map(message => `<p>${esc(message)}</p>`).join("") || "<p>The listing tokenises, detokenises and reproduces identical token bytes.</p>"}</div>`);
         return result;
       } catch (error) { await alertNotice("Round-trip verification failed", error.message || String(error), { danger: true }); return null; }
     };
     const reference = () => {
       const keys = [...new Set([...Object.keys(dictionary(language)), ...(language === "basic" ? [...BASIC_KEYWORDS] : [])])].sort();
-      renderDrawer(`${languageName(language)} reference`, `<label class="code-reference-filter">Filter commands<input type="search" data-code-reference-filter placeholder="Type a command name"></label><div class="code-reference-list">${keys.map(key => `<button type="button" data-code-help="${esc(key)}">${esc(key)}</button>`).join("")}</div>`);
-      drawer.querySelector("[data-code-reference-filter]")?.focus();
+      renderPanel(`${languageName(language)} reference`, `<label class="code-reference-filter">Filter commands<input type="search" data-code-reference-filter placeholder="Type a command name"></label><div class="code-reference-list">${keys.map(key => `<button type="button" data-code-help="${esc(key)}">${esc(key)}</button>`).join("")}</div>`);
+      panel.querySelector("[data-code-reference-filter]")?.focus();
     };
     const goToLine = async () => {
-      const requested = await promptValue("Go to line", language === "basic" ? "ST BASIC line or editor line" : "Editor line", {
+      const requested = await promptValue("Go to line", language === "basic" ? "BASIC line or editor line" : "Editor line", {
         placeholder: "1", confirmLabel: "Go",
         message: language === "basic" ? "A BASIC line number is looked for first, then the physical editor line." : "",
       });
@@ -1778,6 +2263,10 @@ window.AtariCodeEditor = (() => {
       const last = noSelection ? lines.length - 1 : range.last;
       const assemblerLines = basicInlineAssemblerLines(textarea.value);
       const numberedBodies = lines.map(line => line.match(/^\s*\d+\s+(.*)$/)?.[1]).filter(body => body != null);
+      if (!numberedBodies.length) {
+        await alertNotice("Nothing to renumber", "Renumbering applies to a numbered STOS or ST BASIC listing. GFA BASIC source has no line numbers, so there is nothing to change.");
+        return;
+      }
       if (numberedBodies.some(basicHasDynamicDestination) || numberedBodies.some(basicHasSemanticErl)) {
         await alertNotice("The program was left untouched", "It uses a computed line destination, or uses ERL in program logic. Renumbering physical lines could change its behaviour, so no change has been made.");
         return;
@@ -1793,8 +2282,8 @@ window.AtariCodeEditor = (() => {
       const rebuiltLines = rawRebuiltLines
         .map((line, index) => rebuiltAssemblerLines[index] ? line : normaliseBasicControlSpacing(line));
       const rebuilt = rebuiltLines.join("\n");
-      if (rebuiltLines.some(line => Number(line.match(/^\s*(\d+)/)?.[1] || 0) > 32767)) {
-        await alertNotice("Too long to renumber", "Renumbering in steps of 10 would take this program past ST BASIC\u2019s highest line number, 32767.");
+      if (rebuiltLines.some(line => Number(line.match(/^\s*(\d+)/)?.[1] || 0) > 65535)) {
+        await alertNotice("Too long to renumber", "Renumbering in steps of 10 would take this program past 65535, the highest line number a numbered ST listing can hold.");
         return;
       }
       const tokens = sourceTokens(rebuilt, language, inlineAssemblyLanguage).filter(item => item.type === "keyword").reverse();
@@ -1945,11 +2434,13 @@ window.AtariCodeEditor = (() => {
       const end = followingBreak < 0 ? textarea.value.length : followingBreak;
       const selectedLines = textarea.value.slice(start, end).split("\n");
       const nonEmpty = selectedLines.filter(line => line.trim());
-      const remove = nonEmpty.length > 0 && nonEmpty.every(line => /^\s*\d+\s+REM(?:\s|$)/i.test(line));
+      // A numbered listing comments with REM after the line number; GFA
+      // BASIC source comments with an apostrophe at the start of the line.
+      const remove = nonEmpty.length > 0 && nonEmpty.every(line => /^\s*\d+\s+REM(?:\s|$)/i.test(line) || /^\s*'/.test(line));
       const replacement = selectedLines.map(line => {
         if (!line.trim()) return line;
-        if (remove) return line.replace(/^(\s*\d+\s+)REM\s?/i, "$1");
-        return line.replace(/^(\s*\d+\s+)/, "$1REM ");
+        if (remove) return /^\s*\d+\s+REM/i.test(line) ? line.replace(/^(\s*\d+\s+)REM\s?/i, "$1") : line.replace(/^(\s*)'\s?/, "$1");
+        return /^\s*\d+\s/.test(line) ? line.replace(/^(\s*\d+\s+)/, "$1REM ") : line.replace(/^(\s*)/, "$1' ");
       }).join("\n");
       textarea.setRangeText(replacement, start, end, "select");
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1997,16 +2488,16 @@ window.AtariCodeEditor = (() => {
       else if (event.key === " " && (event.ctrlKey || event.metaKey)) { event.preventDefault(); showCompletions(); }
     });
     render();
-    return { overview, helpAtCursor, showProblems, showSymbols, showCompletions, showCustom, findReferences, renameSymbol, showOutline, showHistory, compareWith, verifyRoundTrip, reference, goToLine, normaliseCommands, toggleComment, lineOperation, formatCode, condense, refactor, undo, redo, expandAll, collapseAll, toggleAll, toggleStructureGuides, setStructureGuideSize, showOriginalView, closeDrawer, refresh: render, recordHistory: historyEntry, state: () => state, history: () => pendingHistory };
+    return { overview, helpAtCursor, showProblems, showSymbols, showCompletions, showCustom, findReferences, renameSymbol, showOutline, showHistory, compareWith, verifyRoundTrip, reference, goToLine, normaliseCommands, toggleComment, lineOperation, formatCode, condense, refactor, undo, redo, expandAll, collapseAll, toggleAll, toggleStructureGuides, setStructureGuideSize, showOriginalView, closePanel, refresh: render, recordHistory: historyEntry, state: () => state, history: () => pendingHistory };
   }
 
   function enhanceDisassembly({ root, report }) {
     if (!root) return null;
     const language = report.architecture || "68000";
-    const drawer = document.createElement("section");
-    drawer.className = "code-intelligence-drawer";
-    drawer.hidden = true;
-    root.insertBefore(drawer, root.querySelector(".editor-status"));
+    const panel = document.createElement("section");
+    panel.className = "code-intelligence-drawer";
+    panel.hidden = true;
+    root.insertBefore(panel, root.querySelector(".editor-status"));
     const labelElements = [...root.querySelectorAll(".disassembly-label")];
     const labels = labelElements.map(element => ({ name: element.querySelector("span:last-child")?.textContent.replace(/:$/, "") || "Label", offset: Number(element.nextElementSibling?.dataset.offset || 0) }));
     const foldedLabels = new Set();
@@ -2059,12 +2550,12 @@ window.AtariCodeEditor = (() => {
     });
     root.querySelectorAll(".disassembly-comment").forEach(element => {
       const text = element.textContent;
-      const pattern = new RegExp(`\\b(${Object.keys(LIBRARY_HELP).join("|")})\\b`, "g");
+      const pattern = new RegExp(`(?<![A-Za-z0-9_])(${Object.keys(SYSTEM_CALL_HELP).concat(Object.keys(SYSTEM_VARIABLE_HELP)).map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![A-Za-z0-9_])`, "gi");
       let cursor = 0;
       const chunks = [];
       for (const match of text.matchAll(pattern)) {
-        chunks.push(esc(text.slice(cursor, match.index)), `<span class="code-help-token code-token-api" data-help-key="${match[1]}">${match[1]}</span>`);
-        commands.add(match[1]);
+        chunks.push(esc(text.slice(cursor, match.index)), `<span class="code-help-token code-token-api" data-help-key="${match[1].toUpperCase()}">${esc(match[1])}</span>`);
+        commands.add(match[1].toUpperCase());
         cursor = match.index + match[1].length;
       }
       if (!chunks.length) return;
@@ -2075,17 +2566,17 @@ window.AtariCodeEditor = (() => {
     });
     renderFolds();
     const show = (title, body) => {
-      drawer.hidden = false;
-      drawer.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-drawer-close" aria-label="Close code help">×</button></header><div class="code-drawer-body">${body}</div>`;
-      drawer.querySelector(".code-drawer-close").onclick = () => { drawer.hidden = true; };
-      drawer.querySelectorAll("[data-code-help]").forEach(button => button.onclick = () => show(button.dataset.codeHelp, helpMarkup(commandHelp.get(button.dataset.codeHelp) || lookup(language, button.dataset.codeHelp))));
-      drawer.querySelectorAll("[data-disassembly-offset]").forEach(button => button.onclick = () => root.querySelector(`.disassembly-source-line[data-offset="${button.dataset.disassemblyOffset}"]`)?.scrollIntoView({ block: "center" }));
+      panel.hidden = false;
+      panel.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-drawer-close" aria-label="Close code help">×</button></header><div class="code-drawer-body">${body}</div>`;
+      panel.querySelector(".code-drawer-close").onclick = () => { panel.hidden = true; };
+      panel.querySelectorAll("[data-code-help]").forEach(button => button.onclick = () => show(button.dataset.codeHelp, helpMarkup(commandHelp.get(button.dataset.codeHelp) || lookup(language, button.dataset.codeHelp))));
+      panel.querySelectorAll("[data-disassembly-offset]").forEach(button => button.onclick = () => root.querySelector(`.disassembly-source-line[data-offset="${button.dataset.disassemblyOffset}"]`)?.scrollIntoView({ block: "center" }));
     };
-    const overview = () => show(`${languageName(language)} overview`, `<div class="code-overview"><p>This view contains <strong>${report.rows.length.toLocaleString()} decoded instructions or data records</strong>, <strong>${labels.length.toLocaleString()} labels</strong> and <strong>${report.strings.length.toLocaleString()} readable strings</strong>.</p><p>Hover a highlighted mnemonic or MOS routine for syntax, processor requirements and calling conventions. Disassembly remains read-only because data can resemble valid instructions.</p><h4>Recognised operations</h4><div class="code-command-chips">${[...commands].sort().map(key => `<button type="button" data-code-help="${key}">${key}</button>`).join("")}</div></div>`);
-    const reference = () => show(`${languageName(language)} reference`, `<div class="code-reference-list">${[...new Set([...commands, ...Object.keys(INLINE_ASSEMBLER_HELP), ...Object.keys(ASM_HELP), ...Object.keys(LIBRARY_HELP)])].sort().map(key => `<button type="button" data-code-help="${key}">${key}</button>`).join("")}</div>`);
+    const overview = () => show(`${languageName(language)} overview`, `<div class="code-overview"><p>This view contains <strong>${report.rows.length.toLocaleString()} decoded instructions or data records</strong>, <strong>${labels.length.toLocaleString()} labels</strong> and <strong>${report.strings.length.toLocaleString()} readable strings</strong>.</p><p>Hover a highlighted mnemonic, TOS call or system variable for syntax, processor requirements and calling conventions. Disassembly remains read-only because data can resemble valid instructions.</p><h4>Recognised operations</h4><div class="code-command-chips">${[...commands].sort().map(key => `<button type="button" data-code-help="${key}">${key}</button>`).join("")}</div></div>`);
+    const reference = () => show(`${languageName(language)} reference`, `<div class="code-reference-list">${[...new Set([...commands, ...Object.keys(INLINE_ASSEMBLER_HELP), ...Object.keys(ASM_HELP), ...Object.keys(SYSTEM_CALL_HELP)])].sort().map(key => `<button type="button" data-code-help="${key}">${key}</button>`).join("")}</div>`);
     const showSymbols = () => show("Disassembly symbols", labels.length ? `<div class="code-symbol-list">${labels.map(item => `<button type="button" data-disassembly-offset="${item.offset}"><b>label</b><span>${esc(item.name)}</span></button>`).join("")}</div>` : '<p class="code-empty-message">No labels were discovered in this range.</p>');
     return { overview, reference, showSymbols, showCustom: show, expandAll, collapseAll, toggleAll, helpAtCursor: overview, showProblems: () => show("Disassembly cautions", '<p class="code-empty-message">No writable source diagnostics apply. Treat unknown opcodes, unreachable regions and embedded data as cautions rather than automatic errors.</p>') };
   }
 
-  return { enhance, enhanceDisassembly, lookup, contextHelp: sourceContextHelp, diagnostics };
+  return { enhance, enhanceDisassembly, lookup, contextHelp: sourceContextHelp, diagnostics, describeAddress, processorFor, configuredPlatform, M68K_TARGETS, MACHINE_PROCESSORS };
 })();
