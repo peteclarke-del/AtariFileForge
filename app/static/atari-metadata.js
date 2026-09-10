@@ -117,11 +117,5 @@
     // The names app.js still imports. They now read the attribute byte, so
     // the callers that build "hsparwed" letters must move to the six-letter
     // attribute form.
-    PROTECTION_LETTERS: [...ATTRIBUTE_LETTERS],
-    formatProtection: formatAttributes,
-    parseProtection: parseAttributes,
-    protectionFlags: attributeFlags,
-    protectionHex: attributeHex,
-    protectionValue: attributeValue,
   });
 })();
