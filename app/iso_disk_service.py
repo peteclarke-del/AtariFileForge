@@ -6,7 +6,7 @@ beside the filing systems: all of them are things an operator opens to take
 files out of, and none of them can be written back.
 
 Every entry reports the GEMDOS attributes an Atari would see for it. A disc
-cannot be written, so each one is read-only, a drawer also carries the
+cannot be written, so each one is read-only, a folder also carries the
 directory attribute, and an entry the disc marks hidden carries the hidden
 attribute. That is the same field a GEMDOS volume reports, so a file dragged
 off a CD arrives described the way a file dragged off a floppy is.
@@ -46,7 +46,7 @@ class IsoDiskMixin:
             image.close()
 
     def iso_listing(self, session: ImageSession, inner: str) -> dict:
-        """One drawer of the disc, in the shape every pane expects."""
+        """One folder of the disc, in the shape every pane expects."""
         directory = "" if inner in {"", "$", ":"} else atari_paths.normalise(inner)
         with self.iso_image(session) as image:
             entries = image.list_directory(directory)
@@ -56,7 +56,7 @@ class IsoDiskMixin:
                 "name": entry.name,
                 "path": entry.path,
                 "type": "dir" if entry.directory else "file",
-                # A drawer's extent size is not a count of what is in it, and
+                # A folder's extent size is not a count of what is in it, and
                 # the pane renders a directory's length as one. A GEMDOS
                 # volume reports zero here, so a disc does too.
                 "length": 0 if entry.directory else entry.length,
@@ -69,12 +69,12 @@ class IsoDiskMixin:
             for entry in entries
         ]
         files = sum(1 for row in rows if row["type"] == "file")
-        drawers = len(rows) - files
+        folders = len(rows) - files
         return {
             "entries": rows,
             "title": volume,
             "description": (
-                f"CD image · {volume} · {drawers} drawer{'s' if drawers != 1 else ''}, "
+                f"CD image · {volume} · {folders} folder{'s' if folders != 1 else ''}, "
                 f"{files} file{'s' if files != 1 else ''} here"
             ),
             "path": directory or "$",
