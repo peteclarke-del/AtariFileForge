@@ -11,6 +11,54 @@ MAX_ROM_COMPONENTS = 256
 COPY_BLOCK_SIZE = 1024 * 1024
 ROM_COMPONENT_LAYOUTS = {"linear", "byte-interleaved-2", "byte-interleaved-4"}
 
+#: The chip sets a real board takes for each TOS ROM size, as
+#: ``(chip count, chip size, byte lanes, label)``. Every ST-family board is a
+#: 16-bit bus fed by byte-wide chips, so each set is even/odd pairs.
+BOARD_CHIP_SETS = {
+    192 * 1024: (
+        (6, 32 * 1024, 2, "ST and Mega ST: six 32 KiB chips in three even/odd pairs"),
+    ),
+    256 * 1024: (
+        (2, 128 * 1024, 2, "STE and Mega STE: two 128 KiB chips, even and odd"),
+    ),
+    512 * 1024: (
+        (2, 256 * 1024, 2, "TT and Falcon: two 256 KiB chips, even and odd"),
+        (4, 128 * 1024, 2, "TT: four 128 KiB chips in two even/odd pairs"),
+    ),
+}
+
+
+def split_into_chips(data: bytes, lanes: int, parts: int) -> list[tuple[str, bytes]]:
+    """Split a logical image into the chip files a board takes.
+
+    ``lanes`` byte-interleaves the image (two lanes are the even and odd
+    bytes), then each lane is cut into ``parts`` consecutive pieces. The
+    names say which socket a piece belongs in: ``even-1`` is the first even
+    chip, ``odd-1`` its partner. ``write_combined_rom`` reverses the split:
+    concatenate each lane's pieces, then interleave the lanes.
+    """
+    lanes = int(lanes)
+    parts = int(parts)
+    if lanes not in {1, 2, 4} or parts < 1:
+        raise ValueError("Choose one, two or four byte lanes and at least one chip per lane.")
+    if len(data) % (lanes * parts):
+        raise ValueError("The image does not divide into that many equal chips.")
+    lane_names = {1: ("",), 2: ("even", "odd"), 4: ("lane-1", "lane-2", "lane-3", "lane-4")}[lanes]
+    found: list[tuple[str, bytes]] = []
+    for index, lane_name in enumerate(lane_names):
+        lane = data[index::lanes]
+        piece = len(lane) // parts
+        for part in range(parts):
+            content = lane[part * piece : (part + 1) * piece]
+            if parts == 1:
+                name = lane_name
+            elif lane_name:
+                name = f"{lane_name}-{part + 1}"
+            else:
+                name = f"chip-{part + 1}"
+            found.append((name, content))
+    return found
+
 
 def write_combined_rom(
     component_paths: list[Path], output_path: Path, layout: str = "linear"
@@ -66,9 +114,11 @@ def write_combined_rom(
 
 
 __all__ = [
+    "BOARD_CHIP_SETS",
     "COPY_BLOCK_SIZE",
     "MAX_COMBINED_ROM_SIZE",
     "MAX_ROM_COMPONENTS",
     "ROM_COMPONENT_LAYOUTS",
+    "split_into_chips",
     "write_combined_rom",
 ]

@@ -1,59 +1,67 @@
-"""Inspection and safe editing helpers for Atari ROM images.
+"""Inspection and safe editing helpers for Atari TOS ROM images.
 
 A ROM is a byte image, not a filing system, so the workbench presents fixed
 size *banks* as its objects and keeps layout choices in session metadata. What
-makes an Atari ROM readable rather than opaque is that it describes itself in
-three independent ways, and this module decodes all three:
+makes a TOS ROM readable rather than opaque is its operating-system header and
+the structures that header leads to, and this module decodes them:
 
-* The **image header**: ``$1111`` or ``$1114`` followed by a ``JMP``, which
-  says how large the ROM is and where the machine starts executing.
-* The **resident tags**: ``$4AFC`` followed by a pointer back to itself, one
-  per module, each carrying a name, a version, a priority and an
-  identification string. That self-reference is what separates a real tag from
-  the same two bytes occurring inside code.
-* The **footer**: the declared size and the ones-complement checksum that the
-  ROM overlay logic verifies at reset.
+* The **header**: a ``BRA.S`` to the reset code whose target the reset vector
+  at ``$04`` confirms, then the OS version word, the address the ROM is mapped
+  at, the build date as BCD and as a GEMDOS date word, and the country and
+  video-standard word.
+* The **entry points**: the ``TRAP`` handlers the ROM installs with explicit
+  ``MOVE.L #handler,vector`` instructions, the BIOS and XBIOS dispatch tables,
+  the VDI entry, and the AES initialisation routine named by the GEM memory
+  usage parameter block.
+* The **system fonts**, whose self-describing headers give exact byte ranges.
 
-A bank with none of those is reported as raw data rather than guessed at.
+A cartridge ROM is the second shape recognised: ``$ABCDEF42`` followed by a
+chain of application headers. A bank with neither is reported as raw data
+rather than guessed at.
 """
 
 from __future__ import annotations
 
 import math
-import struct
 import zlib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from atarinut.tosrom import (
+    CARTRIDGE_BASE,
+    CARTRIDGE_MAGIC,
+    CARTRIDGE_SIZE,
+    TOS_SIZES,
+    CartridgeRom,
+    TOSRom,
+    build_cartridge_rom,
+    is_cartridge_rom,
+    parse_tos_header,
+)
+from atarinut.tosrom import ROM_BASES as _ENGINE_BASES
+
 from .checksum import sha256_bytes
 
-#: Kickstart 1.x is one 256 KiB bank; 2.0 and later are 512 KiB.
-DEFAULT_BANK_SIZE = 256 * 1024
+#: A TOS ROM is programmed as 64 KiB-wide pieces on every board, so that is the
+#: bank a 192 KiB, 256 KiB or 512 KiB image divides into without remainder.
+DEFAULT_BANK_SIZE = 64 * 1024
 MIN_BANK_SIZE = 256
 MAX_ROM_SIZE = 64 * 1024 * 1024
 
-#: A 512 KiB Kickstart is programmed as one 16-bit device or as a pair of
-#: byte-wide 27C400 EPROMs holding the even and odd bytes.
+#: A TOS ROM is programmed as one 16-bit device or as byte-wide pairs holding
+#: the even and odd bytes.
 ROM_LAYOUTS = {"linear", "byte-interleaved-2", "byte-interleaved-4"}
-ROM_PLATFORMS = {"kickstart", "cartridge", "custom"}
+ROM_PLATFORMS = {"tos", "cartridge", "custom"}
 
 #: Where each ROM size appears in the 68000 address space.
-ROM_BASES = {
-    256 * 1024: 0xFC0000,
-    512 * 1024: 0xF80000,
-    1024 * 1024: 0xF00000,
-}
-DEFAULT_ROM_BASE = 0xF80000
+ROM_BASES = dict(_ENGINE_BASES)
+DEFAULT_ROM_BASE = 0xE00000
 
-HEADER_256K = 0x1111
-HEADER_512K = 0x1114
-JMP_ABSOLUTE_LONG = 0x4EF9
-RTC_MATCHWORD = 0x4AFC
-RESIDENT_SIZE = 0x1A
-
-#: The CD32 and CDTV extended ROMs identify themselves with this trailer.
-EXTENDED_ROM_SIGNATURE = b"EXTROM00"
+#: Cartridge application headers hold an 8.3 name in a 14-byte field at $14.
+CARTRIDGE_APPLICATION_SIZE = 0x22
+CARTRIDGE_NAME_OFFSET = 0x14
+CARTRIDGE_NAME_SIZE = 14
 
 
 class RomError(ValueError):
@@ -62,184 +70,179 @@ class RomError(ValueError):
 
 @dataclass(frozen=True)
 class RomHeader:
-    """The decoded identity of one ROM bank."""
+    """The decoded identity of a TOS ROM bank."""
 
     title: str
     version: str
-    copyright: str
-    version_byte: int
-    type_byte: int
-    language_entry: int | None
-    service_entry: int | None
-    title_capacity: int
-    metadata_end: int
-    base: int = DEFAULT_ROM_BASE
-    declared_size: int = 0
-    checksum: int = 0
-    calculated_checksum: int = 0
-    module_count: int = 0
+    release: str
+    version_word: int
+    base: int
+    reset_vector: int
+    os_end: int
+    date: str
+    dos_date: str
+    country: str
+    country_code: int
+    country_short: str
+    pal: bool
+    machine: str
+    emutos: bool
+    emutos_version: str
+    gem_mupb: int
+    memory_pool: int
+    kbshift: int
+    run: int
+    magic: int
+    header_length: int
+    size: int
+    entry_count: int = 0
+    font_count: int = 0
+    missing_vectors: tuple[str, ...] = ()
 
     @property
     def roles(self) -> str:
-        roles = []
-        if self.type_byte & 0x40:
-            roles.append("Kickstart")
-        if self.type_byte & 0x80:
-            roles.append("autoboot")
-        return " + ".join(roles) or "resident"
+        return "EmuTOS" if self.emutos else "TOS"
 
     @property
     def processor(self) -> str:
-        return {
-            0x0: "68000",
-            0x1: "68010",
-            0x2: "68020",
-            0x3: "68030",
-            0x4: "68040",
-            0x6: "68060",
-        }.get(self.type_byte & 0x0F, "68000 or later")
+        if self.version_word >= 0x0300:
+            return "68030"
+        return "68000"
 
     @property
-    def checksum_valid(self) -> bool:
-        return self.checksum == self.calculated_checksum
+    def video_standard(self) -> str:
+        return "PAL" if self.pal else "NTSC"
+
+    @property
+    def size_valid(self) -> bool:
+        return self.size in TOS_SIZES
+
+    @property
+    def base_valid(self) -> bool:
+        expected = ROM_BASES.get(self.size)
+        return expected is None or expected == self.base
+
+    @property
+    def dates_agree(self) -> bool:
+        return not self.dos_date or self.dos_date == self.date
+
+    @property
+    def copyright(self) -> str:
+        parts = [self.country, self.video_standard, self.machine]
+        if self.date:
+            parts.append(self.date)
+        return ", ".join(parts)
 
     @property
     def features(self) -> list[str]:
         features = []
-        if self.type_byte & 0x20:
-            features.append("extended ROM overlay")
-        if self.type_byte & 0x10:
-            features.append("diagnostic entry point")
+        if self.version_word >= 0x0102:
+            features.append("GEMDOS pool, kbshift and _run pointers")
+        if self.emutos:
+            features.append("ETOS header magic")
         return features
 
 
 @dataclass(frozen=True)
-class ExtendedRomHeader:
-    """The size and checksum trailer of a CD32 or CDTV extended ROM."""
+class CartridgeHeader:
+    """The decoded application chain of a cartridge ROM."""
 
-    declared_size: int
-    checksum: int
-    calculated_checksum: int
+    applications: tuple[dict, ...]
+    size: int
 
     @property
-    def checksum_valid(self) -> bool:
-        return self.checksum == self.calculated_checksum
+    def title(self) -> str:
+        for application in self.applications:
+            if application["name"]:
+                return application["name"]
+        return "Cartridge"
 
+    @property
+    def base(self) -> int:
+        return CARTRIDGE_BASE
 
-#: Retained under its previous name so established call sites keep working.
-
-
-def _cstring(data: bytes, start: int, limit: int = 255) -> tuple[str, int] | None:
-    if start < 0 or start >= len(data):
-        return None
-    end = data.find(b"\0", start, min(len(data), start + limit + 1))
-    if end < 0:
-        return None
-    raw = data[start:end]
-    if not raw or any(byte < 32 or byte > 126 for byte in raw):
-        return None
-    return raw.decode("latin-1"), end
+    @property
+    def size_valid(self) -> bool:
+        return 0 < self.size <= CARTRIDGE_SIZE
 
 
 def rom_base(size: int) -> int:
     """Return the address a ROM of this size is mapped at."""
-    return ROM_BASES.get(int(size), 0x1000000 - int(size) if size else DEFAULT_ROM_BASE)
-
-
-def rom_checksum(data: bytes, skip_offset: int | None = None) -> int:
-    """Return the ones-complement checksum a machine verifies at reset."""
-    total = 0
-    for offset in range(0, len(data) - 3, 4):
-        if skip_offset is not None and offset == skip_offset:
-            continue
-        (value,) = struct.unpack_from(">I", data, offset)
-        total += value
-        if total > 0xFFFFFFFF:
-            total = (total & 0xFFFFFFFF) + 1
-    return (~total) & 0xFFFFFFFF
-
-
-def _jmp_target(data: bytes, offset: int) -> int | None:
-    """Decode ``JMP <32-bit address>`` at ``offset``, if one is present."""
-    if len(data) < offset + 6:
-        return None
-    (opcode,) = struct.unpack_from(">H", data, offset)
-    if opcode != JMP_ABSOLUTE_LONG:
-        return None
-    (target,) = struct.unpack_from(">I", data, offset + 2)
-    return target if 0xF00000 <= target <= 0xFFFFFF else None
+    return ROM_BASES.get(int(size), DEFAULT_ROM_BASE)
 
 
 def parse_rom_header(data: bytes) -> RomHeader | None:
-    """Return a ROM's identity when its structures are sound.
+    """Return a TOS ROM's identity when its header is sound, else ``None``.
 
-    Two shapes are accepted, because both appear in the wild: a complete
-    machine ROM with a size header and a reset vector, and a bare expansion
-    ROM that begins directly with its resident tag. Anything else returns
-    ``None`` rather than a header built from coincidence.
+    The whole image is decoded, not only the header, so the entry-point and
+    font counts reflect what the ROM proves. Anything that is not a TOS ROM
+    returns ``None`` rather than a header built from coincidence.
     """
-    if len(data) < 32:
+    if parse_tos_header(data) is None:
         return None
-
-    (magic,) = struct.unpack_from(">H", data, 0)
-    entry = _jmp_target(data, 2)
-    base = rom_base(len(data))
-    tags = list(_resident_tags(data, base))
-
-    if magic in (HEADER_256K, HEADER_512K) and entry is not None:
-        (version, revision) = struct.unpack_from(">HH", data, 12)
-        declared = struct.unpack_from(">I", data, len(data) - 20)[0] if len(data) >= 20 else 0
-        stored = struct.unpack_from(">I", data, len(data) - 24)[0] if len(data) >= 24 else 0
-        first = tags[0] if tags else None
-        return RomHeader(
-            title=first["name"] if first else "Kickstart",
-            version=f"{version}.{revision}",
-            copyright=first["idString"] if first else "",
-            version_byte=version & 0xFF,
-            type_byte=0x40 | ((0x20 if declared and declared != len(data) else 0)),
-            language_entry=entry,
-            service_entry=tags[0]["init"] if tags and tags[0]["init"] else None,
-            title_capacity=len(first["name"]) if first else 0,
-            metadata_end=tags[0]["end"] if tags else 16,
-            base=base,
-            declared_size=declared,
-            checksum=stored,
-            calculated_checksum=rom_checksum(data, skip_offset=len(data) - 24),
-            module_count=len(tags),
-        )
-
-    if tags and tags[0]["offset"] < 0x40:
-        first = tags[0]
-        return RomHeader(
-            title=first["name"],
-            version=str(first["version"]),
-            copyright=first["idString"],
-            version_byte=first["version"] & 0xFF,
-            type_byte=0x80 if first["autoinit"] else 0x00,
-            language_entry=None,
-            service_entry=first["init"] or None,
-            title_capacity=len(first["name"]),
-            metadata_end=first["end"],
-            base=base,
-            module_count=len(tags),
-        )
-    return None
-
-
-def parse_extended_rom_header(data: bytes) -> ExtendedRomHeader | None:
-    """Return the CD32 and CDTV extended-ROM trailer, if present."""
-    if len(data) < 16 or len(data) % 4:
+    try:
+        rom = TOSRom(data)
+    except Exception:
         return None
-    if data[-8:] != EXTENDED_ROM_SIGNATURE:
-        return None
-    declared_size = int.from_bytes(data[-16:-12], "big")
-    if declared_size != len(data):
-        return None
-    checksum = int.from_bytes(data[-12:-8], "big")
-    return ExtendedRomHeader(declared_size, checksum, rom_checksum(data[:-12]))
+    header = rom.header
+    return RomHeader(
+        title=rom.title,
+        version=rom.version,
+        release=rom.release,
+        version_word=header.version_word,
+        base=rom.base,
+        reset_vector=header.reset_vector,
+        os_end=header.os_end,
+        date=header.date.isoformat() if header.date else "",
+        dos_date=header.date_from_dos_word.isoformat() if header.date_from_dos_word else "",
+        country=header.country,
+        country_code=header.country_code,
+        country_short=header.country_short,
+        pal=header.pal,
+        machine=header.machine,
+        emutos=rom.emutos,
+        emutos_version=rom.emutos_version,
+        gem_mupb=header.gem_mupb,
+        memory_pool=header.memory_pool if header.extended else 0,
+        kbshift=header.kbshift if header.extended else 0,
+        run=header.run if header.extended else 0,
+        magic=header.magic if header.extended else 0,
+        header_length=header.length,
+        size=len(data),
+        entry_count=len(rom.entry_points),
+        font_count=len(rom.fonts),
+        missing_vectors=tuple(
+            label
+            for label in ("GEMDOS TRAP #1 handler", "BIOS TRAP #13 handler", "XBIOS TRAP #14 handler")
+            if label not in {point.name for point in rom.entry_points}
+        ),
+    )
 
 
-#: Retained under its previous name so established call sites keep working.
+def image_context(path: Path) -> RomHeader | None:
+    """Decode the whole image's header so its banks can be judged against it.
+
+    A TOS ROM is at most 1 MiB, so that is all that is read; a larger custom
+    image cannot be a TOS ROM and returns ``None`` cheaply.
+    """
+    size = path.stat().st_size
+    if size > 1024 * 1024:
+        return None
+    with path.open("rb") as image:
+        return parse_rom_header(image.read(size))
+
+
+def parse_cartridge_header(data: bytes) -> CartridgeHeader | None:
+    """Return the application chain of a cartridge ROM, if the magic is present."""
+    if not is_cartridge_rom(data):
+        return None
+    try:
+        cartridge = CartridgeRom(data)
+    except Exception:
+        return None
+    return CartridgeHeader(
+        tuple(application.to_dict() for application in cartridge.applications), len(data)
+    )
 
 
 def is_erased(data: bytes, erase_byte: int = 0xFF) -> bool:
@@ -261,9 +264,9 @@ def validate_layout(value: str) -> str:
 
 
 def validate_platform(value: str) -> str:
-    platform = str(value or "kickstart")
+    platform = str(value or "tos")
     if platform not in ROM_PLATFORMS:
-        raise RomError("Choose a Kickstart, cartridge or custom ROM target.")
+        raise RomError("Choose a TOS, cartridge or custom ROM target.")
     return platform
 
 
@@ -287,7 +290,7 @@ def printable_strings(data: bytes, minimum: int = 4, limit: int = 513, base: int
                 "offset": start,
                 "address": origin + start,
                 "length": offset - start,
-                "text": text[:160] + ("…" if len(text) > 160 else ""),
+                "text": text[:160] + ("..." if len(text) > 160 else ""),
             })
             if len(found) >= limit:
                 break
@@ -327,269 +330,278 @@ def byte_diagnostics(data: bytes, erase_byte: int, deep: bool = True) -> dict:
     }
 
 
-NODE_TYPES = {
-    0: "unknown", 1: "task", 2: "interrupt", 3: "device", 4: "msgport",
-    5: "message", 6: "freemsg", 7: "replymsg", 8: "resource", 9: "library",
-    10: "memory", 11: "softint", 12: "font", 13: "process", 14: "semaphore",
-    15: "signalsem", 16: "bootnode", 17: "kickmem", 18: "graphics",
-}
+def entry_point_candidates(data: bytes, limit: int = 64) -> list[dict]:
+    """List the entry points and tables a TOS ROM proves, in address order.
 
-
-def _resident_tags(data: bytes, base: int, limit: int = 256):
-    """Yield every structurally sound resident tag in the image.
-
-    The self-referential ``rt_MatchTag`` pointer is the whole reason this can
-    be done reliably: a tag must point at its own address, so ``$4AFC``
-    occurring inside instruction data is rejected without needing heuristics.
+    Every row is backed by an instruction or a magic number in the ROM: the
+    reset vector, a ``MOVE.L #handler,vector`` install, the ``LEA`` a dispatch
+    stub performs, the ``JSR`` the ``TRAP #2`` stub makes for VDI function
+    ``$73``, or the ``$87654321`` magic of the GEM memory usage block. None is
+    inferred from code shape alone.
     """
-    offset = 0
-    end_limit = len(data) - RESIDENT_SIZE
-    found = 0
-    while offset <= end_limit and found < limit:
-        index = data.find(b"\x4a\xfc", offset)
-        if index < 0 or index > end_limit:
-            return
-        offset = index + 2
-        if index % 2:
-            continue
-        (match_tag,) = struct.unpack_from(">I", data, index + 2)
-        if match_tag != base + index:
-            continue
-        (end_skip,) = struct.unpack_from(">I", data, index + 6)
-        flags = data[index + 10]
-        version = data[index + 11]
-        node_type = data[index + 12]
-        (priority,) = struct.unpack_from(">b", data, index + 13)
-        (name_pointer,) = struct.unpack_from(">I", data, index + 14)
-        (id_pointer,) = struct.unpack_from(">I", data, index + 18)
-        (init_pointer,) = struct.unpack_from(">I", data, index + 22)
-        name = _cstring(data, name_pointer - base, 60) if name_pointer else None
-        if name is None:
-            continue
-        identification = _cstring(data, id_pointer - base, 160) if id_pointer else None
-        module_end = end_skip - base
-        if not 0 < module_end <= len(data):
-            module_end = min(len(data), index + RESIDENT_SIZE)
-        found += 1
-        yield {
-            "offset": index,
-            "address": base + index,
-            "name": name[0],
-            "idString": identification[0] if identification else "",
-            "version": version,
-            "priority": priority,
-            "flags": flags,
-            "autoinit": bool(flags & 0x80),
-            "nodeType": node_type,
-            "nodeTypeName": NODE_TYPES.get(node_type, f"type {node_type}"),
-            "init": init_pointer or None,
-            "end": module_end,
-            "length": max(0, module_end - index),
-        }
-
-
-def resident_module_candidates(data: bytes, limit: int = 64, base: int | None = None) -> list[dict]:
-    """List the resident modules a machine's ROM scan would find."""
-    origin = rom_base(len(data)) if base is None else base
-    modules = []
-    for tag in _resident_tags(data, origin, limit):
-        modules.append({
-            "offset": tag["offset"],
-            "title": tag["name"],
-            "help": tag["idString"],
-            "start": tag["address"],
-            "initialise": tag["init"],
-            "finalise": None,
-            "service": None,
-            "commands": None,
-            "commandKeywords": _library_function_names(data, tag, origin),
-            "version": tag["version"],
-            "priority": tag["priority"],
-            "nodeType": tag["nodeTypeName"],
-            "autoinit": tag["autoinit"],
-            "length": tag["length"],
-        })
-        if len(modules) >= limit:
-            break
-    return modules
-
-
-#: Retained under its previous name so established call sites keep working.
-
-
-def _library_function_names(data: bytes, tag: dict, base: int, limit: int = 256) -> list[dict]:
-    """Recover a library's function names from its auto-init name table.
-
-    An auto-initialised library points at a table of ``LVO`` entries. When the
-    build kept its symbol names, they appear as a NUL-terminated run just after
-    the identification string. Only names that look like Atari entry points are
-    reported, and every one is marked as a candidate rather than as declared,
-    because a ROM is not required to keep them at all.
-    """
-    if not tag["autoinit"] or not tag["init"]:
+    if parse_tos_header(data) is None:
         return []
-    start = tag["init"] - base
-    if not 0 <= start < len(data):
+    try:
+        rom = TOSRom(data)
+    except Exception:
         return []
-    names: list[dict] = []
-    cursor = start
-    window = min(len(data), start + 4096)
-    while cursor < window and len(names) < limit:
-        found = _cstring(data, cursor, 40)
-        if found is None:
-            cursor += 1
-            continue
-        text, end = found
-        cursor = end + 1
-        if len(text) < 4 or not text[0].isalpha():
-            continue
-        if not all(character.isalnum() or character == "_" for character in text):
-            continue
-        names.append({
-            "name": text,
-            "offset": end - len(text),
-            "address": base + end - len(text),
-            "entryOffset": None,
-            "confidence": "strong candidate",
-            "helpText": "",
-            "helpOnly": False,
+    rows = []
+    for point in rom.entry_points[:limit]:
+        rows.append({
+            "offset": point.offset,
+            "title": point.name,
+            "help": point.evidence,
+            "start": point.address,
+            "handlerAddress": point.address,
+            "length": point.length,
+            "confidence": "declared",
         })
-    return names
+    return rows
 
 
-def star_command_inventory(data: bytes, modules: list[dict] | None = None) -> list[dict]:
-    """List the libraries, devices and resources a ROM makes available.
+def system_fonts(data: bytes) -> list[dict]:
+    """List the VDI system fonts whose headers, tables and glyphs are in the ROM."""
+    if parse_tos_header(data) is None:
+        return []
+    try:
+        rom = TOSRom(data)
+    except Exception:
+        return []
+    return [font.to_dict() for font in rom.fonts]
 
-    On an Atari the equivalent of a command inventory is the set of resident
-    modules the ROM scan installs, because that is what other software can
-    call. Each is reported with its node type, version and priority, which is
-    what decides the order the machine initialises them in.
+
+def entry_point_inventory(data: bytes, entries: list[dict] | None = None) -> list[dict]:
+    """Present entry points as the inventory the decoder pane lists.
+
+    The closest thing a TOS ROM has to a command inventory is the set of
+    system calls it answers, and those are reached through the handlers and
+    dispatch tables listed here.
     """
     inventory: list[dict] = []
-    for module in modules or []:
+    for entry in entries or []:
         inventory.append({
-            "name": module["title"],
-            "offset": module["offset"],
-            "address": module.get("start"),
-            "module": module["title"],
-            "confidence": "declared",
-            "helpText": module.get("help", ""),
-            "nodeType": module.get("nodeType", ""),
-            "version": module.get("version"),
-            "priority": module.get("priority"),
-            "handlerOffset": module.get("initialise"),
+            "name": entry["title"],
+            "offset": entry["offset"],
+            "address": entry.get("start"),
+            "module": entry["title"],
+            "confidence": entry.get("confidence", "declared"),
+            "helpText": entry.get("help", ""),
+            "handlerOffset": entry.get("offset"),
+            "handlerAddress": entry.get("handlerAddress"),
+            "length": entry.get("length"),
         })
-        for function in module.get("commandKeywords", []):
-            inventory.append({
-                **function,
-                "module": module["title"],
-                "handlerOffset": None,
-            })
-    confidence_rank = {"declared": 3, "strong candidate": 2}
-    unique: dict[str, dict] = {}
-    for entry in inventory:
-        key = entry["name"].casefold()
-        current = unique.get(key)
-        if (
-            current is None
-            or confidence_rank[entry["confidence"]] > confidence_rank[current["confidence"]]
-            or (
-                confidence_rank[entry["confidence"]] == confidence_rank[current["confidence"]]
-                and entry.get("helpText")
-                and not current.get("helpText")
-            )
-        ):
-            unique[key] = entry
-    return sorted(unique.values(), key=lambda item: (item["name"].casefold(), item["offset"]))
+    return sorted(inventory, key=lambda item: (item["offset"], item["name"].casefold()))
+
+
+def _header_structures(rom: TOSRom) -> list[dict]:
+    base = rom.base
+    structures = [{
+        "kind": "header",
+        "name": "Operating-system header: BRA.S, version, reset vector, base, dates, country",
+        "offset": 0,
+        "address": base,
+        "length": rom.header.length,
+    }]
+    for point in rom.entry_points:
+        structures.append({
+            "kind": "table" if point.length else "entry",
+            "name": point.name,
+            "offset": point.offset,
+            "address": point.address,
+            "length": point.length,
+        })
+    for font in rom.fonts:
+        structures.append({
+            "kind": "font",
+            "name": f"{font.name} ({font.point_size} point, {font.cell_width}x{font.cell_height})",
+            "offset": font.header_offset,
+            "address": base + font.header_offset,
+            "length": 88,
+        })
+        structures.append({
+            "kind": "font-data",
+            "name": f"{font.name} glyph data",
+            "offset": font.glyph_data[0],
+            "address": base + font.glyph_data[0],
+            "length": font.glyph_data[1] - font.glyph_data[0],
+        })
+    return structures
+
+
+def _cartridge_structures(cartridge: CartridgeHeader) -> list[dict]:
+    structures = [{
+        "kind": "header",
+        "name": "Cartridge magic $ABCDEF42",
+        "offset": 0,
+        "address": CARTRIDGE_BASE,
+        "length": 4,
+    }]
+    for application in cartridge.applications:
+        structures.append({
+            "kind": "module",
+            "name": f"Application header {application['name'] or '(unnamed)'}",
+            "offset": application["offset"],
+            "address": CARTRIDGE_BASE + application["offset"],
+            "length": CARTRIDGE_APPLICATION_SIZE,
+        })
+        for role, target in (("init", application["init"]), ("run", application["run"])):
+            if CARTRIDGE_BASE <= target < CARTRIDGE_BASE + CARTRIDGE_SIZE:
+                structures.append({
+                    "kind": "entry",
+                    "name": f"{application['name'] or 'application'} {role} routine",
+                    "offset": target - CARTRIDGE_BASE,
+                    "address": target,
+                    "length": None,
+                })
+    return structures
+
+
+def _header_dict(header: RomHeader) -> dict:
+    return {
+        "title": header.title,
+        "version": header.version,
+        "release": header.release,
+        "versionWord": header.version_word,
+        "versionHex": f"{header.version_word:04X}",
+        "copyright": header.copyright,
+        "roles": header.roles,
+        "processor": header.processor,
+        "features": header.features,
+        "base": header.base,
+        "resetVector": header.reset_vector,
+        "resetEntry": header.reset_vector,
+        "osEnd": header.os_end,
+        "date": header.date,
+        "dosDate": header.dos_date,
+        "datesAgree": header.dates_agree,
+        "country": header.country,
+        "countryCode": header.country_code,
+        "countryShort": header.country_short,
+        "videoStandard": header.video_standard,
+        "pal": header.pal,
+        "machine": header.machine,
+        "emutos": header.emutos,
+        "emutosVersion": header.emutos_version,
+        "gemMupb": header.gem_mupb,
+        "memoryPool": header.memory_pool,
+        "kbshift": header.kbshift,
+        "run": header.run,
+        "magic": header.magic,
+        "headerLength": header.header_length,
+        "sizeValid": header.size_valid,
+        "baseValid": header.base_valid,
+        "entryCount": header.entry_count,
+        "fontCount": header.font_count,
+    }
 
 
 def inspect_bank(
     data: bytes,
     number: int,
     erase_byte: int = 0xFF,
-    extension_header: ExtendedRomHeader | None = None,
+    image_header: RomHeader | None = None,
     include_contents: bool = False,
-    include_resident_modules: bool = False,
+    include_entry_points: bool = False,
 ) -> dict:
+    """Decode one bank.
+
+    ``image_header`` is the header of the whole image the bank belongs to.
+    Size, base and vector findings are judged against that whole image, so a
+    64 KiB bank of a 192 KiB ROM is not reported as the wrong size, and a
+    continuation bank is labelled as part of the ROM rather than as raw data.
+    Without it, the bank is judged as an image in its own right.
+    """
     header = parse_rom_header(data)
+    cartridge = parse_cartridge_header(data) if header is None else None
     blank = is_erased(data, erase_byte)
-    base = header.base if header else rom_base(len(data))
-    title = header.title if header else ("Empty bank" if blank else f"Bank {number:03d}")
-    structures = []
+    context = image_header if image_header is not None and header is not None else header
+    notes: list[str] = []
     if header:
-        structures.append({
-            "kind": "header",
-            "name": "ROM size header, reset vector and version",
-            "offset": 0,
-            "address": base,
-            "length": 16,
-        })
-        for role, entry in (
-            ("Reset entry point", header.language_entry),
-            ("First module init routine", header.service_entry),
-        ):
-            if entry is not None:
-                structures.append({
-                    "kind": "entry",
-                    "name": role,
-                    "offset": entry - base,
-                    "address": entry,
-                    "length": None,
-                })
-        for tag in _resident_tags(data, base, 64):
-            structures.append({
-                "kind": "module",
-                "name": f"{tag['name']} ({tag['nodeTypeName']} v{tag['version']})",
-                "offset": tag["offset"],
-                "address": tag["address"],
-                "length": tag["length"],
-            })
-        if header.declared_size:
-            structures.append({
-                "kind": "footer",
-                "name": "Declared size and reset checksum",
-                "offset": max(0, len(data) - 24),
-                "address": base + max(0, len(data) - 24),
-                "length": 24,
-            })
+        base = header.base
+    elif cartridge:
+        base = CARTRIDGE_BASE
+    elif image_header:
+        base = image_header.base + number * len(data)
+    else:
+        base = rom_base(len(data))
+    if header:
+        title = header.title
+    elif cartridge:
+        title = cartridge.title
+    elif blank:
+        title = "Empty bank"
+    elif image_header:
+        title = f"{image_header.title} (continued)"
+    else:
+        title = f"Bank {number:03d}"
+    structures: list[dict] = []
+    warnings: list[str] = []
+    rom: TOSRom | None = None
+    if header:
+        rom = TOSRom(data)
+        structures = _header_structures(rom)
+        if not context.size_valid:
+            warnings.append(
+                f"The image is {context.size:,} bytes, which is not a TOS size "
+                "(192 KiB, 256 KiB, 512 KiB or 1 MiB). It may be a bank of a larger ROM, "
+                "truncated, or padded."
+            )
+        if not context.base_valid:
+            warnings.append(
+                f"The header maps the OS at ${context.base:06X}, but a {context.size // 1024} KiB "
+                f"ROM sits at ${ROM_BASES[context.size]:06X}. Absolute addresses inside it will "
+                "not match the board it is fitted to."
+            )
+        if not context.dates_agree:
+            warnings.append(
+                "The GEMDOS date word at $1E disagrees with the BCD build date at $18."
+            )
+        if context.emutos and not context.emutos_version:
+            warnings.append("The ROM is marked as EmuTOS but carries no version string.")
+        if context.missing_vectors:
+            notes.append(
+                "No explicit vector install was found for: " + ", ".join(context.missing_vectors) + ". "
+                "The ROM may install those vectors through a table copy instead."
+            )
+    elif cartridge:
+        structures = _cartridge_structures(cartridge)
+        if not cartridge.size_valid:
+            warnings.append(
+                f"A cartridge ROM is at most {CARTRIDGE_SIZE // 1024} KiB; this image is {len(data):,} bytes."
+            )
+        if not cartridge.applications:
+            warnings.append("The cartridge header chain is empty.")
     elif not blank:
         structures.append({
             "kind": "payload",
-            "name": "Raw code and data (no ROM header or resident tag recognised)",
+            "name": (
+                "Continuation of the operating system (no header in this bank)"
+                if image_header
+                else "Raw code and data (no TOS or cartridge header recognised)"
+            ),
             "offset": 0,
             "address": base,
             "length": len(data),
         })
-    if extension_header:
-        structures.append({
-            "kind": "extension-header",
-            "name": "Extended-ROM size and checksum trailer",
-            "offset": max(0, len(data) - 16),
-            "address": None,
-            "length": 16,
-        })
     strings = printable_strings(data, base=base) if include_contents and not blank else []
-    modules = (
-        resident_module_candidates(data, base=base)
-        if include_contents and include_resident_modules and not blank
+    entries = (
+        entry_point_candidates(data)
+        if include_contents and include_entry_points and header
         else []
     )
+    fonts = system_fonts(data) if include_contents and header else []
     diagnostics = byte_diagnostics(data, erase_byte, deep=include_contents)
     programmed_bytes = len(data) - data.count(bytes((erase_byte & 0xFF,)))
-    warnings = []
     if header:
-        if header.declared_size and header.declared_size != len(data):
-            warnings.append(
-                f"The ROM declares {header.declared_size:,} bytes but this image holds "
-                f"{len(data):,}. It is one part of a split set, or it was padded."
-            )
-        if header.declared_size and not header.checksum_valid:
-            warnings.append(
-                "The reset checksum does not match the ROM's contents. A real machine "
-                "will refuse to start from it."
-            )
-        if not header.module_count:
-            warnings.append("No resident module tags were found in this bank.")
+        filetype = f"{header.release} · {header.country_short.upper()} {header.video_standard}"
+    elif cartridge:
+        filetype = f"cartridge · {len(cartridge.applications)} application(s)"
+    elif blank:
+        filetype = "erased"
+    elif image_header:
+        filetype = f"{image_header.release} · continuation"
+    else:
+        filetype = "raw data"
     return {
         "slot": number,
         "bank": number,
@@ -601,88 +613,36 @@ def inspect_bank(
         "fileOffset": number * len(data),
         "programmedBytes": programmed_bytes,
         "programmedPercent": round(programmed_bytes * 100 / len(data), 1) if data else 0,
-        "filetype": (
-            f"Extended ROM ({'valid' if extension_header.checksum_valid else 'bad'} checksum)"
-            if extension_header
-            else f"{header.roles} · {header.module_count} module(s)" if header
-            else "erased" if blank
-            else "raw data"
-        ),
-        "header": ({
-            "title": header.title,
-            "version": header.version,
-            "copyright": header.copyright,
-            "versionByte": header.version_byte,
-            "typeByte": header.type_byte,
-            "typeHex": f"{header.type_byte:02X}",
-            "roles": header.roles,
-            "processor": header.processor,
-            "features": header.features,
-            "languageEntry": header.language_entry,
-            "serviceEntry": header.service_entry,
-            "titleCapacity": header.title_capacity,
-            "metadataEnd": header.metadata_end,
-            "base": header.base,
-            "declaredSize": header.declared_size,
-            "checksum": header.checksum,
-            "calculatedChecksum": header.calculated_checksum,
-            "checksumValid": header.checksum_valid,
-            "moduleCount": header.module_count,
-        } if header else None),
-        "extensionHeader": ({
-            "declaredSize": extension_header.declared_size,
-            "checksum": extension_header.checksum,
-            "calculatedChecksum": extension_header.calculated_checksum,
-            "checksumValid": extension_header.checksum_valid,
-        } if extension_header else None),
+        "filetype": filetype,
+        "header": _header_dict(header) if header else None,
+        "cartridge": ({
+            "base": CARTRIDGE_BASE,
+            "applications": list(cartridge.applications),
+            "sizeValid": cartridge.size_valid,
+        } if cartridge else None),
         "structures": structures,
         "strings": strings[:512],
         "stringsTruncated": len(strings) > 512,
         "diagnostics": diagnostics,
         "warnings": warnings,
-        "modules": modules,
-        "starCommands": star_command_inventory(data, modules) if include_contents and not blank else [],
+        "notes": notes,
+        "modules": entries,
+        "fonts": fonts,
+        "starCommands": entry_point_inventory(data, entries) if include_contents and not blank else [],
     }
 
 
 def inspect_image(path: Path, bank_size: int, erase_byte: int = 0xFF) -> list[dict]:
     size = path.stat().st_size
     rows = []
+    image_header = image_context(path)
     with path.open("rb") as image:
         for number in range(bank_count(size, bank_size)):
-            row = inspect_bank(image.read(bank_size), number, erase_byte)
+            row = inspect_bank(image.read(bank_size), number, erase_byte, image_header)
             row["fileOffset"] = number * bank_size
+            if image_header:
+                row["imageHeader"] = _header_dict(image_header)
             rows.append(row)
-        if rows and size >= 16 and size % 4 == 0:
-            image.seek(size - 16)
-            trailer = image.read(16)
-            if trailer[-8:] == EXTENDED_ROM_SIGNATURE:
-                declared_size = int.from_bytes(trailer[:4], "big")
-                if declared_size == size:
-                    image.seek(0)
-                    remaining = size - 12
-                    total = 0
-                    while remaining:
-                        chunk = image.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        for offset in range(0, len(chunk) - 3, 4):
-                            total += int.from_bytes(chunk[offset : offset + 4], "big")
-                            if total > 0xFFFFFFFF:
-                                total = (total & 0xFFFFFFFF) + 1
-                        remaining -= len(chunk)
-                    extension_header = ExtendedRomHeader(
-                        declared_size,
-                        int.from_bytes(trailer[4:8], "big"),
-                        (~total) & 0xFFFFFFFF,
-                    )
-                    final_data = read_bank(path, len(rows) - 1, bank_size)
-                    rows[-1] = inspect_bank(
-                        final_data,
-                        len(rows) - 1,
-                        erase_byte,
-                        extension_header,
-                    )
     matches: dict[str, list[int]] = {}
     for row in rows:
         matches.setdefault(row["diagnostics"]["sha256"], []).append(row["bank"])
@@ -721,84 +681,88 @@ def bank_number(path: str) -> int:
     return number
 
 
-def make_expansion_rom(size: int, title: str, erase_byte: int = 0xFF) -> bytes:
-    """Build an empty but structurally valid ROM around one resident tag.
+def make_cartridge_rom(size: int, title: str, erase_byte: int = 0xFF) -> bytes:
+    """Build an empty but structurally valid cartridge ROM.
 
-    The result is what an expansion ROM looks like before its driver code is
-    linked in. Its module init routine is ``MOVEQ #0,D0 / RTS``, which is a
-    real, safe "nothing to install" answer rather than an address that would
-    crash the machine if the ROM were fitted before it was finished.
+    The result is what a cartridge looks like before its program is linked in:
+    the ``$ABCDEF42`` magic, one application header named after ``title``, and
+    a run routine that is a single ``RTS``. That is a real, safe "nothing to
+    do" answer rather than an address that would crash the machine if the
+    cartridge were fitted before it was finished.
     """
     size = validate_bank_size(size)
     if size < 1024:
         raise RomError("A ROM template needs at least 1 KiB.")
+    if size > CARTRIDGE_SIZE:
+        raise RomError(f"A cartridge ROM is at most {CARTRIDGE_SIZE // 1024} KiB.")
     clean_title = "".join(
-        character for character in str(title or "forge") if 32 <= ord(character) <= 126
-    )[:24] or "forge"
-    from atarinut.kickfs.kickfs import SIZE_256K, SIZE_512K, build_rom
+        character for character in str(title or "forge") if character.isalnum() or character in "_."
+    )[:12] or "forge"
+    if "." not in clean_title:
+        clean_title = f"{clean_title[:8]}.PRG"
+    return build_cartridge_rom(size, (clean_title,), erase_byte=erase_byte)
 
-    if size in (SIZE_256K, SIZE_512K, 2 * SIZE_512K):
-        return build_rom(
-            size=size,
-            name=f"{clean_title}.library",
-            id_string=f"{clean_title}.library 1.0 (2026)",
-        )
 
-    # A non-standard size cannot carry a machine ROM header, so emit a bare
-    # resident tag at the start of the bank instead. A real expansion ROM on a
-    # non-standard device looks exactly like this.
-    base = rom_base(size)
-    data = bytearray(bytes((erase_byte & 0xFF,)) * size)
-    tag_offset = 0x00
-    name_offset = 0x40
-    id_offset = 0x80
-    init_offset = 0x100
-    struct.pack_into(">H", data, tag_offset, RTC_MATCHWORD)
-    struct.pack_into(">I", data, tag_offset + 2, base + tag_offset)
-    struct.pack_into(">I", data, tag_offset + 6, base + init_offset + 4)
-    data[tag_offset + 10] = 0x01
-    data[tag_offset + 11] = 1
-    data[tag_offset + 12] = 9
-    struct.pack_into(">b", data, tag_offset + 13, 0)
-    struct.pack_into(">I", data, tag_offset + 14, base + name_offset)
-    struct.pack_into(">I", data, tag_offset + 18, base + id_offset)
-    struct.pack_into(">I", data, tag_offset + 22, base + init_offset)
-    name_bytes = f"{clean_title}.library".encode("latin-1") + b"\0"
-    id_bytes = f"{clean_title}.library 1.0 (2026)".encode("latin-1") + b"\0"
-    data[name_offset : name_offset + len(name_bytes)] = name_bytes
-    data[id_offset : id_offset + len(id_bytes)] = id_bytes
-    struct.pack_into(">HH", data, init_offset, 0x7000, 0x4E75)
-    return bytes(data)
+def rename_cartridge(data: bytes, title: str) -> bytes:
+    """Rewrite the first application name of a cartridge ROM in place.
+
+    The name field is fixed at 14 bytes, so nothing else in the ROM moves. A
+    name that does not fit the 8.3 form is refused rather than shortened.
+    """
+    cartridge = parse_cartridge_header(data)
+    if cartridge is None or not cartridge.applications:
+        raise RomError("That bank has no cartridge application header to rename.")
+    text = str(title or "").strip().upper()
+    stem, _, extension = text.partition(".")
+    if not stem or len(stem) > 8 or len(extension) > 3:
+        raise RomError("A cartridge application name is up to 8 characters plus a 3-character extension.")
+    if not all(character.isalnum() or character == "_" for character in stem + extension):
+        raise RomError("Cartridge application names use letters, digits and underscores only.")
+    name = f"{stem}.{extension}" if extension else stem
+    offset = cartridge.applications[0]["offset"] + CARTRIDGE_NAME_OFFSET
+    updated = bytearray(data)
+    updated[offset : offset + CARTRIDGE_NAME_SIZE] = name.encode("ascii").ljust(CARTRIDGE_NAME_SIZE, b"\0")
+    return bytes(updated)
+
+
+#: Retained until the application layer is ported; ``make_cartridge_rom`` is
+#: the name to call.
+make_expansion_rom = make_cartridge_rom
 
 
 __all__ = [
+    "CARTRIDGE_BASE",
+    "CARTRIDGE_MAGIC",
+    "CARTRIDGE_SIZE",
     "DEFAULT_BANK_SIZE",
     "DEFAULT_ROM_BASE",
-    "EXTENDED_ROM_SIGNATURE",
-    "ExtendedRomHeader",
     "MAX_ROM_SIZE",
     "MIN_BANK_SIZE",
-    "NODE_TYPES",
     "ROM_BASES",
     "ROM_LAYOUTS",
     "ROM_PLATFORMS",
+    "TOS_SIZES",
+    "CartridgeHeader",
     "RomError",
     "RomHeader",
     "bank_count",
     "bank_number",
     "byte_diagnostics",
+    "entry_point_candidates",
+    "entry_point_inventory",
+    "image_context",
     "inspect_bank",
     "inspect_image",
     "is_erased",
+    "make_cartridge_rom",
     "make_expansion_rom",
-    "parse_extended_rom_header",
+    "parse_cartridge_header",
     "parse_rom_header",
     "printable_strings",
     "read_bank",
-    "resident_module_candidates",
+    "rename_cartridge",
     "rom_base",
-    "rom_checksum",
-    "star_command_inventory",
+    "system_fonts",
     "validate_bank_size",
     "validate_layout",
     "validate_platform",
