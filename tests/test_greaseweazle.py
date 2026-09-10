@@ -8,11 +8,15 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from atari_greaseweazle import (
+    GW_FORMATS,
+    IMAGE_FORMATS,
+    REFUSED_FORMATS,
     GreaseweazleClient,
     GreaseweazleError,
     ProbeResult,
     ReadResult,
     WriteResult,
+    gw_format,
     image_format,
     stable_snapshot,
 )
@@ -22,7 +26,7 @@ try:
     from app.disk_service import DiskError
     from app.image_session import ImageSession
     from app.routes.desktop import create_desktop_blueprint
-except ModuleNotFoundError:
+except ImportError:  # Flask is installed in the production image; the service is ported separately.
     Flask = create_desktop_blueprint = None
 
 
@@ -42,18 +46,60 @@ class _Process:
         self.terminated = True
 
 
-class GreaseweazleTests(unittest.TestCase):
+class FormatPolicyTests(unittest.TestCase):
     def test_supported_formats_apply_correct_verification_policy(self) -> None:
-        self.assertTrue(image_format("game.adf").automatic_verification)
-        self.assertTrue(image_format("utilities.ADZ").automatic_verification)
+        self.assertEqual(set(IMAGE_FORMATS), {".st", ".msa", ".hfe", ".scp", ".ipf"})
+        self.assertTrue(image_format("game.st").automatic_verification)
+        self.assertTrue(image_format("utilities.MSA").automatic_verification)
         self.assertFalse(image_format("preserved.hfe").automatic_verification)
         self.assertFalse(image_format("greaseweazle-capture.scp").automatic_verification)
+        self.assertFalse(image_format("preserved.ipf").automatic_verification)
         with self.assertRaisesRegex(GreaseweazleError, "not a floppy image"):
-            image_format("scsi0.hda")
+            image_format("scsi0.acsi")
 
+    def test_a_plain_sector_image_needs_a_format_both_ways_and_an_msa_only_to_read(self) -> None:
+        """gw's IMG class has no default format; an MSA carries its own shape."""
+        self.assertTrue(image_format("disk.st").format_on_read)
+        self.assertTrue(image_format("disk.st").format_on_write)
+        self.assertTrue(image_format("disk.msa").format_on_read)
+        self.assertFalse(image_format("disk.msa").format_on_write)
+        for suffix in (".hfe", ".scp", ".ipf"):
+            with self.subTest(suffix=suffix):
+                self.assertFalse(image_format(f"disk{suffix}").format_on_read)
+                self.assertFalse(image_format(f"disk{suffix}").format_on_write)
+
+    def test_stx_is_refused_and_the_flux_alternative_is_named(self) -> None:
+        with self.assertRaisesRegex(GreaseweazleError, "SCP or HFE"):
+            image_format("protected.stx")
+        with self.assertRaisesRegex(GreaseweazleError, "Pasti"):
+            image_format("PROTECTED.STX")
+
+    def test_dim_is_refused_because_gw_reads_it_as_pc98(self) -> None:
+        with self.assertRaisesRegex(GreaseweazleError, "PC-98"):
+            image_format("copy.dim")
+        self.assertEqual(set(REFUSED_FORMATS), {".stx", ".dim"})
+
+    def test_gw_format_names_come_from_gw_own_definitions(self) -> None:
+        self.assertEqual(gw_format(80, 2, 9), "atarist.720")
+        self.assertEqual(gw_format(80, 2, 10), "atarist.800")
+        self.assertEqual(gw_format(80, 2, 11), "atarist.880")
+        self.assertEqual(gw_format(80, 1, 9), "atarist.360")
+        self.assertEqual(gw_format(80, 1, 10), "atarist.400")
+        self.assertEqual(gw_format(80, 1, 11), "atarist.440")
+        self.assertEqual(gw_format(80, 2, 18), "ibm.1440")
+        self.assertEqual(gw_format(40, 2, 9), "ibm.360")
+        self.assertEqual(gw_format(40, 1, 9), "ibm.180")
+        self.assertEqual(len(GW_FORMATS), 9)
+
+    def test_a_layout_gw_has_no_definition_for_is_refused_not_truncated(self) -> None:
+        with self.assertRaisesRegex(GreaseweazleError, "82 tracks.*eighty tracks"):
+            gw_format(82, 2, 10)
+
+
+class GreaseweazleTests(unittest.TestCase):
     def test_snapshot_has_stable_bytes_and_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "game.adf"
+            source = Path(temporary) / "game.st"
             source.write_bytes(b"original")
             with stable_snapshot(source, temporary) as snapshot:
                 source.write_bytes(b"changed")
@@ -71,15 +117,47 @@ class GreaseweazleTests(unittest.TestCase):
         )
         progress = Mock()
         with tempfile.TemporaryDirectory() as temporary:
-            image = Path(temporary) / "game.adf"
+            image = Path(temporary) / "game.st"
             image.write_bytes(b"disk")
-            result = GreaseweazleClient("/usr/bin/gw").write(image, "A", progress)
+            result = GreaseweazleClient("/usr/bin/gw").write(
+                image, "A", progress, disk_format="atarist.720"
+            )
 
         self.assertTrue(result.verified)
         self.assertTrue(result.verification_supported)
         self.assertEqual(result.tracks_written, 4)
         popen.assert_called_once()
-        self.assertEqual(popen.call_args.args[0][:3], ["/usr/bin/gw", "write", "--drive=A"])
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/gw", "write", "--drive=A"])
+        self.assertIn("--format=atarist.720", command)
+
+    @patch("atari_greaseweazle.client.subprocess.run")
+    def test_writing_a_plain_sector_image_without_its_geometry_is_refused(self, run) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "game.st"
+            image.write_bytes(b"disk")
+            with self.assertRaisesRegex(GreaseweazleError, "needs its geometry"):
+                GreaseweazleClient("/usr/bin/gw").write(image, "A")
+        run.assert_not_called()
+
+    @patch("atari_greaseweazle.client.subprocess.Popen")
+    @patch("atari_greaseweazle.client.subprocess.run")
+    def test_an_msa_is_written_without_a_format_because_it_carries_one(self, run, popen) -> None:
+        run.return_value = subprocess.CompletedProcess(["gw", "info"], 0, "Device ready")
+        popen.return_value = _Process("Writing c=0-0:h=0-0\nT0.0: Written and verified\nAll tracks verified\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "game.msa"
+            image.write_bytes(b"\x0e\x0f")
+            result = GreaseweazleClient("/usr/bin/gw").write(image, "A")
+        self.assertTrue(result.verified)
+        self.assertFalse(any(item.startswith("--format") for item in popen.call_args.args[0]))
+
+    def test_a_format_name_that_is_not_a_gw_name_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "game.st"
+            image.write_bytes(b"disk")
+            with self.assertRaisesRegex(GreaseweazleError, "not a Greaseweazle disk format"):
+                GreaseweazleClient("/usr/bin/gw").write(image, "A", disk_format="atarist.720; rm")
 
     @patch("atari_greaseweazle.client.subprocess.Popen")
     @patch("atari_greaseweazle.client.subprocess.run")
@@ -100,10 +178,10 @@ class GreaseweazleTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess(["gw", "info"], 0, "Device ready")
         popen.return_value = _Process("Writing c=0-0:h=0-0\nT0.0: Written\n")
         with tempfile.TemporaryDirectory() as temporary:
-            image = Path(temporary) / "game.adf"
+            image = Path(temporary) / "game.st"
             image.write_bytes(b"disk")
             with self.assertRaisesRegex(GreaseweazleError, "without confirming"):
-                GreaseweazleClient("/usr/bin/gw").write(image, "A")
+                GreaseweazleClient("/usr/bin/gw").write(image, "A", disk_format="atarist.720")
 
     @patch("atari_greaseweazle.client.subprocess.Popen")
     @patch("atari_greaseweazle.client.subprocess.run")
@@ -112,7 +190,7 @@ class GreaseweazleTests(unittest.TestCase):
         process = _Process("Writing c=0-79:h=0-1\nT0.0: Written and verified\n")
         popen.return_value = process
         with tempfile.TemporaryDirectory() as temporary:
-            image = Path(temporary) / "game.adf"
+            image = Path(temporary) / "game.st"
             image.write_bytes(b"disk")
 
             reports = 0
@@ -124,16 +202,16 @@ class GreaseweazleTests(unittest.TestCase):
                     raise RuntimeError("cancel requested")
 
             with self.assertRaisesRegex(RuntimeError, "cancel requested"):
-                GreaseweazleClient("/usr/bin/gw").write(image, "A", cancel)
+                GreaseweazleClient("/usr/bin/gw").write(image, "A", cancel, disk_format="atarist.720")
 
         self.assertTrue(process.terminated)
 
     def test_drive_identifier_cannot_be_used_as_command_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            image = Path(temporary) / "game.adf"
+            image = Path(temporary) / "game.st"
             image.write_bytes(b"disk")
             with self.assertRaisesRegex(GreaseweazleError, "Choose Greaseweazle drive"):
-                GreaseweazleClient("/usr/bin/gw").write(image, "A; eject")
+                GreaseweazleClient("/usr/bin/gw").write(image, "A; eject", disk_format="atarist.720")
 
     def test_probe_explains_missing_command(self) -> None:
         # Isolate PATH discovery so this remains valid on a Greaseweazle machine.
@@ -142,16 +220,16 @@ class GreaseweazleTests(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertIn("not installed", result.detail)
 
-    @unittest.skipIf(Flask is None, "Flask is available in the application environment")
+    @unittest.skipIf(Flask is None, "Flask and the ported service are available in the application environment")
     @patch("app.routes.desktop.GreaseweazleClient.probe")
     def test_desktop_status_exposes_drive_and_verification_policy(self, probe) -> None:
         probe.return_value = ProbeResult(True, "/usr/bin/gw", "Device ready")
         headers = {"X-Atari-Desktop-Token": "d" * 32}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            image_path = root / "physical.adf"
+            image_path = root / "physical.st"
             image_path.write_bytes(b"disk")
-            session = ImageSession("image-id", "physical.adf", "ofs", image_path)
+            session = ImageSession("image-id", "physical.st", "gemdos", image_path)
             service = Mock(work_dir=root)
             service.get.return_value = session
             service.summary.return_value = {"hardDisk": False}
@@ -170,10 +248,10 @@ class GreaseweazleTests(unittest.TestCase):
         self.assertTrue(status["media"]["automaticVerification"])
         self.assertEqual([item["id"] for item in status["drives"]], ["A", "B", "0", "1", "2", "3"])
 
-    @unittest.skipIf(Flask is None, "Flask is available in the application environment")
+    @unittest.skipIf(Flask is None, "Flask and the ported service are available in the application environment")
     @patch("app.routes.desktop.GreaseweazleClient.write")
     def test_desktop_write_uses_snapshot_and_reports_result(self, write) -> None:
-        write.side_effect = lambda path, drive, progress: WriteResult(
+        write.side_effect = lambda path, drive, progress, **_options: WriteResult(
             drive=drive,
             image=Path(path).name,
             verified=True,
@@ -184,9 +262,9 @@ class GreaseweazleTests(unittest.TestCase):
         headers = {"X-Atari-Desktop-Token": "d" * 32}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            image_path = root / "physical.adf"
+            image_path = root / "physical.st"
             image_path.write_bytes(b"disk")
-            session = ImageSession("image-id", "physical.adf", "ofs", image_path)
+            session = ImageSession("image-id", "physical.st", "gemdos", image_path)
             service = Mock(work_dir=root)
             service.get.return_value = session
             service.summary.return_value = {"hardDisk": False}
@@ -206,8 +284,6 @@ class GreaseweazleTests(unittest.TestCase):
         written_path = Path(write.call_args.args[0])
         self.assertTrue(written_path.name.startswith("atari-floppy-"))
         self.assertFalse(written_path.exists())
-
-
 
 
 class GreaseweazleReadTests(unittest.TestCase):
@@ -235,18 +311,28 @@ class GreaseweazleReadTests(unittest.TestCase):
         )
         progress = Mock()
         with tempfile.TemporaryDirectory() as folder:
-            target = Path(folder) / "capture.adf"
-            result = self._client().read(target, "A", progress)
+            target = Path(folder) / "capture.st"
+            result = self._client().read(target, "A", progress, disk_format="atarist.720")
         self.assertIsInstance(result, ReadResult)
         self.assertEqual(result.drive, "A")
-        self.assertEqual(result.image, "capture.adf")
+        self.assertEqual(result.image, "capture.st")
         self.assertEqual(result.tracks_read, 4)
         self.assertEqual(result.size, 204_800)
         self.assertTrue(progress.called)
+        self.assertIn("--format=atarist.720", popen.call_args.args[0])
+
+    @patch("atari_greaseweazle.client.subprocess.run")
+    def test_a_sector_capture_without_a_format_is_refused_and_flux_suggested(self, run) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            for suffix in (".st", ".msa"):
+                with self.subTest(suffix=suffix):
+                    with self.assertRaisesRegex(GreaseweazleError, "needs its geometry.*SCP or HFE"):
+                        self._client().read(Path(folder) / f"capture{suffix}", "A")
+        run.assert_not_called()
 
     @patch("atari_greaseweazle.client.subprocess.Popen")
     @patch("atari_greaseweazle.client.subprocess.run")
-    def test_a_flux_destination_is_accepted(self, run, popen) -> None:
+    def test_a_flux_destination_is_accepted_without_a_format(self, run, popen) -> None:
         run.return_value = subprocess.CompletedProcess(["gw", "info"], 0, "Device: Greaseweazle")
         popen.side_effect = self._capture("Reading c=0-0:h=0-0\nT0.0: Read\n", b"SCP" + bytes(64))
         with tempfile.TemporaryDirectory() as folder:
@@ -254,6 +340,7 @@ class GreaseweazleReadTests(unittest.TestCase):
             result = self._client().read(target, "0")
         self.assertEqual(result.image, "capture.scp")
         self.assertEqual(result.size, 67)
+        self.assertFalse(any(item.startswith("--format") for item in popen.call_args.args[0]))
 
     @patch("atari_greaseweazle.client.subprocess.Popen")
     @patch("atari_greaseweazle.client.subprocess.run")
@@ -293,9 +380,9 @@ class GreaseweazleReadTests(unittest.TestCase):
             "Reading c=0-0:h=0-0\nT0.0: Read\nERROR: no disk\n", bytes(512), return_code=1,
         )
         with tempfile.TemporaryDirectory() as folder:
-            target = Path(folder) / "capture.adf"
+            target = Path(folder) / "capture.st"
             with self.assertRaisesRegex(GreaseweazleError, "could not read the physical disk"):
-                self._client().read(target, "A")
+                self._client().read(target, "A", disk_format="atarist.720")
             self.assertFalse(target.exists())
 
     @patch("atari_greaseweazle.client.subprocess.Popen")
@@ -305,7 +392,7 @@ class GreaseweazleReadTests(unittest.TestCase):
         popen.side_effect = self._capture("No disk detected\n", None)
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(GreaseweazleError, "without producing an image"):
-                self._client().read(Path(folder) / "capture.adf", "A")
+                self._client().read(Path(folder) / "capture.hfe", "A")
 
     @patch("atari_greaseweazle.client.subprocess.Popen")
     @patch("atari_greaseweazle.client.subprocess.run")
@@ -314,18 +401,20 @@ class GreaseweazleReadTests(unittest.TestCase):
         popen.side_effect = self._capture("T0.0: Read\n", b"")
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(GreaseweazleError, "without producing an image"):
-                self._client().read(Path(folder) / "capture.adf", "A")
+                self._client().read(Path(folder) / "capture.hfe", "A")
 
     def test_an_unsupported_destination_suffix_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(GreaseweazleError, "not a floppy image"):
                 self._client().read(Path(folder) / "capture.txt", "A")
+            with self.assertRaisesRegex(GreaseweazleError, "SCP or HFE"):
+                self._client().read(Path(folder) / "capture.stx", "A")
 
     @patch("atari_greaseweazle.client.subprocess.run")
     def test_an_invalid_drive_is_refused_before_any_device_access(self, run) -> None:
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(GreaseweazleError, "drive A, B, 0, 1, 2 or 3"):
-                self._client().read(Path(folder) / "capture.adf", "Z")
+                self._client().read(Path(folder) / "capture.hfe", "Z")
         run.assert_not_called()
 
     @patch("atari_greaseweazle.client.shutil.which", return_value=None)
@@ -334,7 +423,7 @@ class GreaseweazleReadTests(unittest.TestCase):
         client = GreaseweazleClient()
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(GreaseweazleError, "gw command is not installed"):
-                client.read(Path(folder) / "capture.adf", "A")
+                client.read(Path(folder) / "capture.hfe", "A")
 
 
 class GreaseweazleSharedStreamTests(unittest.TestCase):
@@ -352,11 +441,7 @@ class GreaseweazleSharedStreamTests(unittest.TestCase):
                 self.assertNotIn("subprocess.Popen", source)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-@unittest.skipIf(Flask is None, "Flask is installed in the production image")
+@unittest.skipIf(Flask is None, "Flask and the ported service are installed in the production image")
 class PhysicalReadRouteTests(unittest.TestCase):
     """The desktop endpoint that turns a physical disk into a working image."""
 
@@ -370,7 +455,7 @@ class PhysicalReadRouteTests(unittest.TestCase):
         self.service.safe_filename = staticmethod(lambda value: value)
         self.session = Mock()
         self.service.create_from_path.return_value = self.session
-        self.service.summary.return_value = {"id": "a" * 32, "kind": "ofs"}
+        self.service.summary.return_value = {"id": "a" * 32, "kind": "gemdos"}
         app = Flask(__name__)
         app.register_blueprint(
             create_desktop_blueprint(self.service, OperationRegistry(), Mock())
@@ -385,7 +470,7 @@ class PhysicalReadRouteTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _read_result(self, name="capture.adf"):
+    def _read_result(self, name="capture.st"):
         return ReadResult(drive="A", image=name, tracks_read=80, size=204_800, output_tail=())
 
     def test_a_capture_is_opened_as_a_new_image(self) -> None:
@@ -393,7 +478,7 @@ class PhysicalReadRouteTests(unittest.TestCase):
             client.return_value.read.return_value = self._read_result()
             response = self.client.post(
                 "/api/desktop/physical-floppy/read",
-                json={"drive": "A", "format": "adf", "name": "capture"},
+                json={"drive": "A", "format": "st", "geometry": "ds-80t-9s", "name": "capture"},
             )
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
@@ -402,26 +487,28 @@ class PhysicalReadRouteTests(unittest.TestCase):
         self.service.summary.assert_called_once_with(self.session)
 
     def test_the_requested_capture_format_selects_the_destination_suffix(self) -> None:
-        for requested, suffix in (("scp", ".scp"), ("img", ".img"), ("ipf", ".ipf"), ("hfe", ".hfe")):
+        for requested, suffix in (("scp", ".scp"), ("msa", ".msa"), ("ipf", ".ipf"), ("hfe", ".hfe")):
             with self.subTest(format=requested):
                 self.service.create_from_path.reset_mock()
                 with patch("app.routes.desktop.GreaseweazleClient") as client:
                     client.return_value.read.return_value = self._read_result(f"capture{suffix}")
                     response = self.client.post(
                         "/api/desktop/physical-floppy/read",
-                        json={"drive": "A", "format": requested},
+                        json={"drive": "A", "format": requested, "geometry": "ds-80t-9s"},
                     )
                 self.assertEqual(response.status_code, 200)
                 destination = client.return_value.read.call_args[0][0]
                 self.assertEqual(Path(destination).suffix, suffix)
 
     def test_an_unsupported_capture_format_is_refused(self) -> None:
-        response = self.client.post(
-            "/api/desktop/physical-floppy/read",
-            json={"drive": "A", "format": "exe"},
-        )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Choose a capture format", response.get_json()["error"])
+        for requested in ("exe", "stx", "dim"):
+            with self.subTest(format=requested):
+                response = self.client.post(
+                    "/api/desktop/physical-floppy/read",
+                    json={"drive": "A", "format": requested},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("Choose a capture format", response.get_json()["error"])
         self.service.create_from_path.assert_not_called()
 
     def test_a_hardware_failure_is_reported_and_opens_nothing(self) -> None:
@@ -429,7 +516,7 @@ class PhysicalReadRouteTests(unittest.TestCase):
             client.return_value.read.side_effect = GreaseweazleError("No disk in drive A.")
             response = self.client.post(
                 "/api/desktop/physical-floppy/read",
-                json={"drive": "A", "format": "adf"},
+                json={"drive": "A", "format": "st", "geometry": "ds-80t-9s"},
             )
         self.assertEqual(response.status_code, 400)
         self.assertIn("No disk in drive A.", response.get_json()["error"])
@@ -440,7 +527,11 @@ class PhysicalReadRouteTests(unittest.TestCase):
             client.return_value.read.return_value = self._read_result()
             self.client.post(
                 "/api/desktop/physical-floppy/read",
-                json={"drive": "A", "format": "adf"},
+                json={"drive": "A", "format": "st", "geometry": "ds-80t-9s"},
             )
         leftovers = list(Path(self.temporary.name).glob("gw-read-*"))
         self.assertEqual(leftovers, [], "the capture scratch directory must be removed")
+
+
+if __name__ == "__main__":
+    unittest.main()

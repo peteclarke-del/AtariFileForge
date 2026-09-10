@@ -3,13 +3,13 @@
 An IPF is a preservation image made by the Software Preservation Society. It
 records what was physically on the disk: the bit cells, their timing, and the
 deliberate irregularities that copy protection depends on. That is why a
-protected Atari disk survives as an IPF and not as an ADF, and why an IPF is
-worth keeping even after you have extracted the files from it.
+protected ST disk survives as an IPF and not as a plain `.st`, and why an IPF
+is worth keeping even after you have extracted the files from it.
 
-Atari File Forge can open an IPF and read the ordinary GEMDOS sectors out of
-it. It cannot invent an ADF that holds the parts an ADF has no way to express;
-where a track is not a standard GEMDOS track, the workbench says so rather
-than filling the gap.
+Atari File Forge can open an IPF and read the ordinary sectors out of it. It
+cannot invent a sector image that holds the parts a sector image has no way
+to express; where a track is not a standard track, the workbench says so
+rather than filling the gap.
 
 ## Why the library is not included
 
@@ -59,11 +59,16 @@ same search order applies.
 ## What opening an IPF does
 
 1. The library decodes the capture into each track's MFM bit cells.
-2. Atari File Forge finds every sector's sync mark in those cells, splits the
-   odd and even bit planes the format interleaves, and checks the header and
-   data checksums.
-3. A sector that passes both checks is written into a working ADF. One that
-   fails is reported and its place left as zeroes.
+2. Atari File Forge reads those cells the way the ST's WD1772 controller
+   does: it finds the three `A1` sync bytes whose missing clock bit marks an
+   address mark, reads the ID field naming the cylinder, head, sector and
+   size, checks its CRC-16, then finds the data mark that follows and checks
+   the CRC over the sector's bytes.
+3. A sector that passes both checks is written into a working `.st`. One that
+   fails is reported and its place left as zeroes. The layout is taken from
+   the sectors themselves: the highest sector number found on any track is
+   the count per track, which copes with nine-, ten- and eleven-sector disks
+   without being told which.
 4. The pane opens on the working image, and the original capture is left
    untouched beside it.
 
@@ -75,8 +80,9 @@ often does not, and the difference is the protection itself.
 
 - It does not write IPF. The format is a preservation record of a physical
   read; the workbench has nothing to preserve a reading of.
-- It does not reproduce weak bits, long tracks or non-standard sector layouts
-  in the working image. Those survive only in the capture.
+- It does not reproduce fuzzy bits, long tracks, non-standard sector sizes or
+  out-of-place sector IDs in the working image. Those survive only in the
+  capture, and a 256- or 1024-byte sector is reported rather than placed.
 - It does not fall back to guessing. If no standard sector is recovered, the
   open is refused with the reason rather than handing you an empty disk.
 
