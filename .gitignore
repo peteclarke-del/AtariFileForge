@@ -8,10 +8,11 @@
 /dist/
 /release/
 
-# Firmware you supply. Kickstart ROMs, Workbench disks and the CD32 and CDTV
-# extended ROMs are the copyright of their owners and are not redistributable,
-# so nothing here is ever committed. The directory's own README is, because it
-# explains what belongs here and where else the application will look.
+# Firmware and system software you supply. Atari TOS ROMs, the hard-disk
+# drivers a drive is prepared with, and any TOS or utility disks are the
+# copyright of their owners and are not redistributable, so nothing here is
+# ever committed. The directory's own README is, because it explains what
+# belongs here and where else the application will look.
 /firmware/*
 !/firmware/README.md
 # EmuTOS is GPL and redistributable, so the bundled images are committed.

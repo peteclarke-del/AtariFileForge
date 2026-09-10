@@ -96,6 +96,13 @@ called usable is `0.1.0`; `0.0.0` is the development baseline.
       registers the Atari actually uses.
 - [ ] Recognise the picture, music and resource formats the ST range uses well
       enough to preview them.
+- [ ] Draw a filename through the Atari ST character set. The ST font has a
+      printable glyph at every code below 32, and real disks use them: the
+      LucasFilm sample carries a file whose extension is the two bytes 0x0E and
+      0x0F, which the ST drew as musical notes and a browser draws as nothing
+      at all. Names are decoded as Latin-1 so that writing one back produces
+      the identical bytes, which is right and must not change. The mapping
+      belongs at the point of display only.
 
 ## 8. Interface and documentation
 
