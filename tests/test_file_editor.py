@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import struct
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from app.file_editor import (
     save_editor_text_as,
     search_image_files,
     update_file_properties,
+    _program_body,
     verify_basic_source,
     write_file_range,
 )
@@ -621,6 +623,54 @@ class FileEditorTests(unittest.TestCase):
             metadata = service.file_metadata(session, "NOTES.TXT")
             self.assertFalse(metadata["access"] & READ_ONLY_BIT, metadata)
             self.assertEqual(service.read_file(session, "NOTES.TXT"), b"UNCHANGED")
+
+
+class ProgramDisassemblyTests(unittest.TestCase):
+    """Where a listing of an Atari program begins."""
+
+    @staticmethod
+    def _program(text: bytes, symbols: bytes = b"") -> bytes:
+        header = struct.pack(
+            ">HIIIIIIH", 0x601A, len(text), 0, 0, len(symbols), 0, 0, 0
+        )
+        return header + text + symbols
+
+    def test_a_listing_starts_at_the_code_and_not_at_the_header(self) -> None:
+        """The header is sizes, and decoding sizes as instructions is noise.
+
+        A .PRG begins with 28 bytes that tell TOS how to load it. Read as
+        machine code they disassemble into a branch and half a dozen ORI.B
+        instructions, so every Atari program opened in the editor started with
+        seven lines that meant nothing.
+        """
+        program = self._program(b"\x4e\x71" * 8)
+        header, start, length = _program_body(program, 0, None)
+        self.assertEqual(start, 28)
+        self.assertEqual(length, 16)
+        self.assertEqual(header["text"], 16)
+
+    def test_a_symbol_table_is_not_disassembled_as_code(self) -> None:
+        program = self._program(b"\x4e\x71" * 4, symbols=b"SYMBOLDATA" * 4)
+        _header, start, length = _program_body(program, 0, None)
+        self.assertEqual((start, length), (28, 8))
+
+    def test_a_caller_asking_for_a_range_gets_that_range(self) -> None:
+        """Reading the header deliberately has to stay possible."""
+        program = self._program(b"\x4e\x71" * 8)
+        self.assertEqual(_program_body(program, 0, 28)[1:], (0, 28))
+        self.assertEqual(_program_body(program, 2, None)[1:], (2, None))
+
+    def test_a_file_that_is_not_a_program_is_left_where_it_was(self) -> None:
+        header, start, length = _program_body(b"not a program at all" * 8, 0, None)
+        self.assertIsNone(header)
+        self.assertEqual((start, length), (0, None))
+
+    def test_a_truncated_program_is_not_treated_as_one(self) -> None:
+        """The sizes have to account for the bytes that are there."""
+        claimed = struct.pack(">HIIIIIIH", 0x601A, 1_000_000, 0, 0, 0, 0, 0, 0)
+        header, start, _length = _program_body(claimed + b"\x4e\x71", 0, None)
+        self.assertIsNone(header)
+        self.assertEqual(start, 0)
 
 
 if __name__ == "__main__":

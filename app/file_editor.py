@@ -17,6 +17,7 @@ from .content_kind import (
 from .disk_service import DiskError, DiskService, ImageSession
 from .hex_service import MAX_HEX_READ, _decode_changes, _search_pattern
 from .operations import OperationCancelled
+from .disk_identity import program_header
 from .rom_workbench import RomWorkbenchError, disassemble
 from . import atari_paths
 
@@ -542,10 +543,10 @@ def _annotate_file_context(
 ) -> None:
     """Add readable-text notes, and mark an entry point when one is known.
 
-    An GEMDOS load file is relocatable and its catalogue entry records no
+    A GEMDOS program is relocatable and its directory entry records no
     address, so ``entry`` is normally ``None``. It is passed only where the
-    caller has proved one, such as a hunk whose first code block starts at a
-    known offset.
+    caller has proved one, such as a program whose header gives the size of
+    the text segment the code begins at.
     """
     rows = report.get("rows", [])
     if not rows:
@@ -667,11 +668,12 @@ def disassemble_file_data(
     if not data:
         raise DiskError("An empty file has no machine code to disassemble.")
     architecture, reason = _architecture(session, architecture)
-    # An GEMDOS binary is relocatable: the hunk loader places it wherever
-    # there is free RAM, so there is no base address to assume and nothing in
-    # the catalogue records one. Origin defaults to zero, which is what a
-    # relative listing wants, and the caller can move it deliberately.
+    # A GEMDOS program is relocatable: TOS loads it wherever there is free
+    # RAM, so there is no base address to assume and the directory records
+    # none. Origin defaults to zero, which is what a relative listing wants,
+    # and the caller can move it deliberately.
     selected_origin = int(origin) if origin is not None else 0
+    header, start, length = _program_body(data, start, length)
     available = max(1, len(data) - start)
     requested_length = min(length or available, available, MAX_DISASSEMBLY_FILE)
     entries: list[int] = []
@@ -700,8 +702,34 @@ def disassemble_file_data(
         "architectureReason": reason,
         "strings": strings,
         "project": project or {},
+        "programHeader": header,
         "limited": size > start + requested_length,
     }
+
+
+#: What a GEMDOS program header occupies before the code begins.
+PROGRAM_TEXT_OFFSET = 28
+
+
+def _program_body(data: bytes, start: int, length: int | None):
+    """Where the machine code in a GEMDOS program actually starts.
+
+    The first 28 bytes of a ``.PRG`` are its header: the ``0x601A`` marker
+    and the sizes TOS needs to load it. Disassembling from zero decodes those
+    sizes as instructions, so a listing opened on any Atari program began with
+    seven lines of nonsense before reaching the first real instruction.
+
+    The symbol table at the end is not code either, so the length is the text
+    segment. A caller that asks for a particular range gets exactly that
+    range, because somebody reading the header deliberately is entitled to.
+    """
+    if start or length is not None:
+        return None, start, length
+    header = program_header(data)
+    if header is None:
+        return None, start, length
+    text = int(header["text"])
+    return header, PROGRAM_TEXT_OFFSET, text or None
 
 
 def _project_data_rows(
