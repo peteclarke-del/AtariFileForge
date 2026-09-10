@@ -39,13 +39,15 @@ Requires:       shared-mime-info
 Requires:       desktop-file-utils
 
 %description
-Browse, edit, validate and convert Atari, Atari 600, Atari 4000 and TOS
-disk, dms, ROM and hard-drive images from a native GTK application.
+Browse, edit, validate and convert the floppy, hard-disk and ROM images of
+the Atari ST, Mega ST, STE, Mega STE, TT030 and Falcon030 from a native GTK
+application.
 
-Supports OFS, FFS and GEMDOS images, HDF banks, Hardfile HDA and GEO pairs,
-DMS archives, HFE and SCP flux containers, expansion ROMs and Kickstart ROMs. With the
-official Greaseweazle tools, or a host with a real floppy controller, disks can
-also be read from and written to physical media.
+Supports ST, MSA, DIM and STX floppy images, AHDI-partitioned ACSI, SCSI and
+IDE hard-disk images, bare GEMDOS volumes, HFE and SCP flux containers, IPF
+captures, and TOS and cartridge ROMs. With the official Greaseweazle tools, or
+a host with a real floppy controller, disks can also be read from and written
+to physical media.
 
 %prep
 %setup -q
@@ -104,5 +106,5 @@ fi
 %{_mandir}/man1/%{appname}.1.gz
 
 %changelog
-* Fri Aug 28 2026 Atari File Forge contributors <peteclarke-del@users.noreply.github.com> - @VERSION@-@RELEASE@
+* Thu Sep 10 2026 Atari File Forge contributors <peteclarke-del@users.noreply.github.com> - @VERSION@-@RELEASE@
 - Packaged from the shared Linux build tree used for the Debian package.

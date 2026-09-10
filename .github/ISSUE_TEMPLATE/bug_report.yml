@@ -36,7 +36,7 @@ body:
     attributes:
       label: Media and target profile
       description: Include format, geometry where known, and selected hardware profile.
-      placeholder: Hardfile HDA and GEO, Master Hardfile profile
+      placeholder: 720K double-sided ST image, Mega STE with TOS 2.06 profile
   - type: textarea
     id: steps
     attributes:
