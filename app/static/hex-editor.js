@@ -107,7 +107,6 @@ window.AtariHexEditor = (() => {
         </div></details>
       </nav>
       <div class="hex-toolbar">
-        <label ${scope === "file" ? "hidden" : ""}>Component<select class="hex-target"><option value="image">${image.name}</option></select></label>
         <label>Go to offset<input class="hex-goto" spellcheck="false" placeholder="00000000"></label>
         <button type="button" class="button small hex-go">Go</button>
         <span class="hex-separator"></span>
@@ -164,7 +163,6 @@ window.AtariHexEditor = (() => {
     host.append(overlay);
     const editor = overlay.querySelector(".hex-editor");
     const state = {
-      target: "image",
       offset: Math.max(0, Number(initialOffset) || 0),
       pageSize,
       size: image.size || 0,
@@ -560,7 +558,7 @@ window.AtariHexEditor = (() => {
       $(".hex-values dl").innerHTML = valuesMarkup();
       $(".hex-position").textContent = `Page &${hex(state.offset)} · cursor &${hex(state.active)}`;
       $(".hex-image-size").textContent = `${state.size.toLocaleString()} bytes · &${hex(state.size)}`;
-      $(".hex-target-name").textContent = $(".hex-target").selectedOptions[0]?.textContent || image.name;
+      $(".hex-target-name").textContent = image.name;
       overlay.querySelectorAll(".hex-mode button").forEach(button => button.classList.toggle("active", button.dataset.mode === state.mode));
       $(".hex-previous").disabled = state.offset <= 0;
       $(".hex-first").disabled = state.offset <= 0;
@@ -574,7 +572,7 @@ window.AtariHexEditor = (() => {
       $(".hex-loading").hidden = false;
       try {
         const aligned = Math.floor(clamp(offset, 0, Math.max(0, state.size - 1)) / state.pageSize) * state.pageSize;
-        const data = await request(endpointUrl("", { offset: aligned, length: state.pageSize, target: state.target }));
+        const data = await request(endpointUrl("", { offset: aligned, length: state.pageSize }));
         if (!resetVersion && state.version && state.changes.size && data.version !== state.version) {
           throw new Error("The image changed outside the hex editor. Close it and reopen before continuing.");
         }
@@ -638,7 +636,6 @@ window.AtariHexEditor = (() => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            target: state.target,
             ...context,
             version: state.version,
             confirmed: true,
@@ -685,32 +682,6 @@ window.AtariHexEditor = (() => {
       resolveClosed();
     }
 
-    async function changeTarget(target) {
-      if (target === state.target) return;
-      if (state.changes.size) {
-        const choice = await decision({
-          title: "Discard staged changes?",
-          message: "Changing image components clears the raw edits currently staged in this editor.",
-          actions: [
-            { value: "cancel", label: "Cancel", className: "ghost" },
-            { value: "discard", label: "Discard and switch", className: "danger" },
-          ],
-        });
-        if (choice !== "discard") {
-          $(".hex-target").value = state.target;
-          return;
-        }
-      }
-      state.target = target;
-      state.offset = state.active = state.anchor = 0;
-      state.version = null;
-      state.bytes.clear();
-      state.changes.clear();
-      state.originals.clear();
-      state.history.length = state.future.length = 0;
-      await loadPage(0, { resetVersion: true });
-    }
-
     function searchBytes(selector) {
       const value = $(selector).value;
       return value ? parsePaste(value, $(".hex-search-mode").value === "text" ? "ascii" : "hex") : [];
@@ -731,7 +702,6 @@ window.AtariHexEditor = (() => {
         start,
         direction,
         wrap: $(".hex-search-wrap").checked,
-        target: state.target,
       };
       $(".hex-search-status").textContent = "Searching…";
       try {
@@ -802,7 +772,7 @@ window.AtariHexEditor = (() => {
       for (let offset = start; offset <= end;) {
         if (state.bytes.has(offset)) { offset += 1; continue; }
         const length = Math.min(4096, end - offset + 1);
-        const data = await request(endpointUrl("", { offset, length, target: state.target }));
+        const data = await request(endpointUrl("", { offset, length }));
         if (state.version && data.version !== state.version) {
           throw new Error("The image changed outside the hex editor. Close it and reopen before continuing.");
         }
@@ -822,7 +792,7 @@ window.AtariHexEditor = (() => {
         $(".hex-comparison-name").textContent = `Comparing ${file.name}…`;
         try {
           const form = new FormData(); form.append("file", file);
-          const comparison = await request(endpointUrl("/compare", { target: state.target }), { method: "POST", body: form });
+          const comparison = await request(endpointUrl("/compare"), { method: "POST", body: form });
           if (state.version && comparison.version && comparison.version !== state.version) throw new Error("The image changed outside the hex editor. Close it and reopen before continuing.");
           state.comparison = { ...comparison, name: file.name, size: comparison.candidateSize, sizeMismatch: comparison.sourceSize !== comparison.candidateSize };
           render();
@@ -958,7 +928,6 @@ window.AtariHexEditor = (() => {
     $(".hex-next").onclick = () => goTo(Math.min(state.size - 1, state.offset + state.pageSize));
     $(".hex-last").onclick = () => goTo(Math.max(0, state.size - state.pageSize));
     $(".hex-page-size").onchange = async event => { state.pageSize = Number(event.target.value); await loadPage(state.active); };
-    $(".hex-target").onchange = event => changeTarget(event.target.value);
     $(".hex-find-next").onclick = () => find("forward");
     $(".hex-find-previous").onclick = () => find("backward");
     $(".hex-replace-next").onclick = replaceNext;
