@@ -60,25 +60,28 @@ called usable is `0.1.0`; `0.0.0` is the development baseline.
 
 ## 4. Preparing a drive and installing software
 
-- [ ] Prepare a drive end to end: partition, format, write the boot sector and
+- [x] Prepare a drive end to end: partition, format, write the boot sector and
       report what will boot it.
-- [ ] Install an operator-supplied hard-disk driver into the `AUTO` folder and
-      the boot sector, recording exactly what was installed.
-- [ ] Offer driverless booting under the bundled EmuTOS as the default, since
+- [x] Install an operator-supplied hard-disk driver into the `AUTO` folder and
+      the boot sector, recording exactly what was installed. Where a driver's
+      distribution carries no 512-byte root-sector loader, and most do not
+      because the loader lives inside the driver's own Atari installer, the
+      root sector is left alone and the result says so.
+- [x] Offer driverless booting under the bundled EmuTOS as the default, since
       it needs no third-party file.
-- [ ] Stage a floppy onto a drive, install a staged title into its own folder,
+- [x] Stage a floppy onto a drive, install a staged title into its own folder,
       and run a title's own installer under the emulator.
-- [ ] Write and merge `DESKTOP.INF` entries so an installed title appears on
+- [x] Write and merge `DESKTOP.INF` entries so an installed title appears on
       the desktop.
 
 ## 5. Analysis, reports and deployment
 
-- [ ] Report Atari findings: `AUTO` folder order, desktop configuration,
+- [x] Report Atari findings: `AUTO` folder order, desktop configuration,
       program headers and their flags, bootable disks, name conflicts and the
       TOS limits that apply to the image.
-- [ ] Generate the saved-package README from the Atari facts, with attributes
+- [x] Generate the saved-package README from the Atari facts, with attributes
       and datestamps instead of the previous platform's metadata.
-- [ ] Produce deployment packages for a Gotek, an SD card, a CF card, a host
+- [x] Produce deployment packages for a Gotek, an SD card, a CF card, a host
       folder and a real ACSI drive, each with its own verification steps.
 
 ## 6. Online library and identification
@@ -90,7 +93,7 @@ called usable is `0.1.0`; `0.0.0` is the development baseline.
 
 ## 7. Editors and languages
 
-- [ ] Read and list GFA BASIC, STOS BASIC and Atari ST BASIC, and write back
+- [x] Read and list GFA BASIC, STOS BASIC and Atari ST BASIC, and write back
       the dialects that round-trip exactly.
 - [x] Annotate disassembly with the trap calls, system variables and hardware
       registers the Atari actually uses.
@@ -108,10 +111,10 @@ called usable is `0.1.0`; `0.0.0` is the development baseline.
 
 - [x] Give the application an Atari theme and icon without changing the layout
       or component structure.
-- [ ] Port the workbench frontend to the Atari media, machines and columns.
-- [ ] Rewrite the in-application handbook and recapture every screenshot from
+- [x] Port the workbench frontend to the Atari media, machines and columns.
+- [x] Rewrite the in-application handbook and recapture every screenshot from
       a running build.
-- [ ] Rewrite the main handbook and the remaining guides.
+- [x] Rewrite the main handbook and the remaining guides.
 
 ## 9. Release engineering
 
