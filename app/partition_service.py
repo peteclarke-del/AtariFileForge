@@ -61,8 +61,21 @@ class PartitionMixin:
                 reader.close()
 
     def list_partitions(self, session: ImageSession) -> list[dict]:
-        """Return every partition the drive declares, in table order."""
-        return list(self.partition_table(session)["partitions"])
+        """Return every partition the drive declares, in table order.
+
+        Each row is the engine's own description of the partition with one
+        addition: ``format`` names the filing system a report should print.
+        A GEMDOS partition reached through a table is FAT16 whatever its
+        cluster count, because that is what the driver's own parameter block
+        declares and what TOS obeys; a partition of another kind reports its
+        three-letter identifier instead.
+        """
+        rows = []
+        for partition in self.partition_table(session)["partitions"]:
+            row = dict(partition)
+            row["format"] = "FAT16" if partition.get("gemdos") else str(partition.get("id") or "")
+            rows.append(row)
+        return rows
 
     def selected_partition(self, session: ImageSession) -> int:
         """Return the partition index in use, defaulting to the first one.
