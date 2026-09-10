@@ -1,15 +1,16 @@
-"""The ``adisc`` command line and the bulk-copy machinery behind it.
+"""The ``python -m atarinut`` command line and the bulk-copy machinery behind it.
 
 Two audiences share this module. ``main`` is the command line a user or a
 script drives. The underscore-prefixed helpers below it are the bulk-copy
 implementation, which Atari File Forge borrows through one adapter module so
-that a directory copy preserves protection bits, comments and datestamps
-without the workbench re-deriving GEMDOS allocation policy.
+that a directory copy preserves attribute bits and datestamps without the
+workbench re-deriving GEMDOS allocation policy.
 
 Storage order matters. Writing a tree in the order the source stored it keeps
-the destination's data blocks close to their file headers, which is the
-difference between a hard-drive install that loads at full speed on real
-hardware and one that seeks for every file.
+the destination's clusters in the same sequence, which is the difference
+between a hard-disk install that loads at full speed on real hardware and one
+that seeks for every file. On a FAT volume storage order is simply cluster
+order.
 """
 
 from __future__ import annotations
@@ -27,29 +28,22 @@ from ..file import (
     AtariMeta,
     format_access_text,
     parse_access_text,
-    parse_protection_value,
 )
-from ..file.filetypes import format_filetype, parse_filetype
+from ..file.filetypes import classify, format_filetype
 from ..filesystem import (
-    RigidDiskMount,
+    AhdiMount,
     create_filesystem,
+    create_partitioned_image,
     format_volume,
     identify,
     list_filesystems,
+    named_geometry,
+    read_partition_table,
     reader_for,
-    write_geometry,
-    write_rigid_disk,
+    volume_geometry,
 )
+from ..filesystem.blocks import NAMED_GEOMETRIES, SECTOR_SIZE
 from ..filesystem.gemdos import join_path, split_path
-from ..filesystem.blocks import (
-    BLOCK_SIZE,
-    DD_BLOCKS,
-    DOS_TYPES,
-    FORMAT_LABELS,
-    HD_BLOCKS,
-    Geometry,
-)
-from ..kickfs.kickfs import Kickstart
 from .mount import mount_image, resolve_mount, split_compound
 
 
@@ -60,9 +54,9 @@ _NUMBER_RUN = re.compile(r"(\d+)")
 
 
 def _natural_name_key(name: str):
-    """Sort key matching the catalogue order the shell's ``List`` presents.
+    """Sort key matching the order the Desktop presents names in.
 
-    Digit runs compare numerically so ``Part2`` sorts before ``Part10``, and
+    Digit runs compare numerically so ``PART2`` sorts before ``PART10``, and
     letters compare case-insensitively because GEMDOS names are.
     """
     parts = _NUMBER_RUN.split(str(name))
@@ -76,9 +70,9 @@ def _in_global_storage_order(source_mount, items: list[dict]) -> list[dict]:
     """Order copy descriptors the way the source volume stores them.
 
     Directories keep their relative order and always precede their contents;
-    files are ordered by the block their header occupies. Reproducing the
-    source's physical order in the destination is what keeps a copied tree
-    compact instead of interleaved.
+    files are ordered by their first cluster. Reproducing the source's
+    physical order in the destination is what keeps a copied tree compact
+    instead of interleaved.
     """
     def key(item: dict):
         if item.get("kind") == "mkdir":
@@ -92,20 +86,14 @@ def _in_global_storage_order(source_mount, items: list[dict]) -> list[dict]:
 # Copy descriptors
 # ---------------------------------------------------------------------------
 def _file_item(source_mount, source_path: str, destination: str) -> dict:
-    """Build one copy descriptor, carrying the source's catalogue metadata."""
+    """Build one copy descriptor, carrying the source's directory metadata."""
     meta = (
         source_mount.atari_meta(source_path)
         if hasattr(source_mount, "atari_meta")
         else AtariMeta()
     )
-    filetype = None
-    if hasattr(source_mount, "filetype"):
-        try:
-            filetype = source_mount.filetype(source_path)
-        except Exception:
-            filetype = None
-    datestamp = None
-    if hasattr(source_mount, "datestamp"):
+    datestamp = meta.datestamp
+    if datestamp is None and hasattr(source_mount, "datestamp"):
         try:
             datestamp = source_mount.datestamp(source_path)
         except Exception:
@@ -115,16 +103,15 @@ def _file_item(source_mount, source_path: str, destination: str) -> dict:
         block = int(source_mount.stat(source_path).block)
     except Exception:
         block = 0
+    data = source_mount.read_bytes(source_path)
     return {
         "kind": "file",
         "src": source_path,
         "dst": destination,
-        "data": source_mount.read_bytes(source_path),
-        "load": int(meta.protection) & 0xFFFFFFFF,
-        "exec": 0,
-        "access": int(meta.protection) & 0xFFFFFFFF,
-        "comment": meta.comment,
-        "filetype": filetype,
+        "data": data,
+        "attributes": int(meta.attributes) & 0x3F,
+        "access": int(meta.attributes) & 0x3F,
+        "filetype": classify(source_path, data),
         "datestamp": datestamp,
         "block": block,
         "sourceName": source_path,
@@ -147,10 +134,9 @@ def _collect_copy_items(
 ) -> list[dict]:
     """Collect every copy descriptor for one source path or wildcard.
 
-    ``dst_slash`` says the destination was written as a directory, so a single
-    source file lands *inside* it rather than replacing it. That distinction
-    is the same one GEMDOS ``Copy`` makes and it is the reason the flag is
-    carried this far down.
+    ``dst_slash`` says the destination was written as a directory, so a
+    single source file lands *inside* it rather than replacing it. That is
+    the distinction the Desktop makes when a file is dropped on a folder.
     """
     items: list[dict] = []
     order = 0
@@ -173,10 +159,6 @@ def _collect_copy_items(
     multiple = len(matches) > 1
     for source_path, is_dir in sorted(matches, key=lambda row: _natural_name_key(row[0])):
         name = split_path(source_path)[-1] if split_path(source_path) else ""
-        # A source lands *inside* the destination when the destination already
-        # exists as a directory, was written with a trailing separator, or is
-        # receiving more than one match. Otherwise the destination names the
-        # copy itself, which is what ``Copy`` does on a real machine.
         into_directory = (
             dst_slash
             or multiple
@@ -241,16 +223,14 @@ def _write_copy_item(mount, destination: str, item: dict, overwrite: bool) -> No
             raise DataError(f"{destination} already exists.")
         mount.remove(destination, force=True)
     _ensure_dir_chain(mount, join_path(split_path(destination)[:-1]))
-    protection = int(item.get("access") or item.get("load") or 0) & 0xFFFFFFFF
+    attributes = item.get("attributes")
+    if attributes is None:
+        attributes = item.get("access")
     meta = AtariMeta(
-        protection=protection,
-        comment=str(item.get("comment") or ""),
+        attributes=int(attributes) if attributes is not None else AtariMeta().attributes,
         datestamp=item.get("datestamp"),
     )
     mount.write_bytes(destination, item["data"], meta)
-    filetype = item.get("filetype")
-    if filetype is not None and hasattr(mount, "set_filetype"):
-        mount.set_filetype(destination, filetype)
     datestamp = item.get("datestamp")
     if datestamp is not None and hasattr(mount, "set_datestamp"):
         mount.set_datestamp(destination, datestamp)
@@ -275,9 +255,14 @@ def _walk_post_order_mount(mount, path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Report helpers used by the JSON output
 # ---------------------------------------------------------------------------
+def _stamp_text(moment: datetime | None) -> str:
+    return moment.isoformat(sep="T", timespec="milliseconds") if moment else ""
+
+
 def _entry_rows(mount, inner: str) -> list[dict]:
     rows: list[dict] = []
     for entry in sorted(mount.iter_entries(inner), key=lambda item: _natural_name_key(item.name)):
+        meta = mount.atari_meta(entry.path) if hasattr(mount, "atari_meta") else AtariMeta()
         if entry.is_dir:
             rows.append(
                 {
@@ -285,34 +270,69 @@ def _entry_rows(mount, inner: str) -> list[dict]:
                     "type": "dir",
                     "load": "",
                     "exec": "",
+                    "attributes": int(meta.attributes),
                     "filetype": "",
-                    "datestamp": "",
+                    "datestamp": _stamp_text(meta.datestamp),
                     "length": sum(1 for _child in mount.iter_entries(entry.path)),
-                    "attr": "",
+                    "attr": format_access_text(meta.access),
                 }
             )
             continue
-        meta = mount.atari_meta(entry.path) if hasattr(mount, "atari_meta") else AtariMeta()
-        filetype = ""
-        if hasattr(mount, "filetype"):
-            value = mount.filetype(entry.path)
-            if value is not None:
-                filetype = int(value)
         rows.append(
             {
                 "name": entry.name,
                 "type": "file",
-                "load": int(meta.protection) & 0xFFFFFFFF,
+                "load": int(meta.attributes),
                 "exec": 0,
-                "filetype": filetype,
-                "datestamp": meta.datestamp.isoformat(sep="T", timespec="milliseconds")
-                if meta.datestamp
-                else "",
+                "attributes": int(meta.attributes),
+                "filetype": mount.filetype(entry.path) or "" if hasattr(mount, "filetype") else "",
+                "datestamp": _stamp_text(meta.datestamp),
                 "length": entry.length,
                 "attr": format_access_text(meta.access),
-                "comment": meta.comment,
             }
         )
+    return rows
+
+
+def _partition_rows(mount: AhdiMount) -> list[dict]:
+    rows: list[dict] = []
+    for partition in mount.partitions:
+        row = {
+            "index": partition.index,
+            "name": partition.name,
+            "id": partition.id,
+            "label": partition.label,
+            "type": "dir",
+            "load": "",
+            "exec": "",
+            "filetype": "",
+            "datestamp": "",
+            "length": partition.size_sectors,
+            "attr": "",
+            "format": "",
+            "bootable": partition.bootable,
+            "startSector": partition.start_sector,
+            "sizeSectors": partition.size_sectors,
+            "sizeBytes": partition.size_bytes,
+            "size": partition.size_bytes,
+            "free": 0,
+        }
+        if partition.is_gemdos:
+            volume = None
+            try:
+                volume = mount.open_partition(partition.index)
+                row["format"] = volume.format
+                row["label"] = volume.title
+                row["size"] = volume.size_bytes()
+                row["free"] = volume.free_bytes()
+            except DataError:
+                row["note"] = "unformatted"
+            finally:
+                if volume is not None:
+                    volume.close()
+        else:
+            row["note"] = f"{partition.id} partition"
+        rows.append(row)
     return rows
 
 
@@ -328,50 +348,28 @@ def _emit(payload: dict) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-def _dos_type_for(name: str) -> bytes:
-    key = str(name or "FFS-INTL").strip().upper()
-    if key in FORMAT_LABELS:
-        return FORMAT_LABELS[key]
-    aliases = {
-        "OFS": b"DOS\x00",
-        "FFS": b"DOS\x01",
-        "GEMDOS": b"DOS\x03",
-        "DOS0": b"DOS\x00",
-        "DOS1": b"DOS\x01",
-        "DOS2": b"DOS\x02",
-        "DOS3": b"DOS\x03",
-        "DOS4": b"DOS\x04",
-        "DOS5": b"DOS\x05",
-    }
-    if key in aliases:
-        return aliases[key]
-    raise ConfigurationError(
-        f"{name!r} is not a filing-system variant. Choose one of: "
-        + ", ".join(sorted(FORMAT_LABELS))
-    )
+_SIZE = re.compile(r"(?:capacity=)?([0-9]+(?:\.[0-9]+)?)\s*([kmg]?)(?:i?b)?")
 
 
-def _geometry_for(text: str) -> tuple[int, Geometry | None]:
-    """Return the block count and geometry for a named or sized request."""
-    request = str(text or "dd").strip().lower()
-    if request in {"dd", "880k", "floppy"}:
-        return DD_BLOCKS, None
-    if request in {"hd", "1760k", "1.76m"}:
-        return HD_BLOCKS, None
-    match = re.fullmatch(r"capacity=([0-9]+)\s*([kmg]?)b?", request)
+def _parse_size(text: str) -> int:
+    """Parse ``20M``, ``512k`` or ``capacity=100MB`` into bytes."""
+    request = str(text or "").strip().lower()
+    match = _SIZE.fullmatch(request)
     if not match:
-        match = re.fullmatch(r"([0-9]+)\s*([kmg]?)b?", request)
-    if match:
-        value = int(match.group(1))
-        scale = {"": 1, "k": 1024, "m": 1024 * 1024, "g": 1024 * 1024 * 1024}[match.group(2)]
-        total_bytes = value * scale
-        blocks = total_bytes // BLOCK_SIZE
-        if blocks < 32:
-            raise ConfigurationError("A volume needs at least 16 KiB.")
-        return blocks, None
-    raise ConfigurationError(
-        f"{text!r} is not a geometry. Use dd, hd or capacity=<size>."
-    )
+        raise ConfigurationError(f"{text!r} is not a size. Use a number with K, M or G.")
+    value = float(match.group(1))
+    scale = {"": 1, "k": 1024, "m": 1024 * 1024, "g": 1024 * 1024 * 1024}[match.group(2)]
+    size = int(value * scale)
+    return size - size % SECTOR_SIZE
+
+
+def _partition(args) -> int | None:
+    value = getattr(args, "partition", None)
+    return None if value is None else int(value)
+
+
+def _resolve(args, path: str, *, writable: bool = False):
+    return resolve_mount(path, writable=writable, partition=_partition(args))
 
 
 def command_identify(args) -> int:
@@ -387,136 +385,141 @@ def command_identify(args) -> int:
     return 0
 
 
+def _is_hard_disk_request(args) -> bool:
+    if args.filesystem in {"ahdi", "fat16", "hd", "harddisk"}:
+        return True
+    if args.partitions and int(args.partitions) > 0:
+        return True
+    return bool(args.size) and not args.format
+
+
 def command_create(args) -> int:
     path = Path(args.image)
-    if args.filesystem == "kickfs":
-        from ..kickfs.kickfs import SIZE_256K, SIZE_512K, build_rom
-
-        sizes = {"256k": SIZE_256K, "512k": SIZE_512K, "1m": 2 * SIZE_512K}
-        request = str(args.geometry or "256k").strip().lower().replace("ib", "")
-        if request not in sizes:
-            raise ConfigurationError("A ROM image is 256k, 512k or 1m.")
-        label = str(args.title or "forge").strip() or "forge"
-        path.write_bytes(
-            build_rom(
-                size=sizes[request],
-                name=f"{label}.library",
-                id_string=f"{label}.library 1.0 (2026)",
-            )
-        )
-        return 0
-    blocks, geometry = _geometry_for(args.geometry or "dd")
-    if args.filesystem == "rdb":
-        size = blocks * BLOCK_SIZE
-        path.write_bytes(b"\0" * size)
-        reader = reader_for(path, writable=True)
-        try:
-            partitions = []
-            count = max(1, int(args.partitions or 1))
+    label = str(args.label or "").strip()
+    if args.filesystem == "tosrom":
+        raise ConfigurationError("TOS ROM images are not created by this command.")
+    if _is_hard_disk_request(args):
+        if not args.size:
+            raise ConfigurationError("A hard-disk image needs --size, for example --size 32M.")
+        size = _parse_size(args.size)
+        count = int(args.partitions or 0)
+        if args.filesystem == "ahdi" or count > 0:
+            count = max(1, count)
+            requests = []
             for index in range(count):
-                partitions.append(
+                requests.append(
                     {
-                        "name": f"DH{index}",
-                        "dosType": _dos_type_for(args.variant or "FFS-INTL"),
-                        "cylinders": 0,
-                        "sizeBytes": size // count,
-                        "bootable": index == 0,
+                        "label": label if count == 1 else (f"{label}{index + 1}" if label else ""),
+                        "bootable": bool(args.bootable) and index == 0,
                     }
                 )
-            disk = write_rigid_disk(reader, partitions)
-            for partition in disk.partitions:
-                window = reader.window(partition.start_block, partition.total_blocks)
-                format_volume(
-                    window,
-                    label=partition.name,
-                    dos_type=partition.dos_type,
-                    bootable=partition.bootable,
-                    geometry=partition.geometry(),
-                )
-                window.close()
+            disk = create_partitioned_image(path, size, requests, bootable=bool(args.bootable))
+            for note in disk.notes:
+                sys.stderr.write(f"Note: {note}\n")
+            return 0
+        # A bare volume the size of a partition, with no table in front.
+        with path.open("wb") as handle:
+            handle.truncate(size)
+        reader = reader_for(path, writable=True)
+        try:
+            volume = format_volume(
+                reader,
+                label=label,
+                geometry=volume_geometry(size, label=label),
+                bootable=bool(args.bootable),
+            )
+            for note in volume.notes:
+                sys.stderr.write(f"Note: {note}\n")
         finally:
             reader.close()
-        if args.geometry_sidecar:
-            Path(str(path) + ".geo").write_text(write_geometry(Geometry()))
         return 0
-
-    path.write_bytes(b"\0" * (blocks * BLOCK_SIZE))
-    dos_type = _dos_type_for(args.variant or args.filesystem or "OFS")
+    geometry = named_geometry(args.format or "ds-720k")
+    with path.open("wb") as handle:
+        handle.truncate(geometry.physical_sectors * SECTOR_SIZE)
     reader = reader_for(path, writable=True)
     try:
-        format_volume(
-            reader,
-            label=args.title or "Empty",
-            dos_type=dos_type,
-            bootable=bool(args.bootable),
-            geometry=geometry,
-        )
+        format_volume(reader, label=label, geometry=geometry, bootable=bool(args.bootable))
     finally:
         reader.close()
-    if args.geometry_sidecar:
-        # A hardfile carries no partition table, so the host has to be told
-        # its shape. Choose surfaces and sectors that divide the block count
-        # exactly, so the declared capacity and the file agree to the byte.
-        surfaces, sectors, cylinders = _hardfile_shape(blocks)
-        Path(str(path) + ".geo").write_text(
-            write_geometry(
-                Geometry(
-                    surfaces=surfaces,
-                    blocks_per_track=sectors,
-                    high_cylinder=cylinders - 1,
-                    dos_type=dos_type,
-                )
-            )
-        )
     return 0
 
 
-def _hardfile_shape(blocks: int) -> tuple[int, int, int]:
-    """Choose surfaces, sectors and cylinders that multiply to exactly ``blocks``.
+def command_format(args) -> int:
+    """Format an existing image, or one partition of an AHDI image, in place."""
+    image, _inner = split_compound(args.image)
+    if not image.is_file():
+        raise DataError(f"{image} does not exist.")
+    label = str(args.label or "").strip()
+    partition = _partition(args)
+    reader = reader_for(image, writable=True)
+    try:
+        target = reader
+        if partition is not None:
+            disk = read_partition_table(reader)
+            chosen = disk.partition(partition)
+            target = reader.window(chosen.start_sector, chosen.size_sectors)
+        try:
+            if args.format:
+                geometry = named_geometry(args.format)
+            else:
+                geometry = volume_geometry(target.length, label=label)
+            volume = format_volume(target, label=label, geometry=geometry, bootable=bool(args.bootable))
+            for note in volume.notes:
+                sys.stderr.write(f"Note: {note}\n")
+            print(f"Formatted {volume.format} volume, {volume.size_bytes():,} bytes")
+        finally:
+            if target is not reader:
+                target.close()
+    finally:
+        reader.close()
+    return 0
 
-    An emulator multiplies the three numbers back out and refuses a hardfile
-    whose file size does not match, so an approximate shape is worse than
-    none. Preferred values are tried first and the search falls back to a
-    single-surface, single-sector geometry, which always divides.
-    """
-    for surfaces in (16, 8, 4, 2, 1):
-        if blocks % surfaces:
-            continue
-        remaining = blocks // surfaces
-        for sectors in (63, 32, 17, 11, 1):
-            if remaining % sectors == 0:
-                return surfaces, sectors, remaining // sectors
-    return 1, 1, blocks
+
+def command_partitions(args) -> int:
+    image, _inner = split_compound(args.image)
+    mount, _name = mount_image(image)
+    try:
+        if not isinstance(mount, AhdiMount):
+            raise DataError(f"{image.name} is a bare volume, not a partitioned hard disk.")
+        rows = _partition_rows(mount)
+        metadata = {
+            "title": image.name,
+            "description": f"{len(rows)} AHDI partition{'s' if len(rows) != 1 else ''}",
+            "scheme": mount.disk.scheme,
+            "hdSize": mount.disk.hd_size,
+            "bootable": mount.disk.bootable,
+            "notes": list(mount.disk.notes),
+        }
+    finally:
+        mount.close()
+    if args.output_format == "json":
+        _emit({"reports": {"partitions": _report(rows, **metadata)}})
+        return 0
+    for row in rows:
+        status = row.get("note") or row.get("format", "")
+        print(
+            f"{row['index']:>2} {row['name']:<3} {row['id']} {row['startSector']:>10} "
+            f"{row['sizeSectors']:>10} {row['sizeBytes'] // 1024:>9} KiB "
+            f"{'boot' if row['bootable'] else '    '} {status} {row.get('label', '')}"
+        )
+    print(metadata["description"])
+    return 0
 
 
 def command_ls(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         mount = resolved.mount
         inner = resolved.path
-        if isinstance(mount, RigidDiskMount):
-            rows = [
-                {
-                    "name": partition.name,
-                    "type": "dir",
-                    "load": "",
-                    "exec": "",
-                    "filetype": "",
-                    "datestamp": "",
-                    "length": partition.total_blocks,
-                    "attr": "",
-                    "format": partition.format,
-                    "bootable": partition.bootable,
-                }
-                for partition in mount.partitions
-            ]
+        if isinstance(mount, AhdiMount):
+            rows = _partition_rows(mount)
             metadata = {
                 "title": resolved.image.name,
-                "description": f"{len(rows)} RDB partition{'s' if len(rows) != 1 else ''}",
+                "description": f"{len(rows)} AHDI partition{'s' if len(rows) != 1 else ''}",
                 "path": inner,
             }
         else:
             if not mount.exists(inner):
-                raise DataError(f"Path not found: {inner or ':'}")
+                raise DataError(f"Path not found: {inner or '\\'}")
             if not mount.stat(inner).is_dir:
                 raise DataError(f"{inner} is not a directory.")
             rows = _entry_rows(mount, inner)
@@ -531,19 +534,19 @@ def command_ls(args) -> int:
         if args.output_format == "json":
             _emit({"reports": {"entries": _report(rows, **metadata)}})
             return 0
-        print(f"Directory \"{metadata['title']}:{inner}\"")
+        print(f"Directory \"{metadata['title']}:\\{inner}\"")
         for row in rows:
             if row["type"] == "dir":
-                print(f"{row['name']:<32} Dir")
+                print(f"{row['name']:<14} <DIR>      {row['attr']:<6} {row['datestamp']}")
             else:
-                print(f"{row['name']:<32}{row['length']:>10} {row['attr']}")
+                print(f"{row['name']:<14}{row['length']:>10} {row['attr']:<6} {row['datestamp']}")
         print(metadata["description"])
     return 0
 
 
 def command_stat(args) -> int:
     image, inner = split_compound(args.path)
-    mount, name = mount_image(image)
+    mount, name = mount_image(image, partition=_partition(args))
     try:
         if inner:
             entry = mount.stat(inner)
@@ -554,41 +557,18 @@ def command_stat(args) -> int:
                     "type": "dir" if entry.is_dir else "file",
                     "length": entry.length,
                     "blocks": entry.blocks,
+                    "cluster": entry.block,
+                    "attributes": entry.attributes,
+                    "attr": format_access_text(entry.attributes),
+                    "datestamp": _stamp_text(entry.datestamp),
                 }
             ]
             payload = {"reports": {"entry": _report(rows, title=mount.title)}}
-        elif isinstance(mount, RigidDiskMount):
-            rows = []
-            for partition in mount.partitions:
-                volume = None
-                try:
-                    volume = mount.open_partition(partition.index)
-                    rows.append(
-                        {
-                            "name": partition.name,
-                            "format": partition.format,
-                            "size": volume.size_bytes(),
-                            "free": volume.free_bytes(),
-                            "bootable": partition.bootable,
-                        }
-                    )
-                except DataError:
-                    rows.append(
-                        {
-                            "name": partition.name,
-                            "format": partition.format,
-                            "size": partition.size_bytes,
-                            "free": 0,
-                            "bootable": partition.bootable,
-                            "note": "unformatted",
-                        }
-                    )
-                finally:
-                    if volume is not None:
-                        volume.close()
+        elif isinstance(mount, AhdiMount):
+            rows = _partition_rows(mount)
             payload = {
                 "reports": {"partitions": _report(rows, title=image.name)},
-                "description": f"{len(rows)} RDB partition(s)",
+                "description": f"{len(rows)} AHDI partition(s)",
             }
         else:
             rows = [
@@ -597,6 +577,8 @@ def command_stat(args) -> int:
                     "format": getattr(mount, "format", name),
                     "size": mount.size_bytes(),
                     "free": mount.free_bytes(),
+                    "bootable": bool(mount.boot_option()),
+                    "geometry": mount.geometry.to_dict(),
                 }
             ]
             payload = {
@@ -608,7 +590,7 @@ def command_stat(args) -> int:
             return 0
         for report in payload["reports"].values():
             for row in report["rows"]:
-                print(" ".join(f"{key}={value}" for key, value in row.items()))
+                print(" ".join(f"{key}={value}" for key, value in row.items() if key != "geometry"))
     finally:
         close = getattr(mount, "close", None)
         if callable(close):
@@ -618,21 +600,24 @@ def command_stat(args) -> int:
 
 def command_validate(args) -> int:
     image, _inner = split_compound(args.image)
-    mount, _name = mount_image(image)
+    mount, _name = mount_image(image, partition=_partition(args))
     try:
-        problems = mount.validate() if hasattr(mount, "validate") else []
-        if isinstance(mount, RigidDiskMount):
-            problems = []
+        if isinstance(mount, AhdiMount):
+            problems = list(mount.disk.notes)
             for partition in mount.partitions:
+                if not partition.is_gemdos:
+                    continue
                 try:
                     volume = mount.open_partition(partition.index)
                 except DataError as error:
-                    problems.append(f"{partition.name}: {error}")
+                    problems.append(f"{partition.name} {error}")
                     continue
-                problems.extend(
-                    f"{partition.name}: {problem}" for problem in volume.validate()
-                )
-                volume.close()
+                try:
+                    problems.extend(f"{partition.name} {problem}" for problem in volume.validate())
+                finally:
+                    volume.close()
+        else:
+            problems = mount.validate() if hasattr(mount, "validate") else []
     finally:
         close = getattr(mount, "close", None)
         if callable(close):
@@ -644,7 +629,7 @@ def command_validate(args) -> int:
 
 
 def command_get(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         data = resolved.mount.read_bytes(resolved.path)
     if args.destination == "-":
         sys.stdout.buffer.write(data)
@@ -655,18 +640,13 @@ def command_get(args) -> int:
 
 def command_put(args) -> int:
     data = sys.stdin.buffer.read() if args.source == "-" else Path(args.source).read_bytes()
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         mount = resolved.mount
         _ensure_dir_chain(mount, join_path(split_path(resolved.path)[:-1]))
-        meta = AtariMeta(
-            protection=parse_protection_value(args.protection) if args.protection else 0,
-            comment=args.comment or "",
-        )
+        meta = AtariMeta(access=parse_access_text(args.attributes)) if args.attributes else None
         if mount.exists(resolved.path):
             mount.remove(resolved.path, force=True)
         mount.write_bytes(resolved.path, data, meta)
-        if args.filetype:
-            mount.set_filetype(resolved.path, parse_filetype(args.filetype))
         mount.flush()
     return 0
 
@@ -674,15 +654,16 @@ def command_put(args) -> int:
 def command_cp(args) -> int:
     source_image, source_inner = split_compound(args.source)
     target_image, target_inner = split_compound(args.destination)
-    destination_slash = args.destination.endswith(("/", ":"))
-    source_mount, _ = mount_image(source_image)
+    destination_slash = args.destination.endswith(("/", "\\", ":"))
+    partition = _partition(args)
+    source_mount, _ = mount_image(source_image, partition=partition)
     try:
         if source_image == target_image:
-            target_mount, _ = mount_image(target_image, writable=True)
+            target_mount, _ = mount_image(target_image, writable=True, partition=partition)
             source_mount.close()
             source_mount = target_mount
         else:
-            target_mount, _ = mount_image(target_image, writable=True)
+            target_mount, _ = mount_image(target_image, writable=True, partition=partition)
         try:
             items = _collect_copy_items(
                 source_mount,
@@ -712,31 +693,24 @@ def command_mv(args) -> int:
 
     The destination is an inner path, not a second compound path: a move
     between two images is a copy followed by a delete, which is what ``cp``
-    and ``rm`` are for. Accepting a compound destination here would let a
-    caller silently believe it had moved data between volumes.
+    and ``rm`` are for.
     """
     _image, source_inner = split_compound(args.source)
     destination = args.destination
-    if ":" in destination:
+    if ":" in destination and not re.match(r"^[A-Za-z]:", destination):
         _target_image, destination = split_compound(destination)
-    with resolve_mount(args.source, writable=True) as resolved:
+    with _resolve(args, args.source, writable=True) as resolved:
         resolved.mount.rename(source_inner, destination)
         resolved.mount.flush()
     return 0
 
 
 def command_rm(args) -> int:
-    """Delete one or several entries from the same image in one open.
-
-    A multiple selection is one operation to the user, so it is one operation
-    here: the image is opened once, every path is checked, and the deletions
-    happen together.
-    """
-    first, *rest = args.paths
+    """Delete one or several entries from the same image in one open."""
+    first, *_rest = args.paths
     image, _inner = split_compound(first)
     inners = [split_compound(path)[1] for path in args.paths]
-    del rest
-    with resolve_mount(str(image), writable=True) as resolved:
+    with _resolve(args, str(image), writable=True) as resolved:
         mount = resolved.mount
         for inner in inners:
             targets = (
@@ -749,14 +723,14 @@ def command_rm(args) -> int:
 
 
 def command_mkdir(args) -> int:
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         _ensure_dir_chain(resolved.mount, resolved.path)
         resolved.mount.flush()
     return 0
 
 
 def command_opt(args) -> int:
-    with resolve_mount(args.image, writable=args.option is not None) as resolved:
+    with _resolve(args, args.image, writable=args.option is not None) as resolved:
         mount = resolved.mount
         if args.option is None:
             print(mount.boot_option())
@@ -767,7 +741,7 @@ def command_opt(args) -> int:
 
 
 def command_title(args) -> int:
-    with resolve_mount(args.path, writable=args.title is not None) as resolved:
+    with _resolve(args, args.path, writable=args.title is not None) as resolved:
         node = resolved.mount._navigate(resolved.path)
         if args.title is None:
             print(node.title)
@@ -778,14 +752,14 @@ def command_title(args) -> int:
 
 
 def command_chmod(args) -> int:
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         resolved.mount.set_access(resolved.path, parse_access_text(args.flags))
         resolved.mount.flush()
     return 0
 
 
 def command_lock(args) -> int:
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         access = resolved.mount.access(resolved.path)
         resolved.mount.set_access(resolved.path, access.with_locked(True))
         resolved.mount.flush()
@@ -793,7 +767,7 @@ def command_lock(args) -> int:
 
 
 def command_unlock(args) -> int:
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         access = resolved.mount.access(resolved.path)
         resolved.mount.set_access(resolved.path, access.with_locked(False))
         resolved.mount.flush()
@@ -801,20 +775,20 @@ def command_unlock(args) -> int:
 
 
 def command_compact(args) -> int:
-    with resolve_mount(args.image, writable=True) as resolved:
+    with _resolve(args, args.image, writable=True) as resolved:
         moved = resolved.mount.defragment()
         resolved.mount.flush()
-    print(f"{moved} file(s) rewritten contiguously")
+    print(f"{moved} cluster(s) moved")
     return 0
 
 
 def command_tree(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         mount = resolved.mount
 
         def walk(path: str, depth: int) -> None:
             for entry in sorted(mount.iter_entries(path), key=lambda item: _natural_name_key(item.name)):
-                marker = "/" if entry.is_dir else ""
+                marker = "\\" if entry.is_dir else ""
                 print(f"{'  ' * depth}{entry.name}{marker}")
                 if entry.is_dir:
                     walk(entry.path, depth + 1)
@@ -824,7 +798,7 @@ def command_tree(args) -> int:
 
 
 def command_find(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         mount = resolved.mount
         pattern = args.pattern.casefold()
 
@@ -840,20 +814,20 @@ def command_find(args) -> int:
 
 
 def command_freemap(args) -> int:
-    with resolve_mount(args.image) as resolved:
+    with _resolve(args, args.image) as resolved:
         flags = resolved.mount.free_map()
         width = 64
         for start in range(0, len(flags), width):
             row = flags[start : start + width]
-            print(f"{start:>8} " + "".join("." if free else "#" for free in row))
-        print(f"{sum(flags):,} free of {len(flags):,} blocks")
+            print(f"{start + 2:>8} " + "".join("." if free else "#" for free in row))
+        print(f"{sum(flags):,} free of {len(flags):,} clusters")
     return 0
 
 
 def command_export(args) -> int:
     destination = Path(args.destination)
     destination.mkdir(parents=True, exist_ok=True)
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         mount = resolved.mount
 
         def walk(path: str, target: Path) -> None:
@@ -872,7 +846,7 @@ def command_import(args) -> int:
     source = Path(args.source)
     if not source.is_dir():
         raise ConfigurationError(f"{source} is not a directory.")
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         mount = resolved.mount
         for item in sorted(source.rglob("*")):
             relative = item.relative_to(source)
@@ -889,22 +863,22 @@ def command_import(args) -> int:
 
 
 def command_cat(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         sys.stdout.buffer.write(resolved.mount.read_bytes(resolved.path))
     return 0
 
 
 def command_type(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         data = resolved.mount.read_bytes(resolved.path)
     sys.stdout.write(data.decode("latin-1").replace("\r\n", "\n").replace("\r", "\n"))
     return 0
 
 
 def command_get_datestamp(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         stamp = resolved.mount.datestamp(resolved.path)
-    print(stamp.isoformat(sep="T", timespec="milliseconds") if stamp else "")
+    print(_stamp_text(stamp))
     return 0
 
 
@@ -914,27 +888,21 @@ def command_set_datestamp(args) -> int:
         if args.value in {"now", None}
         else datetime.fromisoformat(args.value)
     )
-    with resolve_mount(args.path, writable=True) as resolved:
+    with _resolve(args, args.path, writable=True) as resolved:
         resolved.mount.set_datestamp(resolved.path, moment)
         resolved.mount.flush()
     return 0
 
 
-def command_get_filetype(args) -> int:
-    with resolve_mount(args.path) as resolved:
-        print(format_filetype(resolved.mount.filetype(resolved.path)))
-    return 0
-
-
-def command_set_filetype(args) -> int:
-    with resolve_mount(args.path, writable=True) as resolved:
-        resolved.mount.set_filetype(resolved.path, args.value)
-        resolved.mount.flush()
+def command_filetype(args) -> int:
+    with _resolve(args, args.path) as resolved:
+        data = resolved.mount.read_bytes(resolved.path)
+    print(format_filetype(classify(resolved.path, data)))
     return 0
 
 
 def command_storage_order(args) -> int:
-    with resolve_mount(args.path) as resolved:
+    with _resolve(args, args.path) as resolved:
         mount = resolved.mount
         rows = []
 
@@ -959,24 +927,9 @@ def command_list_filesystems(args) -> int:
 
 def command_describe_filesystem(args) -> int:
     driver = create_filesystem(args.name)
-    variants = ", ".join(sorted(DOS_TYPES.values()))
     print(f"{driver.name}: {driver.label}")
-    print(f"Recognised DOS types: {variants}")
-    return 0
-
-
-def command_kickstart(args) -> int:
-    rom = Kickstart(Path(args.image).read_bytes())
-    if args.output_format == "json":
-        _emit(rom.to_dict())
-        return 0
-    print(f"{rom.release} (exec {rom.version}), {len(rom.data) // 1024} KiB")
-    print(f"Checksum {'valid' if rom.checksum_valid else 'INVALID'}")
-    for module in rom.modules:
-        print(
-            f"  {module.name:<24} v{module.version:<4} pri {module.priority:>4} "
-            f"{module.length:>8} bytes  {module.id_string}"
-        )
+    if driver.name in {"gemdos", "fat12", "fat16"}:
+        print("Floppy formats: " + ", ".join(sorted(NAMED_GEOMETRIES)))
     return 0
 
 
@@ -985,8 +938,8 @@ def command_kickstart(args) -> int:
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="adisc",
-        description="Work with GEMDOS OFS and FFS volumes, RDB hard drives and Kickstart ROMs.",
+        prog="python -m atarinut",
+        description="Work with GEMDOS floppies, AHDI partitioned hard disks and TOS ROM images.",
     )
     parser.add_argument("--version", action="store_true", help="Show the engine version and exit.")
     parser.add_argument(
@@ -996,23 +949,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command")
 
-    def add(name, handler, help_text):
+    def add(name, handler, help_text, *, partition=True):
         sub = commands.add_parser(name, help=help_text)
         sub.set_defaults(handler=handler)
+        if partition:
+            sub.add_argument(
+                "--partition",
+                type=int,
+                default=None,
+                help="Select one partition of an AHDI hard-disk image (0 is C:).",
+            )
         return sub
 
-    sub = add("identify", command_identify, "Identify an image's filing system by content.")
+    sub = add("identify", command_identify, "Identify an image's filing system by content.", partition=False)
     sub.add_argument("--as", dest="output_format", default="text", choices=("text", "json"))
     sub.add_argument("image")
 
-    sub = add("create", command_create, "Create a new empty image.")
-    sub.add_argument("--filesystem", default="ofs")
-    sub.add_argument("--variant", default=None, help="OFS, FFS, OFS-INTL, FFS-INTL, OFS-DC or FFS-DC.")
-    sub.add_argument("--geometry", default="dd")
-    sub.add_argument("--title", default="Empty")
-    sub.add_argument("--partitions", type=int, default=1)
+    sub = add("create", command_create, "Create a new empty image.", partition=False)
+    sub.add_argument("--filesystem", default="gemdos", help="gemdos (default) or ahdi.")
+    sub.add_argument(
+        "--format",
+        default=None,
+        help="Floppy format: " + ", ".join(sorted(NAMED_GEOMETRIES)) + ". Default ds-720k.",
+    )
+    sub.add_argument("--label", default="", help="Volume label, up to 11 characters.")
+    sub.add_argument("--size", default=None, help="Hard-disk image size, for example 32M.")
+    sub.add_argument("--partitions", type=int, default=0, help="Number of AHDI partitions.")
+    sub.add_argument("--bootable", action="store_true", help="Make the boot sector executable.")
+    sub.add_argument("image")
+
+    sub = add("format", command_format, "Format an existing image or partition in place.")
+    sub.add_argument("--format", default=None, help="Floppy format name; default fits the image size.")
+    sub.add_argument("--label", default="")
     sub.add_argument("--bootable", action="store_true")
-    sub.add_argument("--geometry-sidecar", action="store_true")
+    sub.add_argument("image")
+
+    sub = add("partitions", command_partitions, "List the partitions of an AHDI hard-disk image.", partition=False)
+    sub.add_argument("--as", dest="output_format", default="text", choices=("text", "json"))
     sub.add_argument("image")
 
     sub = add("ls", command_ls, "List directory contents.")
@@ -1033,12 +1006,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = add("put", command_put, "Import a host file into an image.")
     sub.add_argument(
-        "--protection",
+        "--attributes",
+        "--attr",
+        dest="attributes",
         default=None,
-        help="Protection long, as decimal or &hex. Its low four bits are inverted.",
+        help="Attribute bits as rhsvda text, letters to set, or a number.",
     )
-    sub.add_argument("--comment", default=None)
-    sub.add_argument("--filetype", default=None)
     sub.add_argument("source")
     sub.add_argument("path")
 
@@ -1062,25 +1035,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub = add("mkdir", command_mkdir, "Create a directory.")
     sub.add_argument("path")
 
-    sub = add("opt", command_opt, "Read or set the bootblock option.")
+    sub = add("opt", command_opt, "Read or set whether the boot sector is executable.")
     sub.add_argument("image")
     sub.add_argument("option", nargs="?", default=None)
 
-    sub = add("title", command_title, "Read or set a volume or drawer title.")
+    sub = add("title", command_title, "Read or set the volume label.")
     sub.add_argument("path")
     sub.add_argument("title", nargs="?", default=None)
 
-    sub = add("chmod", command_chmod, "Set protection flags (GEMDOS alias: Protect).")
+    sub = add("chmod", command_chmod, "Set attribute bits (rhsvda text or a number).")
     sub.add_argument("path")
     sub.add_argument("flags")
 
-    sub = add("lock", command_lock, "Protect an entry against deletion and writing.")
+    sub = add("lock", command_lock, "Set the read-only bit on an entry.")
     sub.add_argument("path")
 
-    sub = add("unlock", command_unlock, "Remove delete and write protection.")
+    sub = add("unlock", command_unlock, "Clear the read-only bit on an entry.")
     sub.add_argument("path")
 
-    sub = add("compact", command_compact, "Rewrite files so their blocks are contiguous.")
+    sub = add("compact", command_compact, "Rewrite fragmented files so their clusters are contiguous.")
     sub.add_argument("image")
 
     sub = add("tree", command_tree, "Display a recursive directory tree.")
@@ -1090,7 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("path")
     sub.add_argument("pattern")
 
-    sub = add("freemap", command_freemap, "Show the block-allocation bitmap.")
+    sub = add("freemap", command_freemap, "Show which clusters are free.")
     sub.add_argument("image")
 
     sub = add("export", command_export, "Bulk-export an image to a host directory.")
@@ -1114,24 +1087,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("path")
     sub.add_argument("value", nargs="?", default="now")
 
-    sub = add("get-filetype", command_get_filetype, "Print an entry's Workbench type.")
+    sub = add("filetype", command_filetype, "Classify a file by content and extension.")
     sub.add_argument("path")
 
-    sub = add("set-filetype", command_set_filetype, "Set an entry's Workbench type.")
-    sub.add_argument("path")
-    sub.add_argument("value")
-
-    sub = add("storage-order", command_storage_order, "List files in physical storage order.")
+    sub = add("storage-order", command_storage_order, "List files in cluster order.")
     sub.add_argument("path")
 
-    add("list-filesystems", command_list_filesystems, "List the filing systems this build recognises.")
+    add("list-filesystems", command_list_filesystems, "List the filing systems this build recognises.", partition=False)
 
-    sub = add("describe-filesystem", command_describe_filesystem, "Describe one filing system.")
+    sub = add("describe-filesystem", command_describe_filesystem, "Describe one filing system.", partition=False)
     sub.add_argument("name")
-
-    sub = add("kickstart", command_kickstart, "Decode a Kickstart ROM's resident modules.")
-    sub.add_argument("--as", dest="output_format", default="text", choices=("text", "json"))
-    sub.add_argument("image")
 
     return parser
 
