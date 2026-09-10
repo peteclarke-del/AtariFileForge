@@ -9,7 +9,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request, send_file
 from .effects import image_mutation, request_effect
 
-from ..atari_metadata import format_inf
+from ..atari_metadata import ATTRIBUTE_SIDECAR_SUFFIX, format_attribute_record
 from ..checksum import sha256_bytes
 from ..archive_utils import open_single_upload_image
 from ..archive_browser import (
@@ -26,7 +26,7 @@ from ..disk_service import (
     DiskError,
     DiskService,
 )
-from ..formats import FFS_EXTENSIONS, OFS_EXTENSIONS, HFE_EXTENSIONS, HDF_EXTENSIONS, SCP_EXTENSIONS, DMS_EXTENSIONS
+from ..formats import GEMDOS_EXTENSIONS
 from ..file_editor import (
     MAX_DISASSEMBLY_FILE,
     disassemble_file_data,
@@ -35,14 +35,14 @@ from ..file_editor import (
     replace_file_bytes,
 )
 from ..disk_identity import analyse_directory
-from ..ffs_items import delete_ffs_items, move_ffs_items
+from ..gemdos_items import delete_gemdos_items, move_gemdos_items
 from ..metadata_lookup import (
     best_distribution_filename,
     enrich_from_distribution_filename,
     enrich_if_ambiguous,
 )
 from ..operations import OperationRegistry
-from .common import apply_partition, optional_int, payload, protection_field
+from .common import apply_partition, attributes_field, optional_int, payload
 from .. import atari_paths
 
 
@@ -139,7 +139,10 @@ def create_files_blueprint(
             stream = io.BytesIO()
             with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr(leaf, content)
-                archive.writestr(f"{leaf}.inf", format_inf(leaf, metadata))
+                archive.writestr(
+                    f"{leaf}{ATTRIBUTE_SIDECAR_SUFFIX}",
+                    format_attribute_record(leaf, metadata),
+                )
             stream.seek(0)
             return send_file(
                 stream, mimetype="application/zip", as_attachment=True,
@@ -157,7 +160,7 @@ def create_files_blueprint(
         writable = (
             archive_member_editable(archive_data, filename, member)
             and not session.hfe_read_only
-            and session.kind != "dms"
+            and session.kind not in {"msa", "dim", "stx"}
         )
         return jsonify(inspect_file_data(
             content[:MAX_DISASSEMBLY_FILE], metadata, member, read_only=not writable,
@@ -209,7 +212,11 @@ def create_files_blueprint(
         archive_digest = sha256_bytes(archive_data)
         if archive_digest != str(body.get("archiveSha256") or ""):
             raise ArchiveError("The archive changed after the member opened. Reopen it before saving.")
-        if session.hfe_read_only or session.kind == "dms" or not archive_member_editable(archive_data, filename, member):
+        if (
+            session.hfe_read_only
+            or session.kind in {"msa", "dim", "stx"}
+            or not archive_member_editable(archive_data, filename, member)
+        ):
             raise ArchiveError("This container cannot be rebuilt safely in the current image.")
         original, metadata = read_archive_member_details(archive_data, filename, member)
         if sha256_bytes(original) != str(body.get("sha256") or ""):
@@ -275,8 +282,8 @@ def create_files_blueprint(
         if session.kind == "rom":
             service.rename_rom_bank(session, int(data["bank"]), data.get("title", ""))
             result = {}
-        elif session.kind in {"ffs", "ofs"}:
-            result = move_ffs_items(
+        elif service.mountable(session):
+            result = move_gemdos_items(
                 service,
                 session,
                 [{
@@ -285,47 +292,20 @@ def create_files_blueprint(
                 }],
             )
         else:
-            side = optional_int(data.get("side"))
-            service.mutate(
-                session,
-                [
-                    "mv",
-                    "--force" if data.get("overwrite") else "",
-                    "{image}:" + data["source"],
-                    data["destination"],
-                ],
-                side,
+            raise DiskError(
+                "This view has nothing to rename. Open a GEMDOS volume or a "
+                "partition first."
             )
-            service.move_editor_projects(
-                session,
-                [{"source": data["source"], "destination": data["destination"]}],
-                side,
-            )
-            result = {}
         return jsonify(image=service.summary(session), **result)
 
     @blueprint.post("/api/images/<image_id>/move")
     @image_mutation("moving items")
     def move_items(image_id):
-        session = service.get(image_id)
-        result = move_ffs_items(
-            service,
-            session,
-            payload().get("items", []),
-        )
-        return jsonify(image=service.summary(session), **result)
-
-    @blueprint.post("/api/images/<image_id>/move-ofs")
-    @image_mutation("moving files between drawers")
-    def move_ofs_items(image_id):
         data = payload()
         session = service.get(image_id)
-        moved = service.move_ofs_items(
-            session,
-            data.get("items", []),
-            optional_int(data.get("side")),
-        )
-        return jsonify(image=service.summary(session), moved=moved)
+        apply_partition(service, session, data.get("partition"))
+        result = move_gemdos_items(service, session, data.get("items", []))
+        return jsonify(image=service.summary(session), **result)
 
     @blueprint.post("/api/images/<image_id>/delete")
     @image_mutation("deleting an item")
@@ -344,40 +324,17 @@ def create_files_blueprint(
             banks = [int(item.get("bank")) for item in items]
             service.clear_rom_banks(session, banks)
             result = {"deletedItems": [{"bank": bank} for bank in banks]}
-        elif session.kind in {"ffs", "ofs"}:
-            result = delete_ffs_items(
+        elif service.mountable(session):
+            result = delete_gemdos_items(
                 service,
                 session,
                 [item["path"] for item in items],
             )
         else:
-            apply_partition(service, session, data.get("partition"))
-            side = optional_int(data.get("side"))
-            args = ["rm", "--force"]
-            if any(item.get("recursive") for item in items):
-                args.append("--recursive")
-            # Every path is compound. The engine opens the image once and
-            # deletes them together, so a partial failure cannot leave half a
-            # selection removed.
-            args.extend(
-                "{image}:" + atari_paths.normalise(item["path"]) for item in items
+            raise DiskError(
+                "This view has nothing to delete. Open a GEMDOS volume or a "
+                "partition first."
             )
-            service.mutate(
-                session,
-                args,
-                side,
-            )
-            service.delete_editor_projects(
-                session,
-                [item["path"] for item in items],
-                side,
-            )
-            result = {
-                "deletedItems": [
-                    {"path": item["path"], "isDirectory": bool(item.get("recursive"))}
-                    for item in items
-                ]
-            }
         return jsonify(image=service.summary(session), **result)
 
     @blueprint.post("/api/images/<image_id>/mkdir")
@@ -386,19 +343,18 @@ def create_files_blueprint(
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        side = optional_int(data.get("side"))
-        # Every GEMDOS volume nests drawers, so the only kinds that cannot
+        # Every GEMDOS volume nests folders, so the only kinds that cannot
         # are the ones with no directory structure at all.
-        if session.kind in {"rom", "dms", "kickfs"} or not service.mountable(session):
+        if not service.mountable(session):
             raise DiskError(
                 "This view has no directories to create one in. Open a partition "
-                "or a filing-system image first."
+                "or a GEMDOS volume first."
             )
         path = str(data.get("path") or "").strip()
         if not atari_paths.normalise(path):
-            raise DiskError("Choose a valid parent drawer and folder name.")
+            raise DiskError("Choose a valid parent folder and folder name.")
         service.validate_leaf_name(session, atari_paths.leaf(path))
-        service.make_directory(session, path, side)
+        service.make_directory(session, path)
         return jsonify(image=service.summary(session))
 
     @blueprint.post("/api/images/<image_id>/empty-file")
@@ -407,33 +363,27 @@ def create_files_blueprint(
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
-        side = optional_int(data.get("side"))
-        if session.kind in {"rom", "dms"} or not service.mountable(session):
+        if not service.mountable(session):
             raise DiskError("This view cannot contain ordinary files.")
-        destination_dir = str(data.get("destination") or "$").rstrip(".")
-        if session.kind == "ofs":
-            destination_dir = service.validate_ofs_prefix(destination_dir)
+        destination_dir = service.validate_directory_path(data.get("destination") or "")
         name = service.validate_leaf_name(session, str(data.get("name") or ""))
-        existing = service.list_directory(session, destination_dir, side)["entries"]
+        existing = service.list_directory(session, destination_dir)["entries"]
         if any(str(row.get("name") or "").casefold() == name.casefold() for row in existing):
             raise DiskError(f"'{name}' already exists in this directory.")
-        destination = name if session.kind == "kickfs" else atari_paths.join(destination_dir, name)
+        destination = atari_paths.join(destination_dir, name)
         with tempfile.NamedTemporaryFile(dir=work_dir, prefix="empty-file-", delete=False) as temp:
             temp_path = Path(temp.name)
         try:
             service.put(
                 session, destination, temp_path,
-                protection_field(data.get("protection")),
-                str(data.get("comment") or "") or None,
-                str(data.get("filetype") or "") or None,
-                side,
+                attributes_field(data.get("attributes")),
             )
         finally:
             temp_path.unlink(missing_ok=True)
         return jsonify(image=service.summary(session), path=destination)
 
     @blueprint.post("/api/images/<image_id>/lock")
-    @image_mutation("changing file protection")
+    @image_mutation("changing the read-only attribute")
     def lock(image_id):
         data = payload()
         session = service.get(image_id)
@@ -442,12 +392,8 @@ def create_files_blueprint(
             paths = [data["path"]]
         if not isinstance(paths, list) or not paths:
             raise DiskError("Choose at least one file to update.")
-        updated = service.set_access(
-            session,
-            paths,
-            bool(data.get("unlock")),
-            optional_int(data.get("side")),
-        )
+        apply_partition(service, session, data.get("partition"))
+        updated = service.set_access(session, paths, bool(data.get("unlock")))
         return jsonify(image=service.summary(session), paths=updated)
 
     @blueprint.post("/api/images/<image_id>/metadata")
@@ -462,9 +408,8 @@ def create_files_blueprint(
         metadata = service.set_file_metadata(
             session,
             path,
-            str(data.get("protection") or ""),
-            str(data.get("comment") or ""),
-            optional_int(data.get("side")),
+            str(data.get("attributes") or ""),
+            datestamp=str(data.get("datestamp") or "") or None,
         )
         return jsonify(image=service.summary(session), path=path, metadata=metadata)
 
@@ -483,10 +428,10 @@ def create_files_blueprint(
         apply_partition(service, session, request.form.get("partition"))
         name = request.form.get("targetName") or DiskService.safe_filename(upload.filename)
         name = service.validate_leaf_name(session, name)
-        destination_dir = request.form.get("destination", "$").rstrip(".")
-        if session.kind == "ofs":
-            destination_dir = service.validate_ofs_prefix(destination_dir)
-        destination = name if session.kind == "kickfs" else atari_paths.join(destination_dir, name)
+        destination_dir = service.validate_directory_path(
+            request.form.get("destination", "")
+        )
+        destination = atari_paths.join(destination_dir, name)
         with tempfile.NamedTemporaryFile(dir=work_dir, prefix="import-", delete=False) as temp:
             upload.save(temp)
             temp_path = Path(temp.name)
@@ -495,10 +440,7 @@ def create_files_blueprint(
                 session,
                 destination,
                 temp_path,
-                protection_field(request.form.get("protection")),
-                request.form.get("comment") or None,
-                request.form.get("filetype"),
-                optional_int(request.form.get("side")),
+                attributes_field(request.form.get("attributes")),
             )
         finally:
             temp_path.unlink(missing_ok=True)
@@ -568,11 +510,10 @@ def create_files_blueprint(
                 })
             result = service.put_host_tree(
                 session,
-                request.form.get("destination", "$"),
+                request.form.get("destination", ""),
                 items,
                 preserve_directories=request.form.get("mode") == "preserve",
                 replace=request.form.get("replace") == "true",
-                side=optional_int(request.form.get("side")),
             )
         finally:
             for temp_path in temp_paths:
@@ -601,7 +542,7 @@ def create_files_blueprint(
         return jsonify(image=service.summary(target))
 
     @blueprint.post("/api/transfer-image-to-directory")
-    @image_mutation("extracting an image to FFS", target="targetImage")
+    @image_mutation("extracting an image to a volume", target="targetImage")
     def transfer_image_to_directory():
         data = payload()
         source = service.get(data["sourceImage"])
@@ -611,15 +552,15 @@ def create_files_blueprint(
         with operations.tracked(
             operation_id, "Preparing image extraction", "Extraction complete"
         ) as progress:
-            destination = service.extract_image_to_ffs_directory(
+            destination = service.extract_image_to_directory(
                 source,
                 target,
-                data.get("targetPath", "$"),
+                data.get("targetPath", ""),
                 data.get("directoryName"),
                 progress,
                 create_directory=create_directory,
             )
-            service.set_ffs_source_name(
+            service.set_source_name(
                 target,
                 destination,
                 source.distribution_name or source.name,
@@ -645,13 +586,10 @@ def create_files_blueprint(
         target = service.get(image_id)
         upload = request.files.get("image")
         if not upload or not upload.filename:
-            raise DiskError("Choose a supported disk or DMS archive to extract.")
+            raise DiskError("Choose a supported disk image or container to extract.")
         operation_id = request.form.get("operationId")
         create_directory = request.form.get("createDirectory", "yes") != "no"
-        extensions = (
-            OFS_EXTENSIONS | HDF_EXTENSIONS | DMS_EXTENSIONS | FFS_EXTENSIONS | HFE_EXTENSIONS | SCP_EXTENSIONS
-        )
-        with open_single_upload_image(upload, extensions) as image:
+        with open_single_upload_image(upload, GEMDOS_EXTENSIONS) as image:
             source = service.create_from_stream(image.filename, image.stream)
             try:
                 with operations.tracked(
@@ -659,15 +597,15 @@ def create_files_blueprint(
                     "Preparing uploaded image extraction",
                     "Extraction complete",
                 ) as progress:
-                    destination = service.extract_image_to_ffs_directory(
+                    destination = service.extract_image_to_directory(
                         source,
                         target,
-                        request.form.get("targetPath", "$"),
+                        request.form.get("targetPath", ""),
                         request.form.get("directoryName"),
                         progress,
                         create_directory=create_directory,
                     )
-                    service.set_ffs_source_name(
+                    service.set_source_name(
                         target,
                         destination,
                         best_distribution_filename(image.metadata_names),
@@ -715,10 +653,10 @@ def create_files_blueprint(
                 ) as archive_temp:
                     archive_path = Path(archive_temp.name)
                 cleanup.append(archive_path)
-                inf = format_inf(inner, metadata)
+                record = format_attribute_record(inner, metadata)
                 with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     archive.write(path, name)
-                    archive.writestr(f"{name}.inf", inf)
+                    archive.writestr(f"{name}{ATTRIBUTE_SIDECAR_SUFFIX}", record)
                 download_path = archive_path
                 download_name = f"{name}-with-metadata.zip"
                 mimetype = "application/zip"

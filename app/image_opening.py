@@ -10,25 +10,31 @@ from werkzeug.datastructures import FileStorage
 
 from .archive_utils import open_disk_image_upload
 from .formats import (
-    FFS_EXTENSIONS,
-    OFS_EXTENSIONS,
+    DIM_EXTENSIONS,
+    HARD_DISK_EXTENSIONS,
     HFE_EXTENSIONS,
-    HDF_EXTENSIONS,
+    IPF_EXTENSIONS,
+    ISO_EXTENSIONS,
+    MSA_EXTENSIONS,
     ROM_EXTENSIONS,
     SCP_EXTENSIONS,
-    DMS_EXTENSIONS,
+    ST_EXTENSIONS,
+    STX_EXTENSIONS,
 )
 from .metadata_lookup import best_distribution_filename
 from .rom_components import write_combined_rom
 
 
 IMAGE_EXTENSIONS = (
-    OFS_EXTENSIONS
-    | HDF_EXTENSIONS
-    | DMS_EXTENSIONS
-    | FFS_EXTENSIONS
+    ST_EXTENSIONS
+    | MSA_EXTENSIONS
+    | DIM_EXTENSIONS
+    | STX_EXTENSIONS
+    | HARD_DISK_EXTENSIONS
     | HFE_EXTENSIONS
     | SCP_EXTENSIONS
+    | IPF_EXTENSIONS
+    | ISO_EXTENSIONS
     | ROM_EXTENSIONS
 )
 
@@ -121,7 +127,7 @@ def open_rom_component_paths(
     component_paths: list[Path],
     *,
     layout: str = "linear",
-    platform: str = "kickstart",
+    platform: str = "tos",
 ):
     """Build one logical ROM from trusted native component paths."""
     components = [Path(path) for path in component_paths]

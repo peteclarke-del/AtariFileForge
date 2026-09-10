@@ -69,9 +69,10 @@ from ..fat_media import FatMediaError, build_image_card
 from ..operations import OperationRegistry
 from ..platform_contract import PlatformRuntime
 from ..workflow_recipe import build_workflow_recipe_bundle
-from ..dms import DMSError, dms_project
+from ..msa import MSAError, msa_project
+from ..dim import DIMError, dim_project
 from ..metadata_lookup import lookup_online, parse_distribution_filename
-from .common import apply_partition, optional_int, payload, protection_field
+from .common import apply_partition, attributes_field, optional_int, payload
 from .. import atari_paths
 
 
@@ -298,8 +299,7 @@ def create_tools_blueprint(
         source = data.get("source")
         content = encode_editor_replacement(original, str(source), True) if isinstance(source, str) else original
         profile = configured.hardware_profile or {}
-        filing_system = str(profile.get("filingSystem") or "ofs").lower()
-        disk_format = "ffs" if "ffs" in filing_system else "adf"
+        disk_format = "ds-720k"
         scratch = service.create_blank(disk_format, "Editor", target_hardware=str(configured.target_hardware or "auto"))
         stack = _stack_bytes(profile.get("stack"))
         try:
@@ -326,7 +326,7 @@ def create_tools_blueprint(
     @contextmanager
     def whole_drive_media(session, configured):
         """Expose the complete hard drive to the emulator as one attached drive."""
-        if session.kind != "hdf":
+        if session.kind != "hd":
             raise DiskError("A whole-drive launch requires a hard-drive image.")
         temporary = tempfile.NamedTemporaryFile(
             dir=service.work_dir, prefix="hdf-card-", suffix=".img", delete=False,
@@ -345,7 +345,7 @@ def create_tools_blueprint(
 
     def selected_media_probe(session, configured, *, debug: bool = False):
         """Build a command for a target without extracting or changing its bytes."""
-        if getattr(session, "kind", "") == "hdf":
+        if getattr(session, "kind", "") == "hd":
             probe = copy(configured)
             probe.emulator_media_kind = "whole-drive"
             return emulator_command(probe, Path("selected-hard-drive.img"), debug=debug)
@@ -368,7 +368,7 @@ def create_tools_blueprint(
         launch.hardware_profile = dict(configured.hardware_profile or {})
         launch.hardware_profile["emulatorBoot"] = "boot" if mode.endswith("auto") else "catalogue"
 
-        if getattr(session, "kind", "") == "hdf":
+        if getattr(session, "kind", "") == "hd":
             return whole_drive_media(session, launch)
 
         @contextmanager
@@ -684,14 +684,19 @@ def create_tools_blueprint(
             optional_int(request.args.get("side")),
         ))
 
-    @blueprint.get("/api/images/<image_id>/dms-project")
-    def inspect_dms_project(image_id):
+    @blueprint.get("/api/images/<image_id>/container-project")
+    def inspect_container_project(image_id):
         session = service.get(image_id)
-        if session.kind != "dms":
-            raise DiskError("The dms project view is available only for DMS images.")
+        if session.kind not in {"msa", "dim"}:
+            raise DiskError(
+                "The container project view is available only for MSA and DIM images."
+            )
+        data = session.path.read_bytes()
         try:
-            return jsonify(dms_project(session.path.read_bytes()))
-        except DMSError as exc:
+            if session.kind == "msa":
+                return jsonify(msa_project(data))
+            return jsonify(dim_project(data))
+        except (MSAError, DIMError) as exc:
             raise DiskError(str(exc)) from exc
 
     @blueprint.get("/api/images/<image_id>/dependencies")
@@ -913,13 +918,13 @@ def create_tools_blueprint(
         path = str(data.get("path") or "")
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
-        if not path or session.kind in {"rom", "dms"} or session.hfe_read_only:
+        if not path or session.kind in {"rom", "msa", "dim", "stx"} or session.hfe_read_only:
             raise DiskError("This file's catalogue properties cannot be changed in the current image.")
         image = update_file_properties(
             service, session, path, side, str(data.get("sha256") or ""),
-            protection=protection_field(data.get("protection")) or "",
-            comment=str(data.get("comment") or ""),
-            filetype=str(data.get("filetype") or ""),
+            protection=attributes_field(data.get("attributes")) or "",
+            comment="",
+            filetype="",
             writable=bool(data.get("writable", True)),
         )
         return jsonify(image=image, inspection=inspect_editable_file(service, session, path, side))
@@ -997,11 +1002,11 @@ def create_tools_blueprint(
             parentMountable=parent_mountable, parentMessage=parent_message,
             isolatedBasic=isolated_basic,
             mediaTarget=(
-                "whole-drive" if getattr(session, "kind", "") == "hdf" else "image"
+                "whole-drive" if getattr(session, "kind", "") == "hd" else "image"
             ),
             targetLabel=(
-                f"complete hard drive · {getattr(session, 'name', 'drive.hdf')}"
-                if getattr(session, "kind", "") == "hdf"
+                f"complete hard drive · {getattr(session, 'name', 'drive.img')}"
+                if getattr(session, "kind", "") == "hd"
                 else getattr(session, "name", "Current image")
             ),
         )
@@ -1010,7 +1015,7 @@ def create_tools_blueprint(
     @request_effect("external", "booting a hard drive in an emulator sandbox")
     def drive_sandbox(image_id):
         session = service.get(image_id)
-        if session.kind != "hdf":
+        if session.kind != "hd":
             raise DiskError("The isolated sandbox requires a complete hard-drive image.")
         data = payload()
         configured = requested_emulator_session(session, data)
@@ -1069,7 +1074,7 @@ def create_tools_blueprint(
         session = service.get(image_id)
         data = payload()
         configured = requested_emulator_session(session, data)
-        path = str(data.get("path") or ("drive" if session.kind == "hdf" else ""))
+        path = str(data.get("path") or ("drive" if session.kind == "hd" else ""))
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
         if bool(data.get("interactive")):
@@ -1146,7 +1151,7 @@ def create_tools_blueprint(
         and the Workbench the operator actually built.
         """
         session = service.get(image_id)
-        if session.kind != "hdf" and not service.summary(session).get("hardDisk"):
+        if session.kind != "hd" and not service.summary(session).get("hardDisk"):
             raise DiskError("Running an installer needs a hard-drive image to install onto.")
         data = payload()
         configured = requested_emulator_session(session, data)
@@ -1345,11 +1350,11 @@ def create_tools_blueprint(
             parentMountable=parent_mountable, parentMessage=parent_message,
             isolatedBasic=isolated_basic, actions=["launch"] if available else [],
             mediaTarget=(
-                "whole-drive" if getattr(session, "kind", "") == "hdf" else "image"
+                "whole-drive" if getattr(session, "kind", "") == "hd" else "image"
             ),
             targetLabel=(
-                f"complete hard drive · {getattr(session, 'name', 'drive.hdf')}"
-                if getattr(session, "kind", "") == "hdf"
+                f"complete hard drive · {getattr(session, 'name', 'drive.img')}"
+                if getattr(session, "kind", "") == "hd"
                 else getattr(session, "name", "Current image")
             ),
         )
@@ -1360,7 +1365,7 @@ def create_tools_blueprint(
         session = service.get(image_id)
         data = payload()
         configured = requested_emulator_session(session, data)
-        path = str(data.get("path") or ("drive" if session.kind == "hdf" else ""))
+        path = str(data.get("path") or ("drive" if session.kind == "hd" else ""))
         apply_partition(service, session, data.get("partition"))
         side = optional_int(data.get("side"))
         action = str(data.get("action") or "launch").strip().lower()

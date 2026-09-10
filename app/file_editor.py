@@ -12,7 +12,7 @@ from .checksum import sha256_bytes, sha256_path
 from .content_kind import (
     analyse_content,
     format_basic_listing as _format_basic_listing,
-    is_dms_container,
+    is_container_file as is_dms_container,
 )
 from .disk_service import DiskError, DiskService, ImageSession
 from .hex_service import MAX_HEX_READ, _decode_changes, _search_pattern
