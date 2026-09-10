@@ -65,7 +65,7 @@ from ..file_editor import (
     verify_basic_source,
     encode_editor_replacement,
 )
-from ..fat_media import FatMediaError, build_hdf_card
+from ..fat_media import FatMediaError, build_image_card
 from ..operations import OperationRegistry
 from ..platform_contract import PlatformRuntime
 from ..workflow_recipe import build_workflow_recipe_bundle
@@ -336,7 +336,7 @@ def create_tools_blueprint(
         launch = copy(configured)
         launch.emulator_media_kind = "whole-drive"
         try:
-            build_hdf_card(session.path, path)
+            build_image_card(session.path, path)
             yield launch, path
         except FatMediaError as exc:
             raise DiskError(str(exc)) from exc
