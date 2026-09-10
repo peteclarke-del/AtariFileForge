@@ -359,16 +359,24 @@ class MountTests(unittest.TestCase):
             mount.close()
 
     def test_metadata_reports_whether_a_segment_is_proven(self):
+        """A segment is read-only, and its provenance travels beside it.
+
+        GEMDOS has one attribute byte and no comment, so evidence about a
+        segment cannot be smuggled into a metadata field. It belongs in the
+        extra mapping, which is where the workbench reads it from.
+        """
         mount = self.mount()
         try:
-            from atarinut.file import Access
+            from atarinut.file import FA_READONLY, FA_SYSTEM
 
             proven = mount.atari_meta("HEADER")
             fallback = mount.atari_meta("OS")
-            self.assertTrue(proven.protection & int(Access.E))
-            self.assertFalse(fallback.protection & int(Access.E))
-            self.assertIn("not recorded", fallback.comment)
-            self.assertEqual(fallback.extra["proven"], False)
+            for meta in (proven, fallback):
+                self.assertTrue(meta.attributes & FA_READONLY)
+                self.assertTrue(meta.attributes & FA_SYSTEM)
+            self.assertIs(proven.extra["proven"], True)
+            self.assertIs(fallback.extra["proven"], False)
+            self.assertIn("not recorded", fallback.extra["evidence"])
             self.assertEqual(proven.extra["address"], 0xFC0000)
             with self.assertRaises(DataError):
                 mount.atari_meta("BIOS")
