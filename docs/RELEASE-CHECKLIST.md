@@ -59,7 +59,7 @@ Use the real release value. Do not copy the example unchanged.
       ports, volume and all supported host architectures.
 - [ ] [File editor guide](FILE-EDITOR-GUIDE.md) matches editor menus, save
       semantics, analysis, emulators and read-only cases.
-- [ ] [ROM guide](ROM-GUIDE.md) matches ROM, Kickstart ROM, Workbench and programmer
+- [ ] [ROM guide](ROM-GUIDE.md) matches TOS ROM, cartridge, Workbench and programmer
       behaviour.
 - [ ] In-app Help uses the same menu names and workflow decisions.
 - [ ] Firmware notes contain current checksums and runtime paths.
@@ -84,13 +84,13 @@ For each target:
 - [ ] Docker builds from a clean enough cache to exercise changed dependency
       stages.
 - [ ] Native Capstone exposes M68K support for every 68000-family mode.
-- [ ] HxC and FS-UAE builder stages complete.
+- [ ] HxC converter and emulator stages complete.
 - [ ] Runtime package names resolve on the selected Debian base.
 - [ ] Every Python test passes inside the primary AMD64 test image.
 - [ ] `node tests/run_js_tests.js` passes in the primary test job.
 - [ ] Each architecture imports Atarinut and Flask, creates the application,
       exercises all required Capstone engines and contains the native HxC
-      and FS-UAE executables.
+      and emulator executables.
 - [ ] The service starts on port `8666` and the health endpoint reports the
       expected version.
 - [ ] `npm run test:browser` passes against the primary built service.
@@ -115,17 +115,18 @@ stages are usually consequences of that failure.
 
 The generated-media test matrix must create and reopen:
 
-- [ ] OFS ADF and ADZ images;
-- [ ] FFS DS/DD and high-density images;
-- [ ] Hardfile HDA with matching GEO;
-- [ ] HDF with a Rigid Disk Block and several partitions;
+- [ ] ST sector images at 360K, 720K, 800K and 880K;
+- [ ] a 1.44M high-density image;
+- [ ] a bare GEMDOS volume image;
+- [ ] a hard-disk image with a partition table and several partitions;
+- [ ] a byte-swapped drive image;
 - [ ] an IPF capture, skipped cleanly when the SPS decoder library is absent;
-- [ ] DMS with one proof-editable standard member and one deliberately
+- [ ] MSA and DIM containers, one of each with one deliberately
       ambiguous read-only recording;
 - [ ] clean writable HFE v1 and guarded read-only HFE variants;
 - [ ] raw and banked ROM images;
-- [ ] editable Kickstart ROM data images;
-- [ ] supported HDF and RAW GEMDOS layouts.
+- [ ] a cartridge ROM image;
+- [ ] supported raw GEMDOS layouts.
 
 Writable filesystems must write, rename, lock, move, delete, compact, save and
 reread known data. Cross-format tests must cover valid metadata conversion,
@@ -136,9 +137,9 @@ Fault tests must cover:
 
 - [ ] interrupted upload;
 - [ ] exact checkpoint rollback after a partial write;
-- [ ] full OFS data area and full OFS catalogue;
-- [ ] corrupt OFS and FFS structures;
-- [ ] mismatched or invalid HDA/GEO geometry;
+- [ ] a full data area and a full root directory;
+- [ ] corrupt boot sectors and broken chains;
+- [ ] a partition table whose entries fall outside the image;
 - [ ] cancellation at every safe cancellation boundary;
 - [ ] browser ownership isolation;
 - [ ] simulated container restart with retained sessions;
@@ -167,7 +168,7 @@ Fault tests must cover:
 - [ ] The platform-contract tests report no undeclared web or desktop route
       differences and both hosts serve the same static frontend.
 - [ ] On Linux, the GTK host starts without Docker, opens multiple associated
-      image files from both the native chooser and file manager, pairs HDA/GEO,
+      image files from both the native chooser and file manager,
       recovers its XDG sessions and saves a complete package to Downloads.
 - [ ] A managed emulator opens in a native window from the Linux host, closes
       with the application, and still uses noVNC when launched from Docker.
@@ -177,23 +178,23 @@ Fault tests must cover:
 Manually verify at least one representative image for each changed family.
 For a broad release, cover all of these:
 
-- [ ] Drawers, metadata, file operations and image creation on OFS and FFS.
-- [ ] File-level Protection, Comment and Modified columns show the values the
-      volume actually holds. Protection reads as the eight `hsparwed` letters
+- [ ] Folders, metadata, file operations and image creation on FAT12 and FAT16.
+- [ ] File-level Attributes and Modified columns show the values the
+      volume actually holds. Attributes read as the six `rhsvda` letters
       `List` prints, with the four low bits shown as permissions rather than as
       the inverted raw bits.
-- [ ] Editing protection or the comment changes the file header without
+- [ ] Editing the attributes or the datestamp changes the directory entry without
       changing file bytes and creates an undo point.
 - [ ] Partition table listing, multi-selection, Cut/Copy/Paste, access,
       duplicate detection and individual partition download.
-- [ ] Drawer traversal, same-image move, installed-disk audit and large
-      HDA/GEO save.
+- [ ] Folder traversal, same-image move, installed-software audit and large
+      drive save.
 - [ ] HFE capability detection and guarded save.
-- [ ] DMS hierarchy, same-length structural rebuild, read-only ambiguity gate
+- [ ] Container hierarchy, structural rebuild, read-only ambiguity gate
       and extraction into writable media.
-- [ ] ROM banking, command and help discovery, Workbench, compare, build,
+- [ ] ROM banking, entry-point and help discovery, Workbench, compare, build,
       programmer export and project persistence.
-- [ ] Kickstart ROM create, edit, capacity handling and save.
+- [ ] Cartridge ROM create, edit, capacity handling and save.
 - [ ] ZIP and archive hierarchy, member preview and editor hand-off.
 - [ ] Online Library machine default, sorting, already-present filtering,
       multi-selection and installation.
@@ -208,7 +209,7 @@ For a broad release, cover all of these:
       inputs, and accepted compatibility reports appear in saved ZIPs.
 - [ ] Cross-format drag, clipboard, File-menu and Online Library batches show
       the shared compatibility report before their first destination write.
-- [ ] Gotek, whole-drive, Hardfile, PiStorm and TOS deployment plans list exact
+- [ ] Gotek, SD card, CF card, host folder and ACSI deployment plans list exact
       paths and hashes, reject stale revisions and produce a ZIP whose manifest
       matches every payload. Confirm planning leaves the live image unchanged.
 
@@ -225,12 +226,12 @@ For a broad release, cover all of these:
       reversible edits and do not renumber before acceptance.
 - [ ] Disassembly headers align with rows, code/data regions persist, strings
       navigate correctly and annotations identify known calls.
-- [ ] FS-UAE options match the selected profile and mounted media
+- [ ] Emulator options match the selected profile and mounted media
       capabilities.
 - [ ] noVNC on port `8668` displays the launched emulator and errors are visible
       above the invoking editor or pane.
 - [ ] A profile that declares a mass-storage interface attaches a private copy
-      of the working `.hdf` to FS-UAE and boots from it, while a profile
+      of the working drive image to the emulator and boots from it, while a profile
       without one says so plainly instead of attaching a drive.
 
 ## 8. Performance record
@@ -245,11 +246,11 @@ python -m tools.benchmark_media --profile full --output output/benchmark-full.js
 The full record must include minimum, median and maximum duration for:
 
 - listing every partition of a hard drive;
-- listing a populated OFS catalogue;
-- browsing a generated FFS tree;
-- bulk import into an FFS hard disk;
-- browsing and checkpointing Hardfile HDA/GEO;
-- validating, documenting and building the complete Hardfile save ZIP.
+- listing a populated root directory;
+- browsing a generated folder tree;
+- bulk import into a hard-disk partition;
+- browsing and checkpointing a whole drive image;
+- validating, documenting and building the complete drive save ZIP.
 
 Keep the full JSON as a CI or release artefact. Compare medians with the previous
 candidate and explain or fix a material regression.
@@ -258,14 +259,17 @@ candidate and explain or fix a material regression.
 
 For a tagged release, use downloads produced by that exact build:
 
-- [ ] edited OFS disk on a supported Atari or Atari 600 setup;
-- [ ] edited FFS floppy;
-- [ ] Hardfile HDA/GEO on the selected normal FFS or Hardfile target;
-- [ ] a partitioned hard drive on the intended FastFileSystem ROM build;
-- [ ] Accelerated and plain-68000 launch where the profile says each applies;
-- [ ] at least one Atari 4000 or TOS image when that code changed.
+- [ ] an edited floppy image on a real ST or STE, written with a Greaseweazle
+      or read from a Gotek;
+- [ ] an edited single-sided disk on a machine with a single-sided drive;
+- [ ] a prepared hard-disk image on the ACSI or IDE interface it was built for,
+      booted with the driver the plan named or driverless under EmuTOS;
+- [ ] a partition at each size the selected TOS release can mount, and one
+      deliberately beyond it to confirm the warning was right;
+- [ ] a byte-swapped IDE image written to a CF card and read back;
+- [ ] at least one TT030 or Falcon030 image when that code changed.
 
-Confirm directory changes, protection bits, launchers and stack sizes after
+Confirm directory changes, attributes, datestamps and the boot sector after
 a cold restart, not only in an emulator.
 
 ## 10. Saved-package gate
@@ -274,9 +278,9 @@ Every tested **Save image** download must contain:
 
 - [ ] a timestamped, collision-resistant ZIP name;
 - [ ] the image under its intended user-facing name;
-- [ ] GEO, INF or other partner metadata files where applicable;
-- [ ] individual file exports include a matching `.inf` with the real Atari
-      path, load word, execute word, length and lock state;
+- [ ] partner metadata files where applicable;
+- [ ] individual file exports carry the real GEMDOS path, attributes,
+      datestamp and length;
 - [ ] generated technical `README.md` with version, profile, catalogue,
       warnings, checksums and usage notes;
 - [ ] `ROM-project.json` for ROM projects;
