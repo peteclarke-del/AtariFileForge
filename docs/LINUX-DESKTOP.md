@@ -183,18 +183,25 @@ The complete safety and troubleshooting workflow is in the
 
 ## Emulator paths
 
-The native application can use existing emulator installations. Export the
-applicable variables before launching when they are not under `/opt`:
+The native application uses the Hatari installed on the host: the Debian or
+Ubuntu `hatari` package, a Snap or a Flatpak are all found by name. Export the
+applicable variables before launching when Hatari or your TOS ROMs are
+somewhere else:
 
 ```bash
-export ATARI_FSUAE_ROOT="$HOME/Applications/fs-uae"
-export ATARI_FILE_FORGE_KICKSTART_DIR="$HOME/Atari/kickstarts"
+export ATARI_HATARI_ROOT="$HOME/Applications/hatari/bin"
+export ATARI_HATARI_EXECUTABLE="$HOME/Applications/hatari/bin/hatari"
+export ATARI_FILE_FORGE_TOS_DIR="$HOME/Atari/tos"
 export ATARI_FILE_FORGE_CAPSIMAGE="$HOME/lib/libcapsimage.so.5.1"
 tools/atari-file-forge-desktop
 ```
 
-The Workbench profile still selects the machine, additions and emulator. A
-missing executable or firmware set is reported before launch.
+`ATARI_HATARI_EXECUTABLE` names one exact binary and wins over the root
+search. No TOS ROM is needed to start: the bundled EmuTOS boots any machine
+whose TOS is absent, and the emulator status says which ROM was chosen and
+why. The Workbench profile still selects the machine, additions and emulator,
+and a missing executable is reported before launch. The
+[emulator guide](EMULATOR-GUIDE.md) lists every option each machine receives.
 
 ## Update and remove
 
