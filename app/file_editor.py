@@ -21,6 +21,10 @@ from .rom_workbench import RomWorkbenchError, disassemble
 from . import atari_paths
 
 
+#: Session kinds whose entries are whole tracks of a disk container rather
+#: than files in a filing system.
+CONTAINER_SESSION_KINDS = frozenset({"msa", "dim", "stx"})
+
 MAX_EDITABLE_TEXT = 64 * 1024
 MAX_DISASSEMBLY_FILE = 1024 * 1024
 MAX_IMAGE_SEARCH_FILES = 5000
@@ -127,16 +131,19 @@ def inspect_editable_file(
     side: int | None,
 ) -> dict:
     data, metadata, size, digest = _context(service, session, path, side, MAX_DISASSEMBLY_FILE)
-    dms_proof = None
-    if session.kind == "dms":
-        dms_proof = service.dms_member_editability(session, path)
+    container_proof = None
+    if session.kind in CONTAINER_SESSION_KINDS:
+        container_proof = service.container_member_editability(session, path)
     report = inspect_file_data(
         data, metadata, path,
-        read_only=bool(session.hfe_read_only or (dms_proof and not dms_proof["editable"])),
+        read_only=bool(
+            session.hfe_read_only
+            or (container_proof and not container_proof["editable"])
+        ),
         size=size, digest=digest,
     )
-    if dms_proof is not None:
-        report["dmsProject"] = dms_proof
+    if container_proof is not None:
+        report["containerProject"] = container_proof
     return report
 
 
@@ -205,20 +212,21 @@ def search_image_files(
 ) -> dict:
     """Search names and readable source across one mounted filesystem context.
 
-    ``all_partitions`` widens a hard-drive search to every partition the Rigid
-    Disk Block chains to, which is what a person means by "search this drive".
-    Each result then carries the device name of the partition it came from, so
-    two identically named files in different volumes stay distinguishable.
+    ``all_partitions`` widens a hard-disk search to every partition the
+    drive's own table declares, which is what a person means by "search this
+    drive". Each result then carries the drive letter of the partition it came
+    from, so two identically named files in different volumes stay
+    distinguishable.
     """
     needle = str(query or "").strip()
     if not needle:
         raise DiskError("Enter text to search for in this image.")
     if len(needle) > 200:
         raise DiskError("Search text is limited to 200 characters.")
-    if session.kind == "hdf" and session.partition is None and not all_partitions:
+    if session.kind == "hd" and session.partition is None and not all_partitions:
         raise DiskError("Open a partition on this drive before searching its files.")
 
-    if session.kind == "hdf" and all_partitions:
+    if session.kind == "hd" and all_partitions:
         return _search_every_partition(
             service, session, query, side, root, progress, supplemental
         )
@@ -397,13 +405,17 @@ def search_image_files(
 M68K_ARCHITECTURES = ("68000", "68010", "68020", "68030", "68040", "68060", "m68k")
 
 #: The processor each hardware profile implies, and why.
+#: Which processor a disassembly assumes for each medium an image can be
+#: prepared for. A floppy has to run on the machine it is put into, and the
+#: oldest of those is a 68000, so floppy code is decoded as 68000 code. A hard
+#: disk implies a machine with a hard-disk interface, and a TOS ROM implies
+#: whichever machine it was built for; both are decoded at the 68030 the TT
+#: and the Falcon carry, which is a superset.
 PROFILE_PROCESSORS = {
-    "a500-ofs": ("68000", "The active hardware profile targets an Atari 500 or 2000"),
-    # An Atari 600 is a 68000 and an Atari 1200 a 68EC020, so code that runs
-    # on both is 68000 code and that is what the profile decodes as.
-    "a1200-ffs": ("68000", "The active hardware profile targets an Atari 600 or 1200"),
-    "tos": ("68030", "The active hardware profile targets an TOS hard drive"),
-    "hardfile": ("68000", "The active hardware profile targets a UAE hardfile"),
+    "floppy": ("68000", "The active hardware profile targets a floppy any ST can read"),
+    "hd": ("68030", "The active hardware profile targets a hard disk"),
+    "volume": ("68030", "The active hardware profile targets a hard-disk volume"),
+    "tos": ("68030", "The active hardware profile targets a TOS ROM"),
 }
 
 
@@ -1042,26 +1054,30 @@ def replace_file_bytes(service, session, path, side, content: bytes, expected_sh
     current = service.read_file(session, path, side)
     if sha256_bytes(current) != expected_sha256:
         raise DiskError("The file changed after the editor opened it. Reopen the file before saving.")
-    if session.kind == "dms":
-        service.replace_dms_member(session, path, content)
-        return service.summary(session)
+    if session.kind in CONTAINER_SESSION_KINDS:
+        raise DiskError(
+            "A track inside an MSA, DIM or Pasti container cannot be rewritten "
+            "in place. Convert the container to a .st image and edit that."
+        )
     row = _find_row(service, session, path, side)
     with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="file-edit-", delete=False) as temporary:
         temporary.write(content)
         temporary_path = Path(temporary.name)
-    filetype = row.get("filetype") or None
-    protection = str(row.get("protectionText") or row.get("protection") or "") or None
-    comment = str(row.get("comment") or "") or None
-    # A locked entry shows neither the write nor the delete flag.
-    attributes = str(row.get("attr") or "")
-    was_locked = bool(attributes) and ("w" not in attributes or "d" not in attributes)
+    # The whole of a GEMDOS entry's metadata is one attribute byte and a
+    # datestamp, and both have to survive a rewrite. A read-only file is
+    # unlocked to make room for the new bytes and locked again afterwards,
+    # because that bit is exactly what stops the desktop replacing it.
+    attributes = str(row.get("attributes") or row.get("attr") or "") or None
+    datestamp = str(row.get("datestamp") or "") or None
+    was_locked = bool(attributes) and "r" in attributes
     try:
         if was_locked:
-            service.set_access(session, [path], writable=True, side=side)
-        service.mutate(session, ["rm", "--force", "{image}:" + path], side)
-        service.put(session, path, temporary_path, protection, comment, filetype, side)
+            service.set_access(session, [path], writable=True)
+        service.put(
+            session, path, temporary_path, attributes, datestamp=datestamp,
+        )
         if was_locked:
-            service.set_access(session, [path], writable=False, side=side)
+            service.set_access(session, [path], writable=False)
     finally:
         temporary_path.unlink(missing_ok=True)
     return service.summary(session)
@@ -1198,7 +1214,10 @@ def file_range(service, session, path, side, offset: int, length: int) -> dict:
         raise DiskError(f"Read between 1 and {MAX_HEX_READ:,} bytes at a time.")
     data = service.read_file(session, path, side)
     return data_range(data, atari_paths.leaf(path), offset, length,
-                      read_only=bool(session.hfe_read_only or session.kind == "dms"))
+                      read_only=bool(
+                          session.hfe_read_only
+                          or session.kind in CONTAINER_SESSION_KINDS
+                      ))
 
 
 def data_range(data: bytes, target_name: str, offset: int, length: int, *, read_only: bool) -> dict:
