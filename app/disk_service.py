@@ -2785,21 +2785,27 @@ class DiskService(
         raise DiskError("This image does not contain a file that can be read.")
 
     def _container_track_bytes(self, session: ImageSession, inner: str) -> bytes:
-        """Return the sectors of one track from an MSA, DIM or Pasti container."""
+        """Return the sectors of one track from an MSA, DIM or Pasti container.
+
+        A container stores whole tracks, and where a track sits in the disk it
+        describes is decided by the geometry rather than by the order the
+        tracks happen to be stored in. The honest way to read one is therefore
+        to rebuild the disk and take the track out of it, which is also what
+        makes a Pasti track come back with its unreadable sectors filled the
+        same way the conversion fills them.
+        """
         member = self._container_member(session, inner)
-        image, _rows = self.convert_container(session, "st"), None
-        target, _ = image
+        rebuilt, _rows = self.convert_container(session, "st")
         try:
-            geometry = resolve_geometry(target.path.stat().st_size, target.path.read_bytes()[:512])
+            sectors = rebuilt.path.read_bytes()
+            geometry = resolve_geometry(len(sectors), sectors[:512])
             if geometry is None:
                 raise DiskError("The shape of this container could not be established.")
-            offset = (
-                (int(member["track"]) * geometry.sides + int(member["side"]))
-                * geometry.track_size
-            )
-            return target.path.read_bytes()[offset : offset + geometry.track_size]
+            index = int(member["track"]) * geometry.sides + int(member["side"])
+            offset = index * geometry.track_size
+            return sectors[offset : offset + geometry.track_size]
         finally:
-            self.discard_session(target)
+            self.discard_session(rebuilt)
 
     def file_metadata(
         self,
