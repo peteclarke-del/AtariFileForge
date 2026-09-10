@@ -24,7 +24,7 @@ MAX_NATIVE_OPEN_PLANS = 256
 #: folder can hold tens of thousands, and every one of them becomes a File the
 #: page has to consider, so the selection is bounded rather than allowed to
 #: grow until the browser process is in trouble. It is well above a complete
-#: TOS release and above a TOSEC Workbench folder.
+#: TOS release and above a TOSEC-sized folder of TOS disks.
 FOLDER_SELECTION_LIMIT = 2000
 
 

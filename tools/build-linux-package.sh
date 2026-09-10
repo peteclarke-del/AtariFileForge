@@ -130,8 +130,8 @@ Depends: python3 (>= 3.11), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, gir1.2-web
 Homepage: https://github.com/peteclarke-del/AtariFileForge
 X-Atari-Target: $package_target
 Description: Atari media image workshop
- Browse, edit, validate and convert Atari, Atari 600, Atari 4000 and
- TOS disk, dms, ROM and hard-drive images from a native GTK application.
+ Browse, edit, validate and convert Atari ST, STE, TT and Falcon floppy,
+ hard-disk and ROM images from a native GTK application.
 EOF
 cp "$project_root/packaging/linux/postinst" "$stage/DEBIAN/postinst"
 cp "$project_root/packaging/linux/postrm" "$stage/DEBIAN/postrm"

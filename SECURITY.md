@@ -1,6 +1,6 @@
 # Security policy
 
-Atari File Forge parses untrusted disk, dms, ROM, archive and hard-drive
+Atari File Forge parses untrusted floppy, ROM, archive and hard-disk
 images, runs format tools, and can launch emulators. Security reports are
 therefore welcome even when the default deployment is a single-user local
 service.

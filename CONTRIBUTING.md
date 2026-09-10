@@ -41,7 +41,7 @@ ownership are defined in [GOVERNANCE.md](GOVERNANCE.md).
   retain checkpoint, rollback and cancellation behaviour.
 - Reject unsupported media explicitly. Do not guess geometry or silently
   discard metadata to make a file appear to work.
-- Keep one authoritative implementation for checksums, HDF offsets, catalogue
+- Keep one authoritative implementation for checksums, partition offsets, catalogue
   metadata, menu codecs, archive bounds, flux-container policy and filesystem
   mutations. Flux geometry, encode and verify rules belong in
   `app/flux_containers.py` so HFE and SCP cannot drift apart; they previously
