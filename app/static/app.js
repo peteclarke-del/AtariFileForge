@@ -1,24 +1,23 @@
 const {
+  drivePath,
   entrySelectionKey,
   fullPath,
-  isOfsPane,
+  isGemdosPane,
   newPaneState,
   normalisePage,
   parentPath,
   pathNameWithoutExtension,
-  restoredOfsPath,
+  restoredGemdosPath,
   selectionKeys,
   setSelection,
 } = window.AtariWorkspace;
 const { entryIcon, fileKindKey, FILE_ICONS, PANE_ICONS } = window.AtariFileVisuals;
 const { newUuid } = window.AtariIdentifiers;
-const { formatProtection, protectionFlags, protectionHex } = window.AtariMetadata;
+const { attributeFlags, attributeHex, formatAttributes, formatDatestamp, parseDatestamp } = window.AtariMetadata;
 const {
-  allocateFilesToOfsDisks,
   ignoredFolderFile,
-  normaliseProtection,
+  normaliseAttributes,
   targetNameRule,
-  uniqueOfsNames,
 } = window.AtariImportPlanning;
 
 const panes = [newPaneState()];
@@ -89,7 +88,7 @@ const workspacePersistence = window.AtariWorkspacePersistence.create({
   storage: persistentStorage,
   storageKey: OPEN_PANES_STORAGE_KEY,
   newPaneState,
-  restoredOfsPath,
+  restoredGemdosPath,
   api,
   rebuildPaneHosts,
   reconcilePaneWindows: () => paneWindowManager.reconcile(),
@@ -350,33 +349,67 @@ function paneLabel(index) {
   return `Pane ${index + 1}${panes[index].image ? ` · ${panes[index].image.name}` : " · Empty"}`;
 }
 
+//: The floppy geometries a TOS machine can format, smallest first. A single
+//: sided drive can only reach the first three; every double sided drive can
+//: read all of the 720K, 800K and 880K formats, and only the later Ajax
+//: controller reaches 1.44M.
+const FLOPPY_GEOMETRIES = Object.freeze([
+  { value: "ss-360k", label: "360K", size: 368640, singleSided: true, hfe: "" },
+  { value: "ss-400k", label: "400K", size: 409600, singleSided: true, hfe: "hfe-st-360k" },
+  { value: "ss-440k", label: "440K", size: 450560, singleSided: true, hfe: "hfe-st-360k" },
+  { value: "ds-720k", label: "720K", size: 737280, singleSided: false, hfe: "hfe-st-720k" },
+  { value: "ds-800k", label: "800K", size: 819200, singleSided: false, hfe: "hfe-st-800k" },
+  { value: "ds-880k", label: "880K", size: 901120, singleSided: false, hfe: "hfe-st-880k" },
+  { value: "hd-1440k", label: "1.44M", size: 1474560, singleSided: false, hfe: "hfe-st-1440k" },
+]);
+
+function floppyGeometryForSize(size) {
+  const bytes = Number(size || 0);
+  return [...FLOPPY_GEOMETRIES].reverse().find(entry => bytes >= entry.size) || FLOPPY_GEOMETRIES[3];
+}
+
 function matchingBlankImageFormat(pane) {
   const image = pane.image;
-  if (!image) return { value: "adf", label: "OFS ADF" };
-  if (image.kind === "hdf") return { value: "hdf", label: "HDF" };
+  if (!image) return { value: "ds-720k", label: "720K floppy" };
+  if (image.kind === "hd") return { value: "hd", label: "Hard drive" };
   if (image.kind === "rom") return { value: "rom", label: "ROM" };
-  if (image.kind === "kickfs") return { value: "kickfs", label: "Atari Kickstart ROM" };
-  if (image.kind === "ofs" || image.kind === "ffs") {
-    if (image.hasDescriptor) return { value: "hardfile", label: "UAE hardfile HDA + GEO" };
-    if (image.hardDisk || image.targetHardware === "tos") return { value: "ffs-hard", label: "TOS HDF" };
-    // A floppy's DOS type is not carried in the summary, so a new blank
-    // matches the filing system and the density and takes the international
-    // variant, which is what a modern Workbench formats.
-    const highDensity = image.size >= 1802240;
-    const ofs = image.kind === "ofs";
-    const value = ofs
-      ? (highDensity ? "adf-hd" : "adf")
-      : (highDensity ? "ffs-hd" : "ffs-intl");
-    const label = `${ofs ? "OFS" : "FFS"} ADF · ${highDensity ? "1.76 MiB" : "880 KiB"}`;
-    if (image.containerFormat === "hfe") {
-      const wrapped = ofs
-        ? (highDensity ? "hfe-adf-hd" : "hfe-adf")
-        : (highDensity ? "hfe-ffs-hd" : "hfe-ffs-intl");
-      return { value: wrapped, label: `HFE ${label}` };
+  if (image.kind === "tosrom") return { value: "cartridge", label: "Cartridge ROM" };
+  if (image.kind === "gemdos") {
+    if (image.hardDisk || image.targetHardware === "hd") return { value: "hd", label: "Hard drive" };
+    if (image.targetHardware === "volume") return { value: "volume", label: "Bare volume" };
+    // A GEMDOS floppy is described by its geometry alone: FAT12 on every one
+    // of them, so a new blank simply matches the shape of the open disk and
+    // stays in the container it arrived in.
+    const geometry = floppyGeometryForSize(image.size);
+    if (image.containerFormat === "hfe" && geometry.hfe) {
+      return { value: geometry.hfe, label: `HFE ${geometry.label} floppy` };
     }
-    return { value, label };
+    return { value: geometry.value, label: `${geometry.label} floppy` };
   }
-  return { value: "adf", label: "OFS ADF" };
+  return { value: "ds-720k", label: "720K floppy" };
+}
+
+//: The floppy containers a pane can open. Each holds the sectors of one
+//: disk in its own packing, so a pane shows the container project rather
+//: than a mounted volume until the sectors are converted.
+const CONTAINER_KINDS = Object.freeze(["msa", "dim", "stx"]);
+//: Media whose bytes this build never writes back: a Pasti capture keeps
+//: information a sector image cannot hold, and a CD and a TOS ROM are read
+//: from rather than edited.
+const READ_ONLY_KINDS = Object.freeze(["stx", "iso", "tosrom"]);
+const CONTAINER_LABELS = Object.freeze({
+  msa: "Magic Shadow Archiver image",
+  dim: "FastCopy Pro image",
+  stx: "Pasti capture",
+});
+
+//: The badge colour a pane wears. A mounted partition looks like the GEMDOS
+//: volume it is, and a TOS ROM shares the ROM colour.
+function paneFormatClass(pane) {
+  const kind = pane.image?.kind || "";
+  if (kind === "hd" && pane.partition !== null) return "gemdos";
+  if (kind === "tosrom") return "rom";
+  return kind;
 }
 
 function paneDragHandle(index) {
@@ -553,7 +586,7 @@ function clipboardItemsForPane(index) {
   if (!pane?.image) return [];
   // A partition table has nothing to put on a clipboard: partitions are
   // declared by the drive, not moved between drives.
-  if (pane.image.kind === "hdf" && pane.partition === null) return [];
+  if (pane.image.kind === "hd" && pane.partition === null) return [];
   if (pane.image.kind === "rom") {
     return selectedEntries(index).map(entry => ({
       pane: index,
@@ -594,9 +627,9 @@ function rowIsPendingCut(pane, entry) {
 }
 
 function canPasteIntoPane(pane) {
-  if (!workspaceClipboard || !pane?.image || pane.image.readOnly || ["dms", "iso"].includes(pane.image.kind)) return false;
+  if (!workspaceClipboard || !pane?.image || pane.image.readOnly || READ_ONLY_KINDS.includes(pane.image.kind) || CONTAINER_KINDS.includes(pane.image.kind)) return false;
   // A partition table is not a place files can be pasted; a volume always is.
-  return !(pane.image.kind === "hdf" && pane.partition === null);
+  return !(pane.image.kind === "hd" && pane.partition === null);
 }
 
 function selectRow(index, key, { toggle = false, range = false } = {}) {
@@ -662,50 +695,53 @@ function renderPane(index, preserveScroll = false) {
 
   const selected = selectedEntry(index);
   const selectedKeys = new Set(selectionKeys(pane));
-  const isPartitionIndex = pane.image.kind === "hdf" && pane.partition === null;
-  const isDrive = pane.image.kind === "hdf";
-  const isDMS = pane.image.kind === "dms";
+  const isPartitionIndex = pane.image.kind === "hd" && pane.partition === null;
+  const isDrive = pane.image.kind === "hd";
+  //: A floppy container holds the sectors of one disk rather than a mounted
+  //: volume, so it is browsed as a project and converted rather than edited
+  //: in place. A Pasti capture is read-only by nature.
+  const isContainer = CONTAINER_KINDS.includes(pane.image.kind);
   //: A CD is read-only by nature, so it offers browsing and copying out and
   //: none of the controls that would write to it.
   const isIso = pane.image.kind === "iso";
   const isRom = pane.image.kind === "rom";
-  const isKickfs = pane.image.kind === "kickfs";
-  const isFfsHdd = pane.image.kind === "ffs" && pane.image.hardDisk;
-  // Installing anything -- Workbench, a staged title, WHDLoad -- needs a
-  // writable GEMDOS volume to install into.
+  const isTosRom = pane.image.kind === "tosrom";
+  const isHardDiskVolume = pane.image.kind === "gemdos" && Boolean(pane.image.hardDisk);
+  // Staging a disk, installing a title or preparing a drive all need a
+  // writable GEMDOS volume to work on.
   const acceptsInstall = paneAcceptsInstall(pane);
   const isArchive = Boolean(pane.archivePath);
-  const isOfs = isOfsPane(pane);
-  // Every GEMDOS volume nests drawers, OFS included, so the only views
-  // without them are the ones with no directory structure at all.
-  const supportsFolders = !isPartitionIndex && !isDMS && !isArchive && !isRom && !isKickfs;
+  const isGemdos = isGemdosPane(pane);
+  // Every GEMDOS volume nests folders, so the only views without them are
+  // the ones with no directory structure at all.
+  const supportsFolders = !isPartitionIndex && !isContainer && !isArchive && !isRom && !isTosRom;
   const canFolder = supportsFolders && !pane.image.readOnly;
-  const canEdit = !isPartitionIndex && !isDMS && !isArchive && !pane.image.readOnly;
+  const canEdit = !isPartitionIndex && !isContainer && !isArchive && !pane.image.readOnly;
   const isDsd = pane.image.doubleSided;
-  const kind = pane.image.kind === "hdf" && pane.partition !== null ? "ofs" : pane.image.kind;
+  const kind = paneFormatClass(pane);
+  const driveLetter = pane.partitionName || pane.image.driveLetter || "";
   const location = isArchive
-    ? `${pane.archiveName} · /${pane.archiveMember || ""}`
+    ? `${pane.archiveName} · \\${pane.archiveMember || ""}`
     : isPartitionIndex
-    ? "HDF disk index"
-    : isDMS
-      ? "DiskMasher archive"
+    ? "AHDI partition table"
+    : isContainer
+      ? `${CONTAINER_LABELS[pane.image.kind] || "Floppy container"} · ${pane.image.readOnly ? "read-only" : "convert to browse"}`
       : isRom
         ? `${pane.image.rom?.platform || "Atari"} · ${pane.image.rom?.bankCount || 0} bank(s)`
-      : isKickfs
-        ? `${pane.image.kickfs?.title || "Kickstart ROM"} · version ${pane.image.kickfs?.version ?? 0} · flat data ROM`
+      : isTosRom
+        ? `${pane.image.tosrom?.title || "TOS ROM"} · version ${pane.image.tosrom?.version ?? 0} · read-only segments`
       : pane.partition !== null
-        ? `${pane.partitionName || `Partition ${pane.partition}`}: · ${pane.path || ":"}`
+        ? `${pane.partitionName || `Partition ${pane.partition}`} · ${drivePath(driveLetter, pane.path)}`
         : pane.image.filesystemCapabilities
-          ? `${pane.image.filesystemCapabilities.format} · ${pane.path || ":"}`
-          : `Volume root · ${pane.path || ":"}`;
-  const hasParentEntry = isArchive || (!isPartitionIndex && !isDMS && !isRom && (
+          ? `${pane.image.filesystemCapabilities.format} · ${drivePath(driveLetter, pane.path)}`
+          : `Volume root · ${drivePath(driveLetter, pane.path)}`;
+  const hasParentEntry = isArchive || (!isPartitionIndex && !isContainer && !isRom && (
     pane.partition !== null || pane.path !== ""
   ));
   const parentRow = hasParentEntry ? `<tr class="file-row parent-row" aria-label="Parent directory" tabindex="0" draggable="false" data-parent="1" data-key=".." data-name=".." data-type="dir" data-partition="">
     <td class="file-name-cell"><div class="file-name-wrap"><span class="file-icon dir" title="Parent directory">${FILE_ICONS.folderUp}</span><strong>..</strong></div></td>
     <td class="meta">Parent directory</td>
     <td class="meta">-</td>
-    <td class="meta address-cell">-</td>
     <td class="meta address-cell">-</td>
     <td><span class="pill">-</span></td>
   </tr>` : "";
@@ -722,9 +758,9 @@ function renderPane(index, preserveScroll = false) {
       : entry.filetype || entry.contentKind || "-";
     const attr = entryType === "partition"
       ? (entry.bootable ? "Boot" : "-")
-      : entry.attr || (entry.protection != null ? formatProtection(entry.protection) : "");
+      : entry.attributes || (entry.attr != null ? formatAttributes(entry.attr) : "");
     const entryKey = entrySelectionKey(entry);
-    const rowActionable = !isArchive && !isVirtual && !pane.image.readOnly && !isDMS && !isPartitionIndex && canEdit;
+    const rowActionable = !isArchive && !isVirtual && !pane.image.readOnly && !isContainer && !isPartitionIndex && canEdit;
     const accessActionable = rowActionable;
     const downloadable = !isPartitionIndex && !isDir && !isVirtual && !isRom;
     const openHint = isArchiveFile ? ' title="Double-click to browse this archive"' : downloadable ? ' title="Double-click to open"' : "";
@@ -737,22 +773,24 @@ function renderPane(index, preserveScroll = false) {
       ${!isRom || entry.header ? `<button class="row-action row-rename" type="button" draggable="false" title="Rename ${esc(actionName)}" aria-label="Rename ${esc(actionName)}" ${multiSelection ? "hidden" : ""}>✎</button>` : ""}
       ${rowActionable ? `<button class="row-action delete row-delete" type="button" draggable="false" title="Delete ${esc(actionName)}" aria-label="Delete ${esc(actionName)}" ${hideGroupAction ? "hidden" : ""}>×</button>` : ""}
     </span>` : "";
-    const accessCell = `<td class="access-cell"><span class="pill">${esc(attr || detail)}</span>${accessActionable && !isRom ? `<span class="access-actions" ${hideGroupAction ? "hidden" : ""}>
-      <button class="row-action row-read-write" type="button" draggable="false" title="${isKickfs ? "Make loadable" : "Mark read / write"} · ${esc(actionName)}" aria-label="${isKickfs ? "Make loadable" : "Mark read / write"} ${esc(actionName)}">◇</button>
-      <button class="row-action row-read-only" type="button" draggable="false" title="${isKickfs ? "Mark execute-only" : "Mark read-only"} · ${esc(actionName)}" aria-label="${isKickfs ? "Mark run-only" : "Mark read-only"} ${esc(actionName)}">◆</button>
+    const accessCell = `<td class="access-cell" data-label="Attributes"><span class="pill" title="GEMDOS attributes · read-only, hidden, system, volume label, directory, archive">${esc(attr || detail)}</span>${accessActionable && !isRom ? `<span class="access-actions" ${hideGroupAction ? "hidden" : ""}>
+      <button class="row-action row-read-write" type="button" draggable="false" title="Clear the read-only attribute · ${esc(actionName)}" aria-label="Clear the read-only attribute on ${esc(actionName)}">◇</button>
+      <button class="row-action row-read-only" type="button" draggable="false" title="Set the read-only attribute · ${esc(actionName)}" aria-label="Set the read-only attribute on ${esc(actionName)}">◆</button>
     </span>` : ""}</td>`;
-    const editableMetadata = !isVirtual && !isArchive && !pane.image.readOnly && !isDMS && !isRom;
+    const editableMetadata = !isVirtual && !isArchive && !pane.image.readOnly && !isContainer && !isRom && !isTosRom;
     const romHeader = entry.header || null;
     const romOffset = Number.isFinite(Number(entry.fileOffset)) ? Number(entry.fileOffset) : Number(entry.bank || 0) * Number(pane.image.rom?.bankSize || entry.length || 0);
-    const romMapped = pane.image.rom?.platform === "kickstart" && Number(entry.length) <= 16384
-      ? `Mapped 40960-&amp;${(0x8000 + Math.max(0, Number(entry.length) - 1)).toString(16).toUpperCase().padStart(4, "0")}`
+    // A cartridge is decoded at $FA0000 on every ST-family machine; anything
+    // else is a bank of bytes with no fixed home in the address space.
+    const romMapped = pane.image.rom?.platform === "cartridge" && Number(entry.length) <= 131072
+      ? `Mapped &amp;FA0000-&amp;${(0xFA0000 + Math.max(0, Number(entry.length) - 1)).toString(16).toUpperCase().padStart(6, "0")}`
       : "No fixed CPU mapping";
     const romPurpose = entry.empty
       ? "Available erased bank"
       : romHeader
         ? `${esc(romHeader.roles)} · ${esc(romHeader.processor)}`
         : entry.extensionHeader
-          ? "TOS extension ROM"
+          ? "Cartridge or expansion ROM header"
           : "Unrecognised header / raw bytes";
     const romEntries = romHeader
       ? [["Language", romHeader.languageEntry], ["Service", romHeader.serviceEntry]].filter(([_label, value]) => Number.isFinite(Number(value))).map(([label, value]) => `${label} &amp;${Number(value).toString(16).toUpperCase()}`).join(" · ")
@@ -768,8 +806,9 @@ function renderPane(index, preserveScroll = false) {
     const romMatches = entry.matchingBanks?.length ? `Identical to bank${entry.matchingBanks.length === 1 ? "" : "s"} ${entry.matchingBanks.join(", ")}` : "Unique bank contents";
     const cells = isPartitionIndex
       ? `<td class="file-name-cell"><div class="file-name-wrap"><span class="file-icon ${visual.kind}" title="${esc(visual.label)}">${icon}</span><strong>${esc(entry.name)}</strong></div></td>
-      <td class="meta">${esc(entry.format || "Unknown")}</td>
+      <td class="meta">${esc(entry.identifier || entry.filetype || "Unknown")}</td>
       <td class="meta">${esc(humanSize(entry.length))}</td>
+      <td class="meta">${esc(entry.format || "Unknown filing system")}</td>
       <td><span class="pill">${entry.bootable ? `Boot priority ${Number(entry.bootPriority ?? 0)}` : "No"}</span></td>`
       : isRom ? `<td class="rom-bank-cell" data-label="Bank and address"><strong>Bank ${String(entry.bank).padStart(3, "0")}</strong><small>File &amp;${romOffset.toString(16).toUpperCase().padStart(6, "0")}</small><small>${romMapped}</small></td>
         <td class="file-name-cell rom-identity-cell" data-label="Identity"><div class="file-name-wrap"><span class="file-icon ${visual.kind}" title="${esc(visual.label)}">${icon}</span><strong>${esc(entry.name)}</strong>${rowActions}</div><small>${romIdentityDetail}</small></td>
@@ -778,12 +817,11 @@ function renderPane(index, preserveScroll = false) {
       : `<td class="file-name-cell"><div class="file-name-wrap"><span class="file-icon ${visual.kind}" title="${esc(visual.label)}">${icon}</span><strong>${esc(entry.name)}</strong>
         ${downloadAction}${rowActions}
       </div></td>
-      <td class="meta">${esc(isVirtual ? "OFS catalogue" : isDir ? (isArchive ? (pane.archiveKind === "dms" ? "DMS folder" : "Archive folder") : "Directory") : isArchiveFile ? "Archive" : isArchive ? (pane.archiveKind === "dms" ? "DMS file" : "Archive file") : "File")}</td>
+      <td class="meta">${esc(isVirtual ? "Grouped results" : isDir ? (isArchive ? "Container folder" : "Folder") : isArchiveFile ? "Container" : isArchive ? "Container file" : "File")}</td>
       <td class="meta">${esc(size)}</td>
-      <td class="meta">${esc(entry.datestamp || "-")}</td>
-      <td class="meta comment-cell" data-label="Comment">${editableMetadata
-        ? `<button type="button" class="metadata-edit" title="Edit the protection bits and comment">${esc(entry.comment || "-")}</button>`
-        : esc(entry.comment || "-")}</td>
+      <td class="meta datestamp-cell" data-label="Modified">${editableMetadata
+        ? `<button type="button" class="metadata-edit" title="Edit the GEMDOS attributes and datestamp">${esc(entry.datestamp || "-")}</button>`
+        : esc(entry.datestamp || "-")}</td>
       ${accessCell}`;
     return `<tr class="file-row${selectedKeys.has(entryKey) ? " selected" : ""}${isVirtual ? " virtual-catalogue-row" : ""}${entry.catalogueBreak ? " catalogue-break" : ""}${rowIsPendingCut(pane, entry) ? " clipboard-cut" : ""}"${openHint}
       aria-selected="${selectedKeys.has(entryKey)}"
@@ -802,10 +840,10 @@ function renderPane(index, preserveScroll = false) {
   const clipboardTools = `<details class="tool-menu edit-tools">
     <summary class="tool"><b>✎</b><span>Edit</span></summary>
     <div class="tool-menu-panel">
-      <button class="menu-command clipboard-cut-action" ${!isArchive && clipboardSelection.length && !pane.image.readOnly && !isDMS ? "" : "disabled"} title="Cut selected items"><b>✂</b><span>Cut <small>Ctrl/Cmd+X</small></span></button>
+      <button class="menu-command clipboard-cut-action" ${!isArchive && clipboardSelection.length && !pane.image.readOnly && !isContainer ? "" : "disabled"} title="Cut selected items"><b>✂</b><span>Cut <small>Ctrl/Cmd+X</small></span></button>
       <button class="menu-command clipboard-copy-action" ${!isArchive && clipboardSelection.length ? "" : "disabled"} title="Copy selected items"><b>⧉</b><span>Copy <small>Ctrl/Cmd+C</small></span></button>
       <button class="menu-command clipboard-paste-action" ${!isArchive && canPasteIntoPane(pane) ? "" : "disabled"} title="Paste once into this location"><b>▣</b><span>Paste <small>Ctrl/Cmd+V</small></span></button>
-      ${pane.image.readOnly || isDMS ? "" : `<span class="menu-separator" role="separator"></span>
+      ${pane.image.readOnly || isContainer ? "" : `<span class="menu-separator" role="separator"></span>
         <button class="menu-command undo-image" ${pane.image.checkpoints?.canUndo ? "" : "disabled"}><b>↶</b><span>Undo last change</span></button>
         <button class="menu-command manage-checkpoints"><b>◉</b><span>Checkpoints…</span></button>`}
     </div>
@@ -817,9 +855,9 @@ function renderPane(index, preserveScroll = false) {
       <button class="menu-command menu-load-image"><b>▤</b><span>Open image…</span></button>
       <button class="menu-command menu-save-image"><b>⇩</b><span>Save image</span></button>
       ${pane.image.exportFormats?.length ? `<button class="menu-command menu-export-image"><b>⇄</b><span>Export as…</span></button>` : ""}
-      ${isDMS || pane.image.readOnly ? "" : `<span class="menu-separator" role="separator"></span>`}
+      ${isContainer || pane.image.readOnly ? "" : `<span class="menu-separator" role="separator"></span>`}
       ${isPartitionIndex ? ""
-        : !isDMS && !pane.image.readOnly ? `<button class="menu-command import-file"><b>＋</b><span>${isRom ? "Insert ROM bank(s)…" : "Insert File…"}</span></button>
+        : !isContainer && !pane.image.readOnly ? `<button class="menu-command import-file"><b>＋</b><span>${isRom ? "Insert ROM bank(s)…" : "Insert File…"}</span></button>
           <button class="menu-command import-folder"><b>▣</b><span>Insert Folder &amp; Contents…</span></button>
           ${isRom
             ? `<button class="menu-command append-rom-bank"><b>▥</b><span>Append empty bank</span></button>`
@@ -833,10 +871,9 @@ function renderPane(index, preserveScroll = false) {
     <div class="tool-menu-panel">
       <button class="menu-command view-refresh"><b>↻</b><span>Refresh current view</span></button>
       ${pane.partition !== null ? '<button class="menu-command view-partitions"><b>▦</b><span>Return to the partition table</span></button>' : ""}
-      ${isDsd ? `<button class="menu-command switch-side"><b>⇄</b><span>Switch to side ${pane.side === 2 ? "0" : "2"}</span></button>` : ""}
     </div>
   </details>`;
-  const onlineLibraryAction = isArchive || isDMS || isRom || pane.image.readOnly ? "" :
+  const onlineLibraryAction = isArchive || isContainer || isRom || pane.image.readOnly ? "" :
     `<button class="menu-command online-library" ><b>⌕</b><span>Find software online…</span></button>`;
   const libraryTools = `<details class="tool-menu library-tools">
     <summary class="tool"><b>⌕</b><span>Library</span></summary>
@@ -857,17 +894,19 @@ function renderPane(index, preserveScroll = false) {
       <button class="menu-command export-manifest"><b>⇩</b><span>Export collection manifest</span></button>
     </div>
   </details>`;
-  const emulatorMediaApplicable = !isArchive && !isRom && !isKickfs;
+  const emulatorMediaApplicable = !isArchive && !isRom && !isTosRom;
   const emulatorTargetName = isDrive
     ? "hard drive"
-    : isDMS ? "DMS archive" : "image";
+    : isContainer ? "floppy container" : "image";
   const emulatorActions = emulatorMediaApplicable
     ? `<span class="menu-separator" role="separator"></span>
         <button class="menu-command run-pane-emulator"><b>▶</b><span>Run ${emulatorTargetName}…</span></button>
         <button class="menu-command debug-pane-emulator"><b>⌁</b><span>Debug ${emulatorTargetName}…</span></button>`
     : "";
-  const physicalSuffix = String(pane.image.name || "").toLowerCase().match(/\.(adf|adz|hfe|scp|ipf|img)$/);
-  const physicalMediaApplicable = !isFfsHdd && Boolean(physicalSuffix);
+  // A hard drive cannot be written to a floppy drive, so only the floppy
+  // containers offer a physical write.
+  const physicalSuffix = String(pane.image.name || "").toLowerCase().match(/\.(st|msa|dim|stx|hfe|scp|ipf)$/);
+  const physicalMediaApplicable = !isDrive && !isHardDiskVolume && Boolean(physicalSuffix);
   const physicalHostAvailable = hasHostCapability("physical-floppy-write");
   const physicalFloppyAction = physicalMediaApplicable
     ? `<span class="menu-separator" role="separator"></span><button class="menu-command write-physical-floppy" ${physicalHostAvailable ? "" : 'disabled title="Physical drives are available in the native Linux host."'}><b>▣</b><span>Write physical floppy…</span></button>`
@@ -880,13 +919,13 @@ function renderPane(index, preserveScroll = false) {
       ${physicalFloppyAction}
       <button class="menu-command build-deployment"><b>⇩</b><span>Build hardware deployment…</span></button>
       ${isPartitionIndex ? "" : `<button class="menu-command validate-image"><b>✓</b><span>${isRom ? "Check ROM structure" : "Check filesystem"}</span></button>`}
-      ${isFfsHdd ? '<button class="menu-command audit-ffs-installations"><b>⌁</b><span>Check installed disk software…</span></button>' : ""}
+      ${isHardDiskVolume ? '<button class="menu-command audit-drive-software"><b>⌁</b><span>Check installed drive software…</span></button>' : ""}
       ${acceptsInstall ? `<span class="menu-separator" role="separator"></span>
-        <button class="menu-command install-workbench"><b>⌘</b><span>Install Workbench…</span></button>
-        <button class="menu-command install-tos-cd"><b>◎</b><span>Install TOS 3.5 or 3.9…</span></button>
-        <button class="menu-command staged-installations"><b>▤</b><span>Staged installations…</span></button>`
-        : '<button class="menu-command staged-installations"><b>▤</b><span>Staged installations…</span></button>'}
-      ${isArchive ? "" : isRom ? '<button class="menu-command rom-workbench"><b>⌬</b><span>ROM Workbench…</span></button><button class="menu-command configure-rom"><b>▥</b><span>ROM layout…</span></button>' : isKickfs ? `${pane.image.readOnly ? "" : '<button class="menu-command configure-kickfs"><b>▥</b><span>Kickstart ROM properties…</span></button>'}` : isPartitionIndex || isDMS ? (isDMS ? '<button class="menu-command dms-project"><b>≋</b><span>DMS archive project…</span></button><button class="menu-command convert-dms"><b>⇥</b><span>Convert archive to disk</span></button>' : "") : pane.image.readOnly ? "" : '<button class="menu-command compact-image"><b>≋</b><span>Compact filesystem</span></button>'}
+        <button class="menu-command prepare-drive"><b>⌘</b><span>Prepare this drive…</span></button>
+        <button class="menu-command run-title-installer"><b>◎</b><span>Run a title's own installer…</span></button>
+        <button class="menu-command staged-installations"><b>▤</b><span>Staged disks…</span></button>`
+        : '<button class="menu-command staged-installations"><b>▤</b><span>Staged disks…</span></button>'}
+      ${isArchive ? "" : isRom ? '<button class="menu-command rom-workbench"><b>⌬</b><span>ROM Workbench…</span></button><button class="menu-command configure-rom"><b>▥</b><span>ROM layout…</span></button>' : isTosRom ? "" : isPartitionIndex || isContainer ? (isContainer ? '<button class="menu-command container-project"><b>≋</b><span>Container project…</span></button><button class="menu-command convert-container"><b>⇥</b><span>Convert container…</span></button>' : "") : pane.image.readOnly ? "" : '<button class="menu-command compact-image"><b>≋</b><span>Compact filesystem</span></button>'}
     </div>
   </details>`;
   const exportControl = exportAvailability(pane.image);
@@ -919,12 +958,12 @@ function renderPane(index, preserveScroll = false) {
     <nav class="toolbar" aria-label="Pane menus">
       ${toolbarMarkup}
     </nav>
-    <div class="breadcrumbs">${isArchive ? archiveCrumbs(pane) : isPartitionIndex ? '<span class="crumb current">All disks</span>' : isRom ? '<span class="crumb current">ROM bank inventory</span>' : pane.partition !== null ? `<button class="crumb hdf-home">All disks</button><span>›</span>${crumbs(pane.path, isOfs)}` : crumbs(pane.path, isOfs)}</div>
+    <div class="breadcrumbs">${isArchive ? archiveCrumbs(pane) : isPartitionIndex ? '<span class="crumb current">All drives</span>' : isRom ? '<span class="crumb current">ROM bank inventory</span>' : pane.partition !== null ? `<button class="crumb drive-home">All drives</button><span>›</span>${crumbs(pane.path, false, driveLetter)}` : crumbs(pane.path, false, driveLetter)}</div>
     ${isRom ? `<aside class="rom-pane-guide" aria-label="ROM pane guidance"><span><b>ⓘ Info</b> decodes headers, commands, strings and modules</span><span><b>Double-click</b> opens the bank in Hex</span><span><b>Tools → ROM Workbench</b> analyses code, revisions and hardware</span><span><b>ROM layout</b> changes bank interpretation without rewriting bytes</span></aside>` : ""}
-    ${isKickfs ? `<aside class="rom-pane-guide" aria-label="Kickstart ROM pane guidance"><span><b>Flat catalogue</b> · case-sensitive names, maximum 10 characters</span><span><b>Access</b> switches between readable and execute-only</span><span><b>Kickstart ROM properties</b> edits title, version and copyright</span><span><b>Check filesystem</b> verifies every block CRC</span></aside>` : ""}
+    ${isTosRom ? `<aside class="rom-pane-guide" aria-label="TOS ROM pane guidance"><span><b>Read-only segments</b> · the operating system as TOS lays it out in ROM</span><span><b>Double-click</b> opens a segment in Hex</span><span><b>Check ROM structure</b> verifies the header and its checksum</span><span><b>A TOS ROM is never written</b> · export the bytes to change them elsewhere</span></aside>` : ""}
     <div class="list-wrap">
       ${loadingMarkup(pane)}
-      ${(parentRow || rows) ? `<table class="file-list${isPartitionIndex ? " partition-list" : ""}${isRom ? " rom-bank-list" : " catalogue-file-list"}" role="grid" aria-label="${isPartitionIndex ? "Hard drive partitions" : isRom ? "ROM bank inventory" : "Files in " + esc(location)}"><thead><tr>${isPartitionIndex ? "<th>Device</th><th>Filing system</th><th>Size</th><th>Boot</th>" : isRom ? "<th>Bank and address</th><th>Identity</th><th>Purpose and entry points</th><th>Contents</th>" : '<th>Name</th><th>Kind</th><th>Size</th><th title="Datestamp of the last change">Modified</th><th title="File comment">Comment</th><th>Protection</th>'}</tr></thead><tbody>${parentRow}${rows}</tbody></table>` : '<div class="empty-list">Nothing here yet.<br>Drop a host file into this pane to add it.</div>'}
+      ${(parentRow || rows) ? `<table class="file-list${isPartitionIndex ? " partition-list" : ""}${isRom ? " rom-bank-list" : " catalogue-file-list"}" role="grid" aria-label="${isPartitionIndex ? "Hard drive partitions" : isRom ? "ROM bank inventory" : "Files in " + esc(location)}"><thead><tr>${isPartitionIndex ? "<th>Drive</th><th>Identifier</th><th>Size</th><th>Filing system</th><th>Boot</th>" : isRom ? "<th>Bank and address</th><th>Identity</th><th>Purpose and entry points</th><th>Contents</th>" : '<th>Name</th><th>Kind</th><th>Size</th><th title="Datestamp of the last change">Modified</th><th title="GEMDOS attribute byte">Attributes</th>'}</tr></thead><tbody>${parentRow}${rows}</tbody></table>` : '<div class="empty-list">Nothing here yet.<br>Drop a host file into this pane to add it.</div>'}
     </div>
     <footer class="pane-foot"><span>${pane.image.readOnly ? "Read-only safe view · " : ""}${selectedKeys.size ? `${selectedKeys.size} selected · ` : ""}${pane.entries.length} ${isPartitionIndex ? `partition${pane.entries.length === 1 ? "" : "s"}` : isRom ? `bank${pane.entries.length === 1 ? "" : "s"}` : "objects"} · ${esc(pane.description || "")}</span>${capacityMarkup(pane.capacity)}</footer>`;
 
@@ -964,22 +1003,20 @@ function renderPane(index, preserveScroll = false) {
   host.querySelector(".new-empty-file")?.addEventListener("click", () => guardedPaneAction(index, () => createEmptyFile(index)));
   host.querySelector(".append-rom-bank")?.addEventListener("click", () => guardedPaneAction(index, () => appendBlankRomBank(index)));
   host.querySelector(".configure-rom")?.addEventListener("click", () => guardedPaneAction(index, () => configureRomLayout(index)));
-  host.querySelector(".configure-kickfs")?.addEventListener("click", () => guardedPaneAction(index, () => configureKickfs(index)));
   host.querySelector(".rom-workbench")?.addEventListener("click", () => guardedPaneAction(index, () => showRomWorkbench(index)));
-  host.querySelector(".switch-side")?.addEventListener("click", () => switchDsdSide(index));
   host.querySelector(".online-library")?.addEventListener("click", () => guardedPaneAction(index, () => showOnlineLibrary(index)));
   host.querySelector(".collection-catalogue")?.addEventListener("click", () => showCollectionCatalogue(index));
   host.querySelector(".validate-image")?.addEventListener("click", () => guardedPaneAction(index, () => validateImage(index)));
-  host.querySelector(".audit-ffs-installations")?.addEventListener("click", () => guardedPaneAction(index, () => showFfsInstallationAudit(index)));
+  host.querySelector(".audit-drive-software")?.addEventListener("click", () => guardedPaneAction(index, () => showDriveSoftwareAudit(index)));
   host.querySelector(".staged-installations")?.addEventListener("click", () => guardedPaneAction(index, () => showStagedInstallations(index)));
-  host.querySelector(".install-workbench")?.addEventListener("click", () => guardedPaneAction(index, () => showWorkbenchInstall(index)));
-  host.querySelector(".install-tos-cd")?.addEventListener("click", () => guardedPaneAction(index, () => showAtariosCdInstall(index)));
+  host.querySelector(".prepare-drive")?.addEventListener("click", () => guardedPaneAction(index, () => showPrepareDrive(index)));
+  host.querySelector(".run-title-installer")?.addEventListener("click", () => guardedPaneAction(index, () => showTitleInstaller(index)));
   host.querySelector(".open-hex-editor")?.addEventListener("click", () => guardedPaneAction(index, () => openHexEditor(index)));
   host.querySelector(".run-pane-emulator")?.addEventListener("click", () => guardedPaneAction(index, () => launchPaneEmulator(index, false)));
   host.querySelector(".debug-pane-emulator")?.addEventListener("click", () => guardedPaneAction(index, () => launchPaneEmulator(index, true)));
   host.querySelector(".write-physical-floppy")?.addEventListener("click", () => guardedPaneAction(index, () => showPhysicalFloppyDialog(index)));
-  host.querySelector(".convert-dms")?.addEventListener("click", () => guardedPaneAction(index, () => convertDMS(index)));
-  host.querySelector(".dms-project")?.addEventListener("click", () => guardedPaneAction(index, () => showDmsProject(index)));
+  host.querySelector(".convert-container")?.addEventListener("click", () => guardedPaneAction(index, () => convertContainer(index)));
+  host.querySelector(".container-project")?.addEventListener("click", () => guardedPaneAction(index, () => showContainerProject(index)));
   host.querySelector(".compact-image")?.addEventListener("click", () => guardedPaneAction(index, () => compactImage(index)));
   host.querySelector(".undo-image")?.addEventListener("click", () => guardedPaneAction(index, () => undoLastChange(index)));
   host.querySelector(".manage-checkpoints")?.addEventListener("click", () => guardedPaneAction(index, () => showCheckpointManager(index)));
@@ -1007,7 +1044,7 @@ function renderPane(index, preserveScroll = false) {
   host.querySelectorAll(".crumb[data-path]").forEach(button => button.onclick = () => navigate(index, button.dataset.path));
   host.querySelectorAll(".crumb[data-archive-member]").forEach(button => button.onclick = () => navigateArchive(index, button.dataset.archiveMember));
   host.querySelectorAll(".file-row").forEach(row => wireRow(row, index));
-  if ((pane.image.kind === "ofs") || (pane.image.kind === "hdf" && pane.partition !== null)) {
+  if (isGemdos) {
     const diskHandle = host.querySelector(".format-icon");
     diskHandle.draggable = true;
     diskHandle.classList.add("disk-transfer-handle");
@@ -1025,9 +1062,9 @@ function renderPane(index, preserveScroll = false) {
   const listWrap = host.querySelector(".list-wrap");
   if (preserveScroll) listWrap.scrollTop = previousScrollTop;
   if (isPartitionIndex) {
-    if (!preserveScroll && pane.hdfScrollTop) listWrap.scrollTop = pane.hdfScrollTop;
+    if (!preserveScroll && pane.driveScrollTop) listWrap.scrollTop = pane.driveScrollTop;
     listWrap.addEventListener("scroll", () => {
-      pane.hdfScrollTop = listWrap.scrollTop;
+      pane.driveScrollTop = listWrap.scrollTop;
     }, { passive: true });
   }
   refreshImageComparisonActions();
@@ -1260,7 +1297,7 @@ function refreshSelectionDisplay(index) {
   const host = document.querySelector(`.pane[data-pane="${index}"]`);
   const selectedKeys = new Set(selectionKeys(pane));
   const selected = selectedEntry(index);
-  const isPartitionIndex = pane.image?.kind === "hdf" && pane.partition === null;
+  const isPartitionIndex = pane.image?.kind === "hd" && pane.partition === null;
 
   host.querySelectorAll(".file-row").forEach(row => {
     const isSelected = selectedKeys.has(row.dataset.key);
@@ -1282,7 +1319,7 @@ function refreshSelectionDisplay(index) {
   disable(".inspect-file", !hasInspectableSelection);
   disable(".inspect-dependencies", !hasInspectableSelection);
   const clipboardSelection = clipboardItemsForPane(index);
-  disable(".clipboard-cut-action", !clipboardSelection.length || pane.image.readOnly || ["dms", "iso"].includes(pane.image.kind));
+  disable(".clipboard-cut-action", !clipboardSelection.length || pane.image.readOnly || READ_ONLY_KINDS.includes(pane.image.kind));
   disable(".clipboard-copy-action", !clipboardSelection.length);
   disable(".clipboard-paste-action", !canPasteIntoPane(pane));
 
@@ -1314,9 +1351,9 @@ function wireDropZone(host, index) {
     const diskSource = openDisk ? JSON.parse(openDisk) : null;
     if (diskSource && paneHoldsVolume(panes[index])) {
       if (diskSource.image === panes[index].image.id) {
-        return toast("Choose a different FFS image as the destination.", true);
+        return toast("Choose a different volume as the destination.", true);
       }
-      return copyDiskImageToFfs(index, diskSource);
+      return copyDiskImageToVolume(index, diskSource);
     }
     const internalBatch = event.dataTransfer.getData("application/x-atari-files");
     if (internalBatch) return transferFiles(index, JSON.parse(internalBatch));
@@ -1341,7 +1378,7 @@ function wireDropZone(host, index) {
   };
 }
 
-async function copyDiskImageToFfs(index, source) {
+async function copyDiskImageToVolume(index, source) {
   const target = panes[index];
   const rule = targetNameRule(target, formats.stem(source.name));
   const preview = await paneOperation(
@@ -1350,19 +1387,19 @@ async function copyDiskImageToFfs(index, source) {
     () => api(`/api/images/${source.image}/preview`)
   );
   return showImageExtractionPlan(index, {
-    heading: `Copy ${source.name} into FFS`,
+    heading: `Copy ${source.name} onto this volume`,
     sourceName: source.name,
     preview,
     suggestedName: rule.suggested,
     allowRaw: false,
     allowInstall: paneAcceptsInstall(target),
     submitLabel: "Copy image contents",
-    onExtract: plan => performDiskImageToFfsCopy(index, source, plan),
+    onExtract: plan => performDiskImageToVolumeCopy(index, source, plan),
     onInstall: plan => performInstall(index, source.image, source.name, plan),
   });
 }
 
-async function performDiskImageToFfsCopy(index, source, plan) {
+async function performDiskImageToVolumeCopy(index, source, plan) {
   const target = panes[index];
   const destinationLabel = plan.createDirectory ? plan.directoryName : plan.targetPath;
   const data = await trackedPaneOperation(index, `Copying ${source.name} into ${destinationLabel}…`, operationId =>
@@ -1500,7 +1537,7 @@ async function returnToPartitions(index) {
 async function refreshCurrentView(index) {
   const pane = panes[index];
   if (!pane.image) return;
-  if (pane.image.kind === "hdf" && pane.partition === null) {
+  if (pane.image.kind === "hd" && pane.partition === null) {
     const selected = selectionKeys(pane);
     const selectionAnchor = pane.selectionAnchor;
     const requestToken = (pane.requestToken || 0) + 1;
@@ -1702,22 +1739,18 @@ function chooseImage(index) {
   let selection = { files: [] };
   showModal(`
     <h2>Open a media image</h2>
-    <p>Choose a disk, CD, dms, ROM or matching image set, such as an HDA with its GEO descriptor. ZIP distributions are also supported.</p>
+    <p>Choose a floppy container, a hard-disk image, a CD or a ROM. A bare hard-disk image can be opened with its <code>.geo</code> geometry sidecar, and ZIP distributions are also supported.</p>
     <div class="field"><label>Image file</label>
       <input type="file" name="images" accept="${esc(formats.accept)}" multiple>
       <div class="file-selection-summary" data-selected-files aria-live="polite"></div>
     </div>
-    <div class="field"><label>FFS target hardware</label>
+    <div class="field"><label>Target media</label>
       <select name="targetHardware">
-        <option value="auto">Auto / inspect only</option>
-        <option value="hardfile">Hardfile HDA + GEO · Atari 600 / Atari / Master</option>
-        <option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option>
-        <option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option>
-        <option value="tos">Atari 4000 / TOS</option>
+        ${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
       </select>
-      <small>Used for FFS validation and hardware-safe repairs. It is ignored for OFS, HDF, DMS, HFE and ROM images.</small>
+      <small>Used for validation and for hardware-safe repairs. It is ignored when the bytes already say what the image is.</small>
     </div>
-    <div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for headerless custom ROMs stored as BIN or another generic name. No filesystem probing will be attempted.</small></div>
+    <div class="field"><label>Raw format override</label><select name="formatOverride"><option value="">Auto-detect</option><option value="rom">Open selected bytes as an Atari ROM</option></select><small>Use this for a headerless cartridge or expansion ROM stored as BIN or another generic name. No filesystem probing will be attempted.</small></div>
     <div class="modal-actions">
       <button class="button ghost" value="cancel">Cancel</button>
       <button class="button primary" value="open" data-open-selection disabled>Open selected image</button>
@@ -1744,20 +1777,27 @@ function chooseImage(index) {
   });
 }
 
-function promptFfsTargetHardware(index, files) {
+//: What the image is meant to be, which decides how it is validated and
+//: which repairs are safe. A floppy container, a partitioned hard drive, a
+//: single bare volume with no partition table, or a TOS ROM.
+const TARGET_MEDIA = Object.freeze([
+  ["auto", "Auto · identify from the bytes"],
+  ["floppy", "Floppy · 360K to 1.44M, FAT12"],
+  ["hd", "Hard drive · AHDI or MBR partitions"],
+  ["volume", "Bare volume · one FAT16 partition with no table"],
+  ["tos", "TOS ROM"],
+]);
+
+function promptTargetMedia(index, files) {
   const closed = showModal(`
-    <h2>Choose FFS target hardware</h2>
-    <p>The selected hardware profile controls filesystem validation and repairs. Choose the machine that will use the finished image.</p>
-    <div class="field"><label>Target hardware</label>
+    <h2>Choose the target media</h2>
+    <p>What the image is meant to be decides how its filing system is checked and which repairs are safe. Choose the shape the finished image should have.</p>
+    <div class="field"><label>Target media</label>
       <select name="targetHardware">
-        <option value="hardfile">Hardfile HDA + GEO · Atari 600 / Atari / Master</option>
-        <option value="a500-ofs">Atari 500 / 2000 · Kickstart 1.3, OFS</option>
-        <option value="a1200-ffs">Atari 600 / 1200 · Kickstart 3.x, FFS</option>
-        <option value="tos">Atari 4000 / TOS</option>
-        <option value="auto">Auto / inspect only</option>
+        ${TARGET_MEDIA.slice(1).concat([TARGET_MEDIA[0]]).map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
       </select>
     </div>
-    <div class="help-note"><strong>Normal FFS vs Hardfile:</strong> choose the machine profile for a normal FFS disk. Choose Hardfile for an HDA/GEO hard drive; it works with Atari 600, Atari 500 and 1200 hosts and also enforces the official Hardfile file layout.</div>
+    <div class="help-note"><strong>A drive with a table, or one volume on its own:</strong> choose Hard drive for an image whose first sector holds an AHDI or MBR partition table, and Bare volume for a file that is nothing but the FAT16 volume itself, which some ACSI and IDE setups use.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open">Validate and open</button></div>`,
   form => {
     const targetHardware = form.get("targetHardware") || "auto";
@@ -1765,7 +1805,11 @@ function promptFfsTargetHardware(index, files) {
   });
 }
 
-function promptAtariScsiPair(
+//: A bare hard-disk image is nothing but the volume: no partition table and
+//: therefore no geometry. The drive's cylinders, heads and sectors travel
+//: beside it in a small ".geo" text file, and the two have to be opened
+//: together or the volume cannot be laid out.
+function promptGeometrySidecarPair(
   index,
   image = null,
   descriptor = null,
@@ -1778,23 +1822,23 @@ function promptAtariScsiPair(
   let imageSelection = { files: [] };
   let descriptorSelection = { files: [] };
   showModal(`
-    <h2>Open the HDA and GEO together</h2>
-    <p>Hardfile HDA images store their drive geometry in a companion GEO file. The file you already selected has been retained; choose only its missing companion.</p>
+    <h2>Open the drive image and its geometry together</h2>
+    <p>A bare hard-disk image keeps its drive geometry in a companion <code>.geo</code> file. The file you already selected has been retained; choose only its missing companion.</p>
     ${warning ? `<div class="scan-notes"><span>${esc(warning)}</span></div>` : ""}
-    <div class="pair-file-drop" data-pair-drop>Drop the matching HDA and GEO here together</div>
-    <div class="field"><label>HDA image${image ? " · selected" : ""}</label>
+    <div class="pair-file-drop" data-pair-drop>Drop the drive image and its geometry sidecar here together</div>
+    <div class="field"><label>Drive image${image ? " · selected" : ""}</label>
       ${image ? `<small class="prefilled-file">${esc(image.name)} · ${humanSize(image.size)}</small>` : ""}
-      <input type="file" name="image" accept=".hda">
-      <div class="file-selection-summary compact" data-selected-hda aria-live="polite"></div>
-      ${image ? "<small>Optional: choose a different HDA to replace the retained file.</small>" : ""}
+      <input type="file" name="image" accept=".img,.hd,.ahd,.acsi,.ide,.raw,.bin">
+      <div class="file-selection-summary compact" data-selected-image aria-live="polite"></div>
+      ${image ? "<small>Optional: choose a different drive image to replace the retained file.</small>" : ""}
     </div>
-    <div class="field"><label>Matching GEO descriptor${descriptor ? " · selected" : ""}</label>
+    <div class="field"><label>Matching geometry sidecar${descriptor ? " · selected" : ""}</label>
       ${descriptor ? `<small class="prefilled-file">${esc(descriptor.name)} · ${humanSize(descriptor.size)}</small>` : ""}
       <input type="file" name="descriptor" accept=".geo">
       <div class="file-selection-summary compact" data-selected-geo aria-live="polite"></div>
-      ${descriptor ? "<small>Optional: choose a different GEO to replace the retained file.</small>" : ""}
+      ${descriptor ? "<small>Optional: choose a different sidecar to replace the retained file.</small>" : ""}
     </div>
-    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open" data-open-pair disabled>Open HDA + GEO</button></div>`,
+    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open" data-open-pair disabled>Open the pair</button></div>`,
   async () => {
     const chosenImage = imageSelection.files[0]
       ? imageSelection.files[0]
@@ -1802,11 +1846,11 @@ function promptAtariScsiPair(
     const chosenDescriptor = descriptorSelection.files[0]
       ? descriptorSelection.files[0]
       : descriptor;
-    if (!(chosenImage instanceof File) || !chosenImage.name.toLowerCase().endsWith(".hda")) {
-      throw new Error("Choose the Hardfile HDA image.");
+    if (!(chosenImage instanceof File) || formats.isDescriptor(chosenImage.name)) {
+      throw new Error("Choose the drive image itself.");
     }
-    if (!(chosenDescriptor instanceof File) || !chosenDescriptor.name.toLowerCase().endsWith(".geo")) {
-      throw new Error("Choose the matching GEO file.");
+    if (!(chosenDescriptor instanceof File) || !formats.isDescriptor(chosenDescriptor.name)) {
+      throw new Error("Choose the matching .geo sidecar.");
     }
     if (formats.stem(chosenDescriptor.name).toLowerCase() !== formats.stem(chosenImage.name).toLowerCase()) {
       throw new Error(`Choose ${formats.stem(chosenImage.name)}.geo for this HDA image.`);
@@ -1818,7 +1862,7 @@ function promptAtariScsiPair(
     pairButton.disabled = !(imageSelection.files[0] || image)
       || !(descriptorSelection.files[0] || descriptor);
   };
-  const datSummary = modalContent.querySelector("[data-selected-hda]");
+  const datSummary = modalContent.querySelector("[data-selected-image]");
   const dscSummary = modalContent.querySelector("[data-selected-geo]");
   imageSelection = trackFileInput(
     modalContent.querySelector('input[name="image"]'),
@@ -1829,16 +1873,16 @@ function promptAtariScsiPair(
     dscSummary
   );
   acceptFileDrop(datSummary, files => {
-    const selected = files.find(file => file.name.toLowerCase().endsWith(".hda"));
+    const selected = files.find(file => !formats.isDescriptor(file.name));
     if (selected) imageSelection.setFiles([selected]);
   });
   acceptFileDrop(dscSummary, files => {
-    const selected = files.find(file => file.name.toLowerCase().endsWith(".geo"));
+    const selected = files.find(file => formats.isDescriptor(file.name));
     if (selected) descriptorSelection.setFiles([selected]);
   });
   acceptFileDrop(modalContent.querySelector("[data-pair-drop]"), files => {
-    const selectedImage = files.find(file => file.name.toLowerCase().endsWith(".hda"));
-    const selectedDescriptor = files.find(file => file.name.toLowerCase().endsWith(".geo"));
+    const selectedImage = files.find(file => !formats.isDescriptor(file.name));
+    const selectedDescriptor = files.find(file => formats.isDescriptor(file.name));
     if (selectedImage) imageSelection.setFiles([selectedImage]);
     if (selectedDescriptor) descriptorSelection.setFiles([selectedDescriptor]);
   });
@@ -1867,7 +1911,7 @@ async function openFiles(index, files, targetHardware = null) {
         <option value="concatenate">One component set · consecutive banks</option>
         ${canInterleave ? `<option value="interleave">${romFiles.length} byte-wide chips / interleave into logical byte order</option>` : ""}
         <option value="first">Open only the first selected file</option>
-      </select><small>${canInterleave ? "Atari 4000 ROM sets commonly use four byte-wide chip files." : "Byte interleaving requires two or four components of exactly equal size."}</small></div>
+      </select><small>${canInterleave ? "A TOS ROM set is usually two byte-wide chips, one holding the even bytes and one the odd." : "Byte interleaving requires two or four components of exactly equal size."}</small></div>
       <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open">Open selected ROMs</button></div>`,
     async form => {
       if (form.get("romSetMode") === "separate") {
@@ -1899,7 +1943,7 @@ async function openFiles(index, files, targetHardware = null) {
       const combined = new File([bytes], `${formats.stem(romFiles[0].name)}-set.rom`, { type: "application/octet-stream" });
       combined.atariRomLayout = layout;
       combined.atariForceKind = "rom";
-      combined.atariRomPlatform = layout === "linear" ? "kickstart" : "cartridge";
+      combined.atariRomPlatform = layout === "linear" ? "tos" : "cartridge";
       combined.atariRomComponents = romFiles.map(file => file.name);
       setTimeout(() => openFiles(index, [combined], targetHardware), 0);
     });
@@ -1908,31 +1952,26 @@ async function openFiles(index, files, targetHardware = null) {
   const descriptor = files.find(file => formats.isDescriptor(file.name));
   if (!image) {
     if (descriptor) {
-      promptAtariScsiPair(index, null, descriptor, "", targetHardware || "auto");
+      promptGeometrySidecarPair(index, null, descriptor, "", targetHardware || "auto");
       return;
     }
     return;
   }
-  if (targetHardware === null && formats.isPotentialFfsImage(image.name)) {
-    return promptFfsTargetHardware(index, files);
+  if (targetHardware === null && formats.isPotentialGemdosImage(image.name)) {
+    return promptTargetMedia(index, files);
   }
   targetHardware ||= "auto";
   if (
-    image.name.toLowerCase().endsWith(".hda")
-    && descriptor
+    descriptor
     && formats.stem(descriptor.name).toLowerCase() !== formats.stem(image.name).toLowerCase()
   ) {
-    promptAtariScsiPair(
+    promptGeometrySidecarPair(
       index,
       image,
       descriptor,
       `${image.name} and ${descriptor.name} do not have matching base names. Replace the incorrect file.`,
       targetHardware
     );
-    return;
-  }
-  if (image.name.toLowerCase().endsWith(".hda") && !descriptor) {
-    promptAtariScsiPair(index, image, null, "", targetHardware);
     return;
   }
   const form = new FormData();
@@ -1987,23 +2026,23 @@ async function openFiles(index, files, targetHardware = null) {
 async function acceptImage(index, image) {
   const currentPane = panes[index];
   const preservedWindowState = currentPane?.windowState || null;
-  const preserveHdfRoot = Boolean(
+  const preserveDriveRoot = Boolean(
     currentPane?.image?.id === image.id
-    && currentPane.image.kind === "hdf"
+    && currentPane.image.kind === "hd"
     && currentPane.partition === null
   );
-  const preservedSelection = preserveHdfRoot ? selectionKeys(currentPane) : [];
-  const preservedAnchor = preserveHdfRoot ? currentPane.selectionAnchor : null;
-  const preservedScrollTop = preserveHdfRoot
+  const preservedSelection = preserveDriveRoot ? selectionKeys(currentPane) : [];
+  const preservedAnchor = preserveDriveRoot ? currentPane.selectionAnchor : null;
+  const preservedScrollTop = preserveDriveRoot
     ? document.querySelector(`.pane[data-pane="${index}"] .list-wrap`)?.scrollTop || 0
     : 0;
   panes[index] = newPaneState(image);
   const pane = panes[index];
   pane.windowState = preservedWindowState;
-  if (preserveHdfRoot) pane.hdfScrollTop = preservedScrollTop;
+  if (preserveDriveRoot) pane.driveScrollTop = preservedScrollTop;
   const requestToken = ++pane.requestToken;
   renderPane(index);
-  if (image.kind === "hdf") {
+  if (image.kind === "hd") {
     const [data, capacity] = await Promise.all([
       api(`/api/images/${image.id}/partitions`),
       fetchCapacity(image.id),
@@ -2013,12 +2052,12 @@ async function acceptImage(index, image) {
     pane.capacity = capacity;
     pane.description = "Select a partition to browse the volume it mounts";
     pane.loading = false;
-    if (preserveHdfRoot) {
+    if (preserveDriveRoot) {
       const available = new Set(pane.entries.map(entry => String(entry.partition)));
       setSelection(pane, preservedSelection.filter(key => available.has(key)), preservedAnchor);
     }
     renderPane(index);
-    if (preserveHdfRoot) {
+    if (preserveDriveRoot) {
       const list = document.querySelector(`.pane[data-pane="${index}"] .list-wrap`);
       if (list) list.scrollTop = preservedScrollTop;
     }
@@ -2383,12 +2422,13 @@ function renameSelected(index) {
   if (!entry) return;
   const isRom = pane.image.kind === "rom";
   const oldPath = entryImagePath(pane, entry);
-  // An GEMDOS directory entry holds up to 30 characters, whatever the DOS
-  // type is; a ROM header has its own limit.
-  const nameLimit = isRom ? Number(entry.header?.titleCapacity || 24) : 30;
+  // A GEMDOS directory entry holds an 8.3 name and nothing longer; a ROM
+  // header has its own limit.
+  const rule = targetNameRule(pane, entry.leafName || entry.name);
+  const nameLimit = isRom ? Number(entry.header?.titleCapacity || 24) : rule.limit;
   showModal(`
     <h2>${isRom ? `Edit ROM bank ${entry.bank} title` : `Rename ${esc(entry.name)}`}</h2>
-    <p>${isRom ? "This changes the name in the recognised ROM header. The code and bank position stay unchanged." : "The item stays in its current directory. Drag it onto another directory to move it."}</p>
+    <p>${isRom ? "This changes the name in the recognised ROM header. The code and bank position stay unchanged." : `The item stays in its current folder. Drag it onto another folder to move it. TOS stores an ${esc(rule.label)} name in upper case.`}</p>
     <div class="field"><label>New name · max ${nameLimit} characters</label>
       <input name="destination" maxlength="${nameLimit}" value="${esc(entry.leafName || entry.name)}" required></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="ok">Rename</button></div>`,
@@ -2397,11 +2437,7 @@ function renameSelected(index) {
     if (isRom) { body.bank = entry.bank; body.title = form.get("destination"); }
     else {
       body.source = oldPath;
-      body.destination = entry.cataloguePrefix
-        ? `${entry.cataloguePrefix}.${form.get("destination")}`
-        : pane.image.kind === "kickfs"
-          ? form.get("destination")
-          : fullPath(pane.path, form.get("destination"));
+      body.destination = fullPath(pane.path, form.get("destination"));
     }
     const data = await api(`/api/images/${pane.image.id}/rename`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -2409,11 +2445,8 @@ function renameSelected(index) {
     if (isRom) {
       pane.image = data.image;
       await loadDirectory(index);
-    } else if (pane.image.kind === "ffs") {
-      await refreshSharedFfsPanes(pane.image.id, data.image, data.moved);
     } else {
-      pane.image = data.image;
-      await loadDirectory(index);
+      await refreshSharedVolumePanes(pane.image.id, data.image, data.moved);
     }
     toast(
       "Name updated",
@@ -2430,7 +2463,7 @@ function deleteSelected(index) {
   const selectionLabel = single ? esc(single.name) : `${entries.length} selected items`;
   const contentsWarning = entries.some(
     item => item.type === "dir" || item.type === "directory"
-  ) ? " Selected drawers and everything inside them will be removed." : "";
+  ) ? " Selected folders and everything inside them will be removed." : "";
   showModal(`
     <h2>${isRom ? "Erase" : "Delete"} ${selectionLabel}?</h2>
     <p>${isRom ? "Each selected bank will be filled with the configured erased-byte value. Bank positions and total ROM size stay unchanged." : `This removes ${single ? "the selected item" : "all selected items"} from the working image.${contentsWarning}`} Your original image remains untouched.</p>
@@ -2452,16 +2485,13 @@ function deleteSelected(index) {
     if (isRom) {
       pane.image = data.image;
       await loadDirectory(index);
-    } else if (pane.image.kind === "ffs") {
-      await refreshSharedFfsPanes(
+    } else {
+      await refreshSharedVolumePanes(
         pane.image.id,
         data.image,
         [],
         data.deletedItems || [{ path: data.deletedPath, isDirectory: data.deletedDirectory }],
       );
-    } else {
-      pane.image = data.image;
-      await loadDirectory(index);
     }
     toast(`${single ? single.name : `${entries.length} items`} deleted`);
   });
@@ -2469,18 +2499,20 @@ function deleteSelected(index) {
 
 function createFolder(index) {
   const pane = panes[index];
+  const rule = targetNameRule(pane, "NEWFOLDER");
+  const driveLetter = pane.partitionName || pane.image.driveLetter || "";
   showModal(`
-    <h2>New drawer</h2><p>Create a drawer in <code>${esc(pane.path || ":")}</code>. An GEMDOS name can hold up to 30 characters.</p>
-    <div class="field"><label>Drawer name</label><input name="name" maxlength="30" required></div>
+    <h2>New folder</h2><p>Create a folder in <code>${esc(drivePath(driveLetter, pane.path))}</code>. A folder carries an ${esc(rule.label)} name, stored in upper case.</p>
+    <div class="field"><label>Folder name · max ${rule.limit} characters</label><input name="name" maxlength="${rule.limit}" required></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="create">Create folder</button></div>`,
   async form => {
-    const data = await paneOperation(index, "Creating FFS folder…", () => api(`/api/images/${pane.image.id}/mkdir`, {
+    const data = await paneOperation(index, "Creating folder…", () => api(`/api/images/${pane.image.id}/mkdir`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ partition: pane.partition, side: pane.side, path: fullPath(pane.path, form.get("name")) })
     }));
     pane.image = data.image;
     await loadDirectory(index);
-    toast("Drawer created");
+    toast("Folder created");
   });
 }
 
@@ -2491,8 +2523,8 @@ function createEmptyFile(index) {
     <h2>New file</h2>
     <p>Create an empty file in <code>${esc(pane.path)}</code>. ${esc(rule.label)} names can contain up to ${rule.limit} characters.</p>
     <div class="field"><label>Filename</label><input name="name" maxlength="${rule.limit}" value="${esc(rule.suggested || "NEWFILE")}" required></div>
-    <div class="field-grid two"><div class="field"><label>Protection</label><input name="protection" value="----rwed" maxlength="8"></div><div class="field"><label>Comment</label><input name="comment" maxlength="79" placeholder="Optional"></div></div>
-    <div class="help-note">The file starts at zero bytes. Its protection bits and comment can be changed later in the file editor.</div>
+    <div class="field-grid two"><div class="field"><label>Attributes</label><input name="attributes" value="-----a" maxlength="6"><small>The six letters <code>rhsvda</code>, a dash for each clear bit.</small></div><div class="field"><label>Datestamp</label><input name="datestamp" type="datetime-local" step="2"><small>Leave it empty to stamp the file with the current time.</small></div></div>
+    <div class="help-note">The file starts at zero bytes. Its attributes and datestamp can be changed later from the file list.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="create">Create file</button></div>`,
   async form => {
     const data = await paneOperation(index, "Creating empty file…", () => api(`/api/images/${pane.image.id}/empty-file`, {
@@ -2502,8 +2534,8 @@ function createEmptyFile(index) {
         side: pane.side,
         destination: pane.path,
         name: form.get("name"),
-        protection: form.get("protection"),
-        comment: form.get("comment"),
+        attributes: form.get("attributes") || "",
+        datestamp: form.get("datestamp") || "",
       }),
     }));
     pane.image = data.image;
@@ -2518,32 +2550,39 @@ async function editFileMetadata(index, entry) {
   const pane = panes[index];
   if (!pane?.image || !entry) return;
   const path = entry.path || fullPath(pane.path, entry.leafName || entry.name);
-  // GEMDOS stores eight protection bits as "hsparwed". The low four are
-  // inverted on disk: a set bit denies the operation, which is why the
-  // workbench edits them by meaning rather than as a raw number.
-  const flags = entry.protection !== undefined && entry.protection !== null
-    ? protectionFlags(entry.protection)
-    : protectionFlags(0);
+  // GEMDOS keeps one attribute byte per directory entry: read-only, hidden,
+  // system, volume label, directory and archive, in that bit order. None of
+  // them is inverted, so each checkbox means exactly what it says.
+  const flags = attributeFlags(entry.attributes ?? entry.attr ?? 0);
   const has = letter => Boolean(flags[letter]);
   const flag = (letter, label, hint) => `<label class="check"><input type="checkbox" name="bit-${letter}" ${has(letter) ? "checked" : ""}> ${label}<small>${hint}</small></label>`;
+  // The stamp arrives as ISO text and the browser wants it without a zone.
+  const stamp = String(entry.datestamp || "").slice(0, 19).replace(" ", "T");
   return showModal(`
-    <h2>Protection and comment</h2>
-    <p>Editing <code>${esc(path)}</code>. These are the fields an GEMDOS directory entry holds; the file's own bytes are not touched.</p>
+    <h2>Attributes and datestamp</h2>
+    <p>Editing <code>${esc(path)}</code>. These are the fields a GEMDOS directory entry holds; the file's own bytes are not touched.</p>
     <div class="field-grid two">
-      ${flag("r", "Readable", "r")}
-      ${flag("w", "Writable", "w")}
-      ${flag("e", "Executable", "e")}
-      ${flag("d", "Deletable", "d")}
-      ${flag("s", "Script", "s")}
-      ${flag("p", "Pure", "p")}
-      ${flag("a", "Archived", "a")}
-      ${flag("h", "Hold", "h")}
+      ${flag("r", "Read-only", "r · $01")}
+      ${flag("h", "Hidden", "h · $02")}
+      ${flag("s", "System", "s · $04")}
+      ${flag("v", "Volume label", "v · $08")}
+      ${flag("d", "Directory", "d · $10")}
+      ${flag("a", "Archive", "a · $20")}
     </div>
-    <div class="field"><label>Comment · up to 79 characters</label>
-      <input name="comment" maxlength="79" value="${esc(entry.comment || "")}"></div>
-    ${entry.datestamp ? `<div class="help-note">Last changed ${esc(entry.datestamp)}. The datestamp is kept as it is.</div>` : ""}
+    <div class="field"><label>Datestamp</label>
+      <input name="datestamp" type="datetime-local" step="2" value="${esc(stamp)}">
+      <small>TOS records the time to the nearest two seconds and cannot store a year before 1980.</small></div>
+    <div class="help-note">The volume label and directory bits describe what the entry <em>is</em>. Changing either on an ordinary file makes it unreadable, so change them only when repairing a damaged directory.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="change">Save metadata</button></div>`,
   async form => {
+    const chosen = {
+      r: form.has("bit-r"), h: form.has("bit-h"), s: form.has("bit-s"),
+      v: form.has("bit-v"), d: form.has("bit-d"), a: form.has("bit-a"),
+    };
+    const requested = String(form.get("datestamp") || "").trim();
+    if (requested && !parseDatestamp(requested)) {
+      throw new Error("TOS cannot store that datestamp. Use a date from 1980 onwards.");
+    }
     const data = await paneOperation(index, `Updating metadata for ${entry.name}…`, () => api(`/api/images/${pane.image.id}/metadata`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2551,18 +2590,15 @@ async function editFileMetadata(index, entry) {
         path,
         partition: pane.partition,
         side: pane.side,
-        protection: protectionHex({
-          h: form.has("bit-h"), s: form.has("bit-s"), p: form.has("bit-p"), a: form.has("bit-a"),
-          r: form.has("bit-r"), w: form.has("bit-w"), e: form.has("bit-e"), d: form.has("bit-d"),
-        }),
-        comment: form.get("comment") || "",
+        attributes: attributeHex(chosen),
+        datestamp: requested,
       }),
     }));
     pane.image = data.image;
     await loadDirectory(index);
     setSelection(pane, [entrySelectionKey(entry)], entrySelectionKey(entry));
     renderPane(index);
-    toast(`${entry.name} metadata updated`);
+    toast(`${entry.name} now reads ${formatAttributes(chosen)}`);
   });
 }
 
@@ -2611,7 +2647,7 @@ async function chooseHostFile(index) {
 async function chooseHostFolder(index) {
   // A drive showing its partition table has nowhere to put an ordinary file,
   // so only whole disk images are worth offering there.
-  const atPartitionTable = panes[index].image?.kind === "hdf" && panes[index].partition === null;
+  const atPartitionTable = panes[index].image?.kind === "hd" && panes[index].partition === null;
   const files = await pickHostFiles({
     directory: true,
     accept: atPartitionTable ? formats.accept : "",
@@ -2663,12 +2699,12 @@ async function prepareHostFolderMetadata(records) {
   for (const item of records.filter(row => /\.inf$/i.test(row.relativePath))) {
     const key = item.relativePath.replace(/\.inf$/i, "").toLowerCase();
     const fields = (await item.file.text()).trim().match(/"[^"]*"|\S+/g) || [];
-    // path protection length ["comment"] -- the record format the workbench
+    // name attributes length [datestamp] -- the record this application
     // writes beside an exported file, and the only metadata GEMDOS keeps.
     sidecars.set(key, {
-      targetName: String(fields[0] || "").replace(/^"|"$/g, "").split("/").at(-1),
-      protection: normaliseProtection(fields[1]),
-      comment: String(fields.slice(3).join(" ") || "").replace(/^"|"$/g, ""),
+      targetName: String(fields[0] || "").replace(/^"|"$/g, "").split(/[\\/]/).at(-1),
+      attributes: normaliseAttributes(fields[1]),
+      datestamp: String(fields[3] || "").replace(/^"|"$/g, ""),
     });
   }
   return records.filter(item => !/\.inf$/i.test(item.relativePath)).map(item => ({
@@ -2691,9 +2727,9 @@ async function reviewHostImport(index, records, operation, itemType = "file") {
         parent: String(item.relativePath || "").replace(/\\/g, "/").split("/").slice(0, -1).join("/"),
         source: item.relativePath || item.file?.name || "Local file",
         type: itemType,
-        allowDuplicateName: panes[index].image.kind === "hdf" && panes[index].partition === null,
-        protection: item.metadata?.protection || "",
-        comment: item.metadata?.comment || "",
+        allowDuplicateName: panes[index].image.kind === "hd" && panes[index].partition === null,
+        attributes: item.metadata?.attributes || "",
+        datestamp: item.metadata?.datestamp || "",
         filetype: item.metadata?.filetype || "",
       })),
     );
@@ -2732,11 +2768,11 @@ async function addSelectedHostFolder(index, records) {
   const initial = folderTargetPlans(pane, relevant, initialMode);
   const closed = showModal(`
     <h2>Import ${roots.size} folder${roots.size === 1 ? "" : "s"}</h2>
-    <p>${relevant.length} file${relevant.length === 1 ? "" : "s"} will be imported into <code>${esc(pane.path)}</code>. Review how host folders should map to the target filing system.</p>
+    <p>${relevant.length} file${relevant.length === 1 ? "" : "s"} will be imported into <code>${esc(drivePath(pane.partitionName || pane.image.driveLetter || "", pane.path))}</code>. Review how host folders should map to the target filing system.</p>
     ${canPreserve ? `<div class="choice-grid folder-import-modes">
-      <label><input type="radio" name="folderMode" value="preserve" checked><span><b>Preserve folder structure</b><small>Create the selected folder tree under the current FFS directory.</small></span></label>
-      <label><input type="radio" name="folderMode" value="flatten"><span><b>Import all files here</b><small>Ignore host folders and place every file in the current directory.</small></span></label>
-    </div>` : `<input type="hidden" name="folderMode" value="flatten"><div class="help-note">OFS has a flat catalogue. Files from all selected folders will be imported into <strong>${esc(pane.path)}</strong>.</div>`}
+      <label><input type="radio" name="folderMode" value="preserve" checked><span><b>Preserve folder structure</b><small>Create the selected folder tree under the current GEMDOS folder.</small></span></label>
+      <label><input type="radio" name="folderMode" value="flatten"><span><b>Import all files here</b><small>Ignore host folders and place every file in the current folder.</small></span></label>
+    </div>` : `<input type="hidden" name="folderMode" value="flatten"><div class="help-note">This view has no folders of its own. Files from all selected folders will be imported into <strong>${esc(pane.path || "the root")}</strong>.</div>`}
     <div class="folder-import-preview" data-folder-preview>${initial.plans.slice(0, 12).map(item => `<code>${esc(item.relativePath)} → ${esc(item.targetPath)}</code>`).join("")}</div>
     ${ignoredCount ? `<div class="help-note">${ignoredCount} metadata sidecar or operating-system housekeeping file${ignoredCount === 1 ? "" : "s"} will not be stored as a separate file.</div>` : ""}
     <label class="check-field"><input type="checkbox" name="replace" value="yes"> Replace ordinary files that already have the same target path</label>
@@ -2780,12 +2816,12 @@ async function addSelectedHostFiles(index, files) {
   if (pane.image?.kind === "rom") return addRomHostFiles(index, files);
   const preparedFiles = await prepareHostFileMetadata(files);
   if (!preparedFiles.length) return toast("The selection contained metadata sidecars but no data files.", true);
-  // An importable disk or DMS archive has its own FFS installation planner.
-  // It must inspect the container before it can describe the real operation:
-  // extract its contents, choose a destination and optional child directory,
-  // or retain the source image as an ordinary file.  Running the generic file
-  // preflight first treats the container name as an FFS leaf name and hides
-  // that decision behind an irrelevant filename warning.
+  // An importable floppy container has its own installation planner. It must
+  // inspect the container before it can describe the real operation: extract
+  // its contents, choose a destination and optional child folder, or retain
+  // the source image as an ordinary file. Running the generic file preflight
+  // first treats the container name as a GEMDOS leaf name and hides that
+  // decision behind an irrelevant filename warning.
   const ordinaryFiles = paneHoldsVolume(pane)
     ? preparedFiles.filter(item => !formats.isImportableImage(item.file.name))
     : preparedFiles;
@@ -2889,16 +2925,16 @@ function configureRomLayout(index) {
     <h2>ROM layout</h2>
     <p>These settings change how the existing bytes are divided and described. They do not reorder or rewrite the image.</p>
     <div class="field"><label>Target family</label><select name="platform">
-      <option value="kickstart" ${rom.platform === "kickstart" ? "selected" : ""}>Kickstart ROM · A500 to A4000</option>
-      <option value="cartridge" ${rom.platform === "cartridge" ? "selected" : ""}>Cartridge · CD32 / CDTV extended ROM</option>
-      <option value="custom" ${rom.platform === "custom" ? "selected" : ""}>Custom Atari hardware</option>
+      <option value="tos" ${rom.platform === "tos" ? "selected" : ""}>TOS ROM · 192 KiB, 256 KiB or 512 KiB</option>
+      <option value="cartridge" ${rom.platform === "cartridge" ? "selected" : ""}>Cartridge · 128 KiB at &amp;FA0000</option>
+      <option value="custom" ${rom.platform === "custom" ? "selected" : ""}>Custom expansion or diagnostic ROM</option>
     </select></div>
-    <div class="field"><label>Bank size in bytes</label><input name="bankSize" type="number" min="256" max="67108864" step="256" value="${Number(rom.bankSize || 16384)}" required><small>524,288 is a 512 KiB Kickstart. 262,144 and 1,048,576 and larger banks are supported.</small></div>
+    <div class="field"><label>Bank size in bytes</label><input name="bankSize" type="number" min="256" max="67108864" step="256" value="${Number(rom.bankSize || 16384)}" required><small>262,144 is a 256 KiB TOS 1.04 or 2.06 ROM and 524,288 a 512 KiB TOS 3.06. A 128 KiB cartridge is 131,072.</small></div>
     <div class="field"><label>Erased byte</label><select name="eraseByte"><option value="255" ${Number(rom.eraseByte) !== 0 ? "selected" : ""}>&FF</option><option value="0" ${Number(rom.eraseByte) === 0 ? "selected" : ""}>&00</option></select></div>
     <div class="field"><label>Byte layout</label><select name="layout">
       <option value="linear" ${rom.layout === "linear" ? "selected" : ""}>Linear / banked bytes</option>
       <option value="byte-interleaved-2" ${rom.layout === "byte-interleaved-2" ? "selected" : ""}>Two byte-wide chips, interleaved</option>
-      <option value="byte-interleaved-4" ${rom.layout === "byte-interleaved-4" ? "selected" : ""}>Four byte-wide chips, interleaved (Atari 4000)</option>
+      <option value="byte-interleaved-4" ${rom.layout === "byte-interleaved-4" ? "selected" : ""}>Four byte-wide chips, interleaved</option>
     </select><small>The image remains byte-for-byte unchanged. The setting documents how it is wired and controls future component exports.</small></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="apply">Apply layout</button></div>`,
   async form => {
@@ -3072,11 +3108,11 @@ async function prepareHostFileMetadata(files) {
   for (const file of files.filter(item => /\.inf$/i.test(item.name))) {
     const key = file.name.replace(/\.inf$/i, "").toLowerCase();
     const fields = (await file.text()).trim().match(/"[^"]*"|\S+/g) || [];
-    const catalogueName = String(fields[0] || "").replace(/^"|"$/g, "").split("/").at(-1);
+    const storedName = String(fields[0] || "").replace(/^"|"$/g, "").split(/[\\/]/).at(-1);
     sidecars.set(key, {
-      targetName: catalogueName || file.name.replace(/\.inf$/i, ""),
-      protection: normaliseProtection(fields[1]),
-      comment: String(fields.slice(3).join(" ") || "").replace(/^"|"$/g, ""),
+      targetName: storedName || file.name.replace(/\.inf$/i, ""),
+      attributes: normaliseAttributes(fields[1]),
+      datestamp: String(fields[3] || "").replace(/^"|"$/g, ""),
     });
   }
   return files.filter(file => !/\.inf$/i.test(file.name)).map(file => ({
@@ -3087,7 +3123,7 @@ async function prepareHostFileMetadata(files) {
 
 async function importHostFile(index, file, forceRaw = false, batch = null) {
   const pane = panes[index];
-  if (!pane.image || (pane.image.kind === "hdf" && pane.partition === null)) return toast("Open a disk first.", true);
+  if (!pane.image || (pane.image.kind === "hd" && pane.partition === null)) return toast("Open a volume first.", true);
   if (!forceRaw && paneHoldsVolume(pane) && formats.isImportableImage(file.name)) {
     return promptImageExtraction(index, file, batch);
   }
@@ -3096,8 +3132,8 @@ async function importHostFile(index, file, forceRaw = false, batch = null) {
   if (batch?.acceptAll) {
     return addHostFileWithPlan(index, file, {
       targetName: nameRule.suggested,
-      protection: detected.protection,
-      comment: detected.comment,
+      attributes: detected.attributes,
+      datestamp: detected.datestamp,
       filetype: detected.filetype,
     });
   }
@@ -3106,23 +3142,23 @@ async function importHostFile(index, file, forceRaw = false, batch = null) {
     : "";
   const canApplyAll = batch?.total > batch?.current;
   const closed = showModal(`
-    <h2>Insert ${esc(file.name)}</h2>${batchLabel}<p>${nameRule.valid ? "Choose the target filename and optional Atari metadata." : `${esc(file.name)} is not a legal ${nameRule.label} filename, so a safe replacement has been suggested.`}</p>
+    <h2>Insert ${esc(file.name)}</h2>${batchLabel}<p>${nameRule.valid ? "Choose the target filename and optional GEMDOS metadata." : `${esc(file.name)} is not a legal ${nameRule.label} filename, so a safe replacement has been suggested.`}</p>
     <div class="field"><label>Target filename</label>
       <input name="targetName" maxlength="${nameRule.limit}" value="${esc(nameRule.suggested)}" required>
       <small>Up to ${nameRule.limit} characters, in ${esc(nameRule.label)} spelling.</small></div>
-    <div class="field"><label>Protection</label>
-      <input name="protection" value="${esc(detected.protection || "")}" placeholder="----rwed" maxlength="8">
-      <small>The eight letters <code>List</code> prints. Leave it empty for the ordinary <code>----rwed</code>.</small></div>
-    <div class="field"><label>File comment</label>
-      <input name="comment" value="${esc(detected.comment || "")}" maxlength="79" placeholder="Optional">
-      <small>Up to 79 characters, kept with the file on the volume.</small></div>
-    <div class="field"><label>Workbench icon type</label>
-      <input name="filetype" placeholder="Tool, Project or 3">
-      <small>Only when the file should carry a <code>.info</code> icon.</small></div>
+    <div class="field"><label>Attributes</label>
+      <input name="attributes" value="${esc(detected.attributes || "")}" placeholder="-----a" maxlength="6">
+      <small>The six letters <code>rhsvda</code>. Leave it empty for an ordinary <code>-----a</code>.</small></div>
+    <div class="field"><label>Datestamp</label>
+      <input name="datestamp" type="datetime-local" step="2" value="${esc(String(detected.datestamp || "").slice(0, 19).replace(" ", "T"))}">
+      <small>Leave it empty to stamp the file with the time it is written.</small></div>
+    <div class="field"><label>Desktop icon type</label>
+      <input name="filetype" placeholder="GEM, TOS or TTP">
+      <small>Only when the desktop should be told how to start the file.</small></div>
     <input type="hidden" name="applyRemaining" value="no">
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button>${canApplyAll ? '<button class="button ghost apply-import-all" value="add">Insert and apply to all remaining</button>' : ""}<button class="button primary" value="add">Insert File</button></div>`,
   async formValues => {
-    const plan = Object.fromEntries(["targetName", "protection", "comment", "filetype"]
+    const plan = Object.fromEntries(["targetName", "attributes", "datestamp", "filetype"]
       .map(key => [key, formValues.get(key)]));
     if (batch && formValues.get("applyRemaining") === "yes") {
       batch.acceptAll = true;
@@ -3143,7 +3179,7 @@ async function addHostFileWithPlan(index, file, plan) {
   form.append("targetName", plan.targetName);
   if (pane.partition !== null) form.append("partition", pane.partition);
   if (pane.side !== null) form.append("side", pane.side);
-  for (const key of ["protection", "comment", "filetype"]) if (plan[key]) form.append(key, plan[key]);
+  for (const key of ["attributes", "datestamp", "filetype"]) if (plan[key]) form.append(key, plan[key]);
   const data = await paneOperation(index, "Adding file to image…", () =>
     api(`/api/images/${pane.image.id}/files`, { method: "POST", body: form }));
   pane.image = data.image;
@@ -3841,8 +3877,8 @@ function renderWorkbenchSurvey(index, survey, roles, failures = []) {
 //: quietly stored the ADF as an ordinary file instead.
 function paneHoldsVolume(pane) {
   if (!pane?.image || pane.archivePath || pane.image.readOnly) return false;
-  if (pane.image.kind === "hdf") return pane.partition !== null;
-  return pane.image.kind === "ffs";
+  if (pane.image.kind === "hd") return pane.partition !== null;
+  return pane.image.kind === "gemdos";
 }
 
 
@@ -3960,8 +3996,8 @@ function renderAtariosCdPreflight(summary, host, boot, checked, filename) {
 //: A floppy has nowhere to install to, and a partition table is not a volume.
 function paneAcceptsInstall(pane) {
   if (!pane?.image || pane.image.readOnly) return false;
-  if (pane.image.kind === "hdf") return pane.partition !== null;
-  return Boolean(pane.image.hardDisk) && ["ffs", "ofs"].includes(pane.image.kind);
+  if (pane.image.kind === "hd") return pane.partition !== null;
+  return Boolean(pane.image.hardDisk) && pane.image.kind === "gemdos";
 }
 
 async function performInstall(index, sourceImageId, sourceName, plan) {
@@ -4164,7 +4200,7 @@ async function pasteWorkspaceClipboard(index) {
 
 async function transferFiles(targetIndex, sources, targetPath = null) {
   const target = panes[targetIndex];
-  if (!target.image || (target.image.kind === "hdf" && target.partition === null)) return toast("Open a destination disk first.", true);
+  if (!target.image || (target.image.kind === "hd" && target.partition === null)) return toast("Open a destination volume first.", true);
   if (!Array.isArray(sources) || !sources.length) return;
   const destination = targetPath || target.path;
   const movingWithinRom = target.image.kind === "rom"
