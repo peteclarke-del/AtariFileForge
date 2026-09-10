@@ -102,6 +102,12 @@ class FilesystemDiskMixin:
             "directoryEntryLimit": capabilities["directory_entry_limit"],
             "caseInsensitive": capabilities["case_insensitive"],
             "labelLimit": capabilities["label_limit"],
+            "label": capabilities["label"],
+            "clusters": capabilities["clusters"],
+            "clusterBytes": capabilities["cluster_bytes"],
+            "sizeBytes": capabilities["size_bytes"],
+            "bootable": capabilities["bootable"],
+            "tosLimits": capabilities["tos_limits"],
         }
         return session.gemdos_capabilities
 

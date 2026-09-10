@@ -28,12 +28,8 @@ class DestinationExistsError(DiskError):
         self.conflict = conflict
         super().__init__(
             f"{conflict.get('sourceName') or 'The source image'} cannot use "
-            f"{conflict['destination']} because that drawer already exists."
+            f"{conflict['destination']} because that folder already exists."
         )
-
-
-class DMSError(ValueError):
-    """The bytes are not a usable DiskMasher archive."""
 
 
 class OperationCancelled(DiskError):

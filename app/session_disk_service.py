@@ -13,6 +13,7 @@ from .filename_policy import session_name_policy, target_name_policy
 from .image_session import ImageSession, SESSION_OWNER
 from .rom import DEFAULT_BANK_SIZE, bank_count, validate_bank_size
 from .rom_workbench import normalise_project
+from .floppy_geometry import resolve_geometry
 from .session_state import session_metadata
 
 
@@ -362,6 +363,49 @@ class SessionDiskMixin:
             except CheckpointError as exc:
                 raise DiskError(str(exc)) from exc
 
+    def _drive_facts(self, session: ImageSession) -> dict:
+        """The partition table's own description, for a hard-disk session."""
+        if session.kind != "hd":
+            return {}
+        try:
+            table = self.partition_table(session)
+        except DiskError:
+            return {}
+        return {
+            "scheme": str(table.get("scheme") or ""),
+            "partitionScheme": str(table.get("scheme") or ""),
+            "byteSwapped": bool(table.get("byteSwapped")),
+            "partitionCount": len(table.get("partitions") or []),
+        }
+
+    def image_geometry(self, session: ImageSession) -> dict | None:
+        """The shape of a floppy image, read from its own boot sector.
+
+        A hard-disk volume has no cylinders, heads and sectors worth
+        reporting: it is addressed as logical sectors through a driver. Only
+        a floppy has a geometry a person can act on, so only a floppy
+        reports one.
+        """
+        if session.kind != "gemdos":
+            return None
+        try:
+            size = session.path.stat().st_size
+            with session.path.open("rb") as image:
+                boot = image.read(512)
+        except OSError:
+            return None
+        found = resolve_geometry(size, boot)
+        if found is None:
+            return None
+        return {
+            "id": found.identifier,
+            "label": found.label,
+            "tracks": found.tracks,
+            "sides": found.sides,
+            "sectors": found.sectors,
+            "size": found.size,
+        }
+
     def summary(self, session: ImageSession) -> dict:
         checkpoints = self.list_checkpoints(session)
         tosrom = self.tosrom_details(session) if session.kind == "tosrom" else None
@@ -369,6 +413,8 @@ class SessionDiskMixin:
         image_size = image_stat.st_size
         file_policy = session_name_policy(session)
         partition_policy = target_name_policy("hd", item_type="partition")
+        capabilities = session.gemdos_capabilities or {}
+        drive = self._drive_facts(session)
         return {
             "id": session.id,
             "name": session.name,
@@ -406,6 +452,17 @@ class SessionDiskMixin:
                 "file": file_policy.public_contract(),
                 "disk": partition_policy.public_contract() if session.kind == "hd" else None,
             },
+            # The volume's own description, so a report does not have to
+            # mount the image again to say what shape it is.
+            "title": capabilities.get("label") or None,
+            "label": capabilities.get("label") or None,
+            "format": capabilities.get("format") or None,
+            "clusters": capabilities.get("clusters") or None,
+            "sizeBytes": capabilities.get("sizeBytes") or image_size,
+            "bootable": capabilities.get("bootable"),
+            "tosLimits": capabilities.get("tosLimits") or [],
+            "geometry": self.image_geometry(session),
+            **drive,
             "targetHardware": session.target_hardware,
             "hardwareProfile": session.hardware_profile,
             "warnings": self._normalise_warnings(session.warnings),
