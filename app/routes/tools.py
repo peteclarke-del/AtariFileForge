@@ -65,7 +65,6 @@ from ..file_editor import (
     verify_basic_source,
     encode_editor_replacement,
 )
-from ..fat_media import FatMediaError, build_image_card
 from ..operations import OperationRegistry
 from ..platform_contract import PlatformRuntime
 from ..workflow_recipe import build_workflow_recipe_bundle
@@ -329,30 +328,29 @@ def create_tools_blueprint(
 
     @contextmanager
     def whole_drive_media(session, configured):
-        """Expose the complete hard drive to the emulator as one attached drive."""
+        """Expose the complete hard drive to the emulator as one attached drive.
+
+        The emulator is handed the drive image itself, because that is what an
+        Atari hard-disk interface reads: the partition table lives in the
+        image's own first sector, and the machine's ROM or driver goes looking
+        for it there. Wrapping the image in anything means the machine finds a
+        disk it does not recognise and starts with no drive attached.
+
+        It is also the session's own working copy, as every other launch uses,
+        so a change made inside the emulator is a change to the image being
+        worked on rather than to a copy that is thrown away.
+        """
         if session.kind != "hd":
             raise DiskError("A whole-drive launch requires a hard-drive image.")
-        temporary = tempfile.NamedTemporaryFile(
-            dir=service.work_dir, prefix="hdf-card-", suffix=".img", delete=False,
-        )
-        path = Path(temporary.name)
-        temporary.close()
         launch = copy(configured)
-        launch.emulator_media_kind = "whole-drive"
-        try:
-            build_image_card(session.path, path)
-            yield launch, path
-        except FatMediaError as exc:
-            raise DiskError(str(exc)) from exc
-        finally:
-            path.unlink(missing_ok=True)
+        yield launch, session.path
 
     def selected_media_probe(session, configured, *, debug: bool = False):
         """Build a command for a target without extracting or changing its bytes."""
         if getattr(session, "kind", "") == "hd":
-            probe = copy(configured)
-            probe.emulator_media_kind = "whole-drive"
-            return emulator_command(probe, Path("selected-hard-drive.img"), debug=debug)
+            return emulator_command(
+                copy(configured), Path("selected-hard-drive.img"), debug=debug
+            )
         return emulator_command(configured, configured.path, debug=debug)
 
     def launch_media(session, configured, data: dict):
@@ -1047,7 +1045,7 @@ def create_tools_blueprint(
                 launch.hardware_profile["emulatorBoot"] = "boot"
                 arguments, cwd = emulator_command(launch, media)
                 evidence = capture_emulator_evidence(arguments, cwd)
-        except (ValueError, FatMediaError, EmulatorEvidenceError) as exc:
+        except (ValueError, EmulatorEvidenceError) as exc:
             raise DiskError(f"The isolated capture could not complete: {exc}") from exc
         public_frames = evidence.pop("frames")
         frame_hashes = [frame["sha256"] for frame in public_frames]
