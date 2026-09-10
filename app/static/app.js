@@ -7018,8 +7018,13 @@ async function openFileEditor(index, name, target = null, pathOverride = null, f
       pane.archiveMember = "";
       return loadDirectory(index);
     }
+    // No offset and no length unless the caller is jumping to somewhere
+    // specific, so that a program listing opens at its code rather than at
+    // its 28-byte header.
     if (report.view === "disassembly") return renderDisassemblyEditor(
-      index, entry, path, report, "auto", "", String(focusOffset ?? 0), "8192", focusOffset, target,
+      index, entry, path, report, "auto", "",
+      focusOffset === null || focusOffset === undefined ? "" : String(focusOffset),
+      "", focusOffset, target,
     );
     if (report.view === "hex") {
       modal.close();
