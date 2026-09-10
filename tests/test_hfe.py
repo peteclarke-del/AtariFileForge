@@ -9,7 +9,7 @@ from unittest.mock import patch
 from app.hfe import HFEError, parse_hfe_header
 
 try:
-    from app.disk_service import DiskError, DiskService, ImageSession
+    from app.disk_service import HFE_FORMATS, DiskError, DiskService, ImageSession
 except ImportError:  # the service is ported separately
     DiskService = None
 
@@ -101,6 +101,33 @@ class HFEServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(DiskError, "cannot be rewritten safely"):
                 DiskService.require_writable_geometry(session)
 
+    def test_every_hfe_wrapper_holds_the_geometry_its_name_claims(self) -> None:
+        """A wrapper that quietly holds a different disk is worse than none.
+
+        The single-sided 400K and 440K geometries were both mapped onto the
+        360K wrapper, so choosing "HFE 440K" in the interface produced a 360K
+        disk: eleven sectors per track became nine, and the choice the operator
+        made was silently discarded. This asserts the whole map, because the
+        failure is invisible until the disk is short.
+        """
+        from atarinut.filesystem.blocks import NAMED_GEOMETRIES
+
+        expected_bytes = {
+            "hfe-st-360k": 368_640,
+            "hfe-st-400k": 409_600,
+            "hfe-st-440k": 450_560,
+            "hfe-st-720k": 737_280,
+            "hfe-st-800k": 819_200,
+            "hfe-st-880k": 901_120,
+            "hfe-st-1440k": 1_474_560,
+        }
+        self.assertEqual(set(HFE_FORMATS), set(expected_bytes))
+        for wrapper, geometry_name in HFE_FORMATS.items():
+            with self.subTest(wrapper=wrapper):
+                geometry = NAMED_GEOMETRIES[geometry_name]
+                size = geometry.total_sectors * geometry.sector_size
+                self.assertEqual(size, expected_bytes[wrapper])
+
     @unittest.skipIf(
         shutil.which("hxcfe") is None,
         "HxCFE is installed in the application container",
@@ -109,7 +136,10 @@ class HFEServiceTests(unittest.TestCase):
         expected = {
             "hfe-st-720k": ("gemdos", 737_280),
             "hfe-st-360k": ("gemdos", 368_640),
+            "hfe-st-400k": ("gemdos", 409_600),
+            "hfe-st-440k": ("gemdos", 450_560),
             "hfe-st-800k": ("gemdos", 819_200),
+            "hfe-st-880k": ("gemdos", 901_120),
             "hfe-st-1440k": ("gemdos", 1_474_560),
         }
         with tempfile.TemporaryDirectory() as folder:

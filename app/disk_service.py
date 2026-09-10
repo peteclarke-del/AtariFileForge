@@ -138,6 +138,8 @@ FLOPPY_FORMATS = (
 #: Blank floppies wrapped as HxC flux, keyed by the geometry inside them.
 HFE_FORMATS = {
     "hfe-st-360k": "ss-360k",
+    "hfe-st-400k": "ss-400k",
+    "hfe-st-440k": "ss-440k",
     "hfe-st-720k": "ds-720k",
     "hfe-st-800k": "ds-800k",
     "hfe-st-880k": "ds-880k",

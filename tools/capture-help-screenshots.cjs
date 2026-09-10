@@ -41,10 +41,17 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
 // the reader nothing about what their own collection looks like in here.
 const DISKS = {
   battleHawks: path.join(SAMPLES, "floppies", "Battle_Hawks_1942_1988_LucasFilm_Games_Protection_Removed.st"),
+  // Red Heat has no GEMDOS filing system at all: it boots its own loader,
+  // which is how a great many ST games were published. It is here because the
+  // pictures that explain that case need a disk that really is like that.
   redHeat: path.join(SAMPLES, "floppies", "Red_Heat_1989_Ocean_cr_TDA.st"),
   rogueTrooper: path.join(SAMPLES, "floppies", "Rogue_Trooper_1990_Krisalis_Software_cr_Empire.st"),
 };
 const ROM = path.join(ROOT, "firmware", "emutos", "etos512uk.img");
+// The operator's own ICD drive, because the drive pictures are about reading a
+// drive that was prepared elsewhere. A drive this application made itself
+// would show none of what those dialogs are for.
+const DRIVE = path.join(SAMPLES, "hdd", "petari_acsi_800mb_icd.hd");
 
 const wait = (page, ms) => page.waitForTimeout(ms);
 
@@ -107,10 +114,51 @@ async function openImage(page, file, paneIndex = 0) {
     await wait(page, 500);
     if (!(await modalIsOpen(page))) break;
   }
-  await wait(page, 2500);
+  // The dialog closes when the upload starts, not when it finishes. An 800 MB
+  // drive keeps going for a minute or more after that, and a picture taken in
+  // the meantime is a picture of a progress bar.
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    await wait(page, 1000);
+    const ready = await page.evaluate(index => {
+      const pane = document.querySelectorAll(".pane")[index];
+      if (!pane || pane.querySelector(".empty-pane")) return false;
+      return !/Uploading|Reading|Identifying/i.test(pane.textContent);
+    }, paneIndex);
+    if (ready) return;
+  }
+  throw new Error(`Pane ${paneIndex} never finished opening ${path.basename(file)}`);
+}
+
+// A hard disk opens on its partition table, and none of the file or install
+// commands apply until one of its partitions is entered. Everything the drive
+// pictures are about lives inside a partition, so this is where they start.
+async function openDrive(page, file = DRIVE) {
+  await openImage(page, file);
+  await page.evaluate(() => {
+    const row = document.querySelector(".pane .file-row[data-type=\"partition\"]");
+    row?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  });
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(page, 500);
+    const inside = await page.evaluate(() =>
+      !document.querySelector(".pane .file-row[data-type=\"partition\"]"));
+    if (inside) break;
+  }
+  await wait(page, 2000);
+}
+
+// Toasts stack in the bottom corner and outlive the action that raised them.
+// They are part of using the application and no part of a picture of a dialog,
+// so they are cleared just before the shutter.
+async function clearToasts(page) {
+  await page.evaluate(() => {
+    document.querySelectorAll(".toast-region > *").forEach(node => node.remove());
+  });
+  await wait(page, 250);
 }
 
 async function shot(page, directory, name) {
+  await clearToasts(page);
   fs.mkdirSync(directory, { recursive: true });
   await page.screenshot({ path: path.join(directory, `${name}.png`) });
   console.log(`wrote ${path.relative(ROOT, path.join(directory, `${name}.png`))}`);
@@ -125,12 +173,20 @@ function scene(name, where, run) {
 
 scene("workspace", HELP, async page => {
   await openImage(page, DISKS.battleHawks, 0);
-  await click(page, ".topbar .add-pane, .topbar button[data-add-pane]").catch(() => {});
-  await wait(page, 800);
-  if (await page.locator(".pane").nth(1).locator(".pane-open").count()) {
-    await openImage(page, DISKS.redHeat, 1);
-  }
-  await wait(page, 1200);
+  await click(page, "#addPaneButton");
+  await wait(page, 900);
+  // A real game floppy beside the operator's own hard drive, because the two
+  // kinds of medium behave differently and the workspace is where you see both
+  // at once. Rogue Trooper and Red Heat both boot their own loaders and list
+  // nothing, so neither makes a second pane worth looking at.
+  await openImage(page, DRIVE, 1);
+  // The two windows open on top of each other, and the picture is about there
+  // being several of them, so move the second clear of the first.
+  await page.evaluate(() => {
+    const pane = document.querySelectorAll(".pane")[1];
+    if (pane) { pane.style.left = "300px"; pane.style.top = "230px"; }
+  });
+  await wait(page, 1500);
 });
 
 scene("hex-editor", HELP, async page => {
@@ -203,6 +259,68 @@ scene("workbench-analysis", HELP, async page => {
   await wait(page, 500);
 });
 
+// Insert a floppy into a drive and stop on the dialog that asks what to do
+// with it. Both the import picture and the staging flow start here.
+async function importDiskIntoDrive(page, disk) {
+  await paneMenu(page, "File");
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser", { timeout: 20000 }),
+    page.evaluate(() => document.querySelector(".pane .import-file")?.click()),
+  ]);
+  await chooser.setFiles([disk]);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await wait(page, 500);
+    if (await page.evaluate(() => Boolean(document.querySelector('#modal select[name="storageMethod"]')))) return;
+  }
+  throw new Error("The import dialog never offered a storage method");
+}
+
+scene("image-import-preview", HELP, async page => {
+  await openDrive(page);
+  await importDiskIntoDrive(page, DISKS.battleHawks);
+  await wait(page, 1500);
+});
+
+scene("drive-install", HELP, async page => {
+  await openDrive(page);
+  await command(page, "Tools", "prepare-drive");
+  await wait(page, 3000);
+});
+
+scene("staged-installations", HELP, async page => {
+  await openDrive(page);
+  // A picture of an empty list teaches nobody what the list is for, so stage a
+  // real disk onto the drive first and then go and look at it.
+  await importDiskIntoDrive(page, DISKS.battleHawks);
+  await page.evaluate(() => {
+    const modal = document.querySelector("#modal");
+    const method = modal.querySelector('select[name="storageMethod"]');
+    method.value = "install";
+    method.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await wait(page, 900);
+  await page.evaluate(() => {
+    const modal = document.querySelector("#modal");
+    const stage = modal.querySelector('input[name="installMode"][value="stage"]');
+    if (stage) { stage.checked = true; stage.dispatchEvent(new Event("change", { bubbles: true })); }
+    const title = modal.querySelector('input[name="installTitle"]');
+    if (title) { title.value = "Battle Hawks 1942"; title.dispatchEvent(new Event("input", { bubbles: true })); }
+    const label = modal.querySelector('input[name="diskLabel"]');
+    if (label) { label.value = "Disk 1"; label.dispatchEvent(new Event("input", { bubbles: true })); }
+    const now = modal.querySelector('input[name="installNow"]');
+    if (now) { now.checked = false; now.dispatchEvent(new Event("change", { bubbles: true })); }
+  });
+  await wait(page, 700);
+  await click(page, '#modal button[value="continue"]');
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    await wait(page, 1000);
+    if (!(await modalIsOpen(page))) break;
+  }
+  await wait(page, 2000);
+  await command(page, "Tools", "staged-installations");
+  await wait(page, 3500);
+});
+
 module.exports = { SHOTS };
 
 async function main() {
@@ -212,7 +330,7 @@ async function main() {
     console.error(`No such shot. Known: ${SHOTS.map(entry => entry.name).join(", ")}`);
     process.exit(2);
   }
-  for (const file of [...Object.values(DISKS), ROM]) {
+  for (const file of [...Object.values(DISKS), ROM, DRIVE]) {
     if (!fs.existsSync(file)) throw new Error(`Missing sample media: ${file}`);
   }
   let failures = 0;

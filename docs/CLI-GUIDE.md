@@ -93,7 +93,7 @@ python -m app.cli create --format ds-720k --title WORK --output /media/work.st
 | Single-sided floppies | `ss-360k`, `ss-400k`, `ss-440k` |
 | Double-sided floppies | `ds-720k`, `ds-800k`, `ds-880k`, each also in `-81`, `-82` and `-83` track variants |
 | High density | `hd-1440k` |
-| HFE track images | `hfe-st-360k`, `hfe-st-720k`, `hfe-st-800k`, `hfe-st-880k`, `hfe-st-1440k` |
+| HFE track images | `hfe-st-360k`, `hfe-st-400k`, `hfe-st-440k`, `hfe-st-720k`, `hfe-st-800k`, `hfe-st-880k`, `hfe-st-1440k`, one for each geometry above |
 | Hard disks and volumes | `hd`, `volume` |
 | ROM images | `rom`, `cartridge` |
 
