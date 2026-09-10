@@ -157,6 +157,11 @@ BLANK_FORMATS = (
 #: The partition-table schemes a new hard disk can be built with.
 PARTITION_SCHEMES = ("ahdi", "mbr")
 
+#: Extensions that name a ROM and nothing else. ``.img`` and ``.bin`` are
+#: shared with a drive image and a bare volume, so only the bytes settle
+#: those.
+ROM_ONLY_EXTENSIONS = ROM_EXTENSIONS - HARD_DISK_EXTENSIONS
+
 
 class DiskService(
     SessionDiskMixin,
@@ -327,9 +332,13 @@ class DiskService(
         # "from its bytes, not from the name" rule the rest of this obeys.
         if self._looks_like_iso(path):
             return "iso"
-        rom_kind = self._rom_kind(path) if expected_kind in {None, "rom", "tosrom"} else None
-        if rom_kind:
-            return rom_kind
+        # A ROM probe is cheap and decisive, so it runs whenever the bytes
+        # could be a ROM: either nothing else is expected, or the name is one
+        # of the extensions a cartridge and a drive image share.
+        if expected_kind in {None, "rom", "tosrom"} or path.suffix.lower() in ROM_EXTENSIONS:
+            rom_kind = self._rom_kind(path)
+            if rom_kind:
+                return rom_kind
         try:
             from atarinut.filesystem import create_filesystem, identify
         except ImportError as exc:  # pragma: no cover - packaging failure
@@ -418,7 +427,8 @@ class DiskService(
         try:
             self._copy_stream(stream, path)
             return self._finalize_new_session(
-                image_id, safe_name, path, kind, target_hardware, rom_options
+                image_id, safe_name, path, kind, target_hardware, rom_options,
+                force_rom=force_kind == "rom",
             )
         except Exception:
             shutil.rmtree(folder, ignore_errors=True)
@@ -448,7 +458,8 @@ class DiskService(
         try:
             self._copy_local_file(source, path)
             return self._finalize_new_session(
-                image_id, safe_name, path, kind, target_hardware, rom_options
+                image_id, safe_name, path, kind, target_hardware, rom_options,
+                force_rom=force_kind == "rom",
             )
         except Exception:
             shutil.rmtree(folder, ignore_errors=True)
@@ -540,6 +551,7 @@ class DiskService(
         kind: str,
         target_hardware: str = "auto",
         rom_options: dict | None = None,
+        force_rom: bool = False,
     ) -> ImageSession:
         path = self._expand_gzip_image(path)
         hfe_original = None
@@ -558,9 +570,22 @@ class DiskService(
             path, kind, scp_original, scp_read_only, scp_warnings = self._open_scp(path)
         custom_loader = False
         try:
-            if kind == "unknown":
+            if kind == "rom":
+                # The raw ROM override says the caller wants the banked view
+                # of these bytes whatever they turn out to hold, which is how
+                # a TOS image is inspected chip by chip. Otherwise ``.rom``
+                # and ``.tos`` name a ROM outright and only the bytes can
+                # promote one to a mountable TOS ROM, so an image that is not
+                # yet linked, or is one half of a set, still opens.
+                if force_rom:
+                    kind = "rom"
+                elif path.suffix.lower() in ROM_ONLY_EXTENSIONS:
+                    kind = self._rom_kind(path) or "rom"
+                else:
+                    kind = self.identify_kind(path, "rom")
+            elif kind == "unknown":
                 kind = self.identify_kind(path)
-            elif kind in {"gemdos", "hd", "rom", "tosrom"}:
+            elif kind in {"gemdos", "hd", "tosrom"}:
                 # ``.img`` and ``.bin`` are shared by a cartridge dump, a
                 # drive image and a bare volume, so the bytes settle which
                 # it is.
