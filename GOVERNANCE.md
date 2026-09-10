@@ -49,9 +49,9 @@ the issue or pull request.
 ## Compatibility and evidence
 
 Automated tests are necessary but do not override results from supported
-physical hardware. A change that affects FFS maps and directories, OFS
-catalogues, HDF menus, FastFileSystem, Hardfile geometry, Tube coexistence, loader
-conversion, physical disk writing or emulator firmware remains a hardware-test
+physical hardware. A change that affects FAT chains and directories, AHDI
+partition tables, boot sectors, TOS-version limits, hard-disk driver installation,
+AUTO-folder ordering, physical disk writing or emulator firmware remains a hardware-test
 candidate until the applicable checks in
 `docs/RELEASE-CHECKLIST.md` pass.
 
@@ -90,7 +90,7 @@ Atarinut, HxCFloppyEmulator (HxCFE), FS-UAE, vAtari, 1MHzWifi, MAME, noVNC,
 websockify, Greaseweazle
 and system packages retain their upstream ownership and terms. Changes intended
 for an upstream project should remain reviewable and suitable for submission
-there. Third-party ROMs, disk images, dmss, credentials and private hardware
+there. Third-party ROMs, disk images, archives, credentials and private hardware
 media must not be committed as fixtures or added to release packages without a
 recorded redistribution basis.
 

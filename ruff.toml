@@ -6,7 +6,7 @@
 # correctness core and is green.
 #
 # It earns its place. `F821` (undefined name) caught a real NameError in the
-# FFS menu-test path that unit tests had missed, because the test that covered
+# install-audit path that unit tests had missed, because the test that covered
 # that function mocked the function itself out.
 #
 # Widening the set is welcome, but do it one rule family at a time with the

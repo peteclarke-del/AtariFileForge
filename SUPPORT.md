@@ -8,7 +8,7 @@ the application version, host architecture, Docker or native Linux edition,
 target hardware profile and image format when asking for help.
 
 Search existing GitHub issues before opening a new one. A support report should
-contain exact steps and sanitised logs. Do not upload copyrighted disk, dms or
+contain exact steps and sanitised logs. Do not upload copyrighted disk or
 ROM images. Create a minimal generated image where possible.
 
 English Atari Board discussions are useful for hardware history and format
