@@ -75,9 +75,8 @@ applied when it is finalised. It accepts `auto`, `floppy`, `hd`, `volume` and
 `--force-kind rom` opens a file as a raw ROM rather than letting its contents
 decide. Use it for a ROM dump whose size or header does not identify it.
 
-A hard disk is one file with a partition table inside it. There is no
-companion descriptor to keep alongside it, so a command that works on a volume
-inside a drive names the partition with `--partition`.
+A hard disk is one file with a partition table inside it, so a command that
+works on a volume inside a drive names the partition with `--partition`.
 
 ## Commands
 

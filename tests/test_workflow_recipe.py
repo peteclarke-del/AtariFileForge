@@ -98,8 +98,6 @@ class WorkflowRecipeTests(unittest.TestCase):
                 name="games.st",
                 kind="gemdos",
                 path=root / "current.st",
-                descriptor_path=None,
-                descriptor_name=None,
                 target_hardware="floppy",
                 hardware_profile={"machine": "st", "accelerated": False},
                 compatibility_reports=[{"format": "atari-file-forge-compatibility-report"}],
@@ -107,7 +105,7 @@ class WorkflowRecipeTests(unittest.TestCase):
             )
             session.path.write_bytes(b"current")
             base_session = SimpleNamespace(
-                kind="gemdos", name="games.st", path=base_path, descriptor_path=None,
+                kind="gemdos", name="games.st", path=base_path,
             )
             service = SimpleNamespace(work_dir=root, discard_session=Mock())
             output = root / "workflow.zip"

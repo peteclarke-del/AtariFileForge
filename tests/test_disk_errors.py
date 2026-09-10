@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -563,8 +564,6 @@ class DiskErrorTests(unittest.TestCase):
             self.assertEqual(recovered[0]["name"], "drive.img")
             self.assertEqual(recovered[0]["size"], 512)
             self.assertEqual(recovered[0]["targetHardware"], "volume")
-            # A GEMDOS volume is one file. Nothing travels beside it.
-            self.assertFalse(recovered[0]["hasDescriptor"])
 
     def test_recovery_is_scoped_to_current_browser_owner(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -610,23 +609,32 @@ class DiskErrorTests(unittest.TestCase):
             self.assertEqual(len(restored.warnings), 2)
             self.assertIn("Choose a partition", restored.warnings[1])
 
-    def test_a_descriptor_is_accepted_and_ignored(self) -> None:
-        """Nothing travels beside a GEMDOS image, so nothing is recorded."""
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            service = DiskService(root / "work")
-            source = service.create_blank("ds-720k", "PLAIN")
+    def test_a_session_saved_with_the_old_companion_keys_still_restores(self) -> None:
+        """Working sessions on a developer's machine predate the Atari port.
 
-            opened = service.create_from_stream(
-                "disk.st",
-                io.BytesIO(source.path.read_bytes()),
-                ("disk.dsc", io.BytesIO(b"geometry")),
+        Those were written while the workbench still paired an image with a
+        geometry file, so their session.json carries two keys nothing reads
+        any more. Restoring one must simply ignore them.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            service = DiskService(Path(folder))
+            session = service.create_blank("ds-720k", "WORK")
+            service._persist_session(session)
+            metadata_path = session.path.parent / "session.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["descriptorName"] = "WORK.geo"
+            metadata["descriptorFile"] = "WORK.geo"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            (session.path.parent / "WORK.geo").write_text(
+                "cylinders=615\nheads=4\nsectors=17\n", encoding="utf-8"
             )
 
-            self.assertEqual(opened.kind, "gemdos")
-            self.assertIsNone(opened.descriptor_name)
-            self.assertIsNone(opened.descriptor_path)
-            self.assertFalse(service.summary(opened)["hasDescriptor"])
+            restored = service._restore_session(session.id)
+
+            self.assertEqual(restored.name, session.name)
+            self.assertEqual(restored.kind, "gemdos")
+            self.assertFalse(hasattr(restored, "descriptor_path"))
+            self.assertNotIn("hasDescriptor", service.summary(restored))
 
     def test_a_decode_one_sector_short_of_a_floppy_is_completed(self) -> None:
         """A flux decode may omit an unreadable final sector, and only that."""

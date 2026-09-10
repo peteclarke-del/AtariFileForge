@@ -413,13 +413,11 @@ class DiskService(
         self,
         name: str,
         stream: BinaryIO,
-        descriptor: tuple[str, BinaryIO] | None = None,
         target_hardware: str = "auto",
         rom_options: dict | None = None,
         force_kind: str | None = None,
     ) -> ImageSession:
         safe_name, kind = self._new_session_source(name, force_kind)
-        del descriptor
         image_id = uuid.uuid4().hex
         folder = self.work_dir / image_id
         folder.mkdir()
@@ -437,7 +435,6 @@ class DiskService(
     def create_from_path(
         self,
         source: Path,
-        descriptor: Path | None = None,
         target_hardware: str = "auto",
         rom_options: dict | None = None,
         force_kind: str | None = None,
@@ -449,7 +446,6 @@ class DiskService(
         The source remains untouched and all edits still target the session.
         """
         source = Path(source)
-        del descriptor
         safe_name, kind = self._new_session_source(source.name, force_kind)
         image_id = uuid.uuid4().hex
         folder = self.work_dir / image_id

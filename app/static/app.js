@@ -1436,12 +1436,10 @@ function wireDropZone(host, index) {
     if (dropped.some(item => item.relativePath.includes("/")) && panes[index].image) {
       return addSelectedHostFolder(index, dropped);
     }
-    const images = files.filter(file => formats.isImportableImage(file.name) || formats.isDescriptor(file.name));
+    const images = files.filter(file => formats.isImportableImage(file.name));
     if (!panes[index].image) return openFiles(index, files);
     if (images.length && paneHoldsVolume(panes[index])) {
-      for (const file of files.filter(item => !formats.isDescriptor(item.name))) {
-        await importHostFile(index, file);
-      }
+      for (const file of files) await importHostFile(index, file);
       return;
     }
     if (images.length) return openFiles(index, files);
@@ -1812,7 +1810,7 @@ function chooseImage(index) {
   let selection = { files: [] };
   showModal(`
     <h2>Open a media image</h2>
-    <p>Choose a floppy container, a hard-disk image, a CD or a ROM. A bare hard-disk image can be opened with its <code>.geo</code> geometry sidecar, and ZIP distributions are also supported.</p>
+    <p>Choose a floppy container, a hard-disk image, a CD or a ROM. A hard-disk image is a single file with its partition table inside it, and ZIP distributions are also supported.</p>
     <div class="field"><label>Image file</label>
       <input type="file" name="images" accept="${esc(formats.accept)}" multiple>
       <div class="file-selection-summary" data-selected-files aria-live="polite"></div>
@@ -1831,9 +1829,9 @@ function chooseImage(index) {
   form => {
     const files = selection.files;
     if (!files.length) throw new Error("Choose a media image to open.");
-    // Let showModal finish closing this dialog before a geometry-sidecar
-    // pairing dialog is opened. Opening the replacement synchronously here
-    // lets the first dialog's promise handler close the new one as well.
+    // Let showModal finish closing this dialog before the target-media
+    // dialog is opened. Opening the replacement synchronously here lets the
+    // first dialog's promise handler close the new one as well.
     const targetHardware = form.get("targetHardware") || "auto";
     if (form.get("formatOverride") === "rom") files.forEach(file => { file.atariForceKind = "rom"; });
     setTimeout(() => openFiles(index, files, targetHardware), 0);
@@ -1876,92 +1874,6 @@ function promptTargetMedia(index, files) {
     const targetHardware = form.get("targetHardware") || "auto";
     setTimeout(() => openFiles(index, files, targetHardware), 0);
   });
-}
-
-//: A bare hard-disk image is nothing but the volume: no partition table and
-//: therefore no geometry. The drive's cylinders, heads and sectors travel
-//: beside it in a small ".geo" text file, and the two have to be opened
-//: together or the volume cannot be laid out.
-function promptGeometrySidecarPair(
-  index,
-  image = null,
-  descriptor = null,
-  warning = "",
-  targetHardware = "auto"
-) {
-  panes[index].loading = false;
-  panes[index].loadingMessage = "";
-  renderPane(index);
-  let imageSelection = { files: [] };
-  let descriptorSelection = { files: [] };
-  showModal(`
-    <h2>Open the drive image and its geometry together</h2>
-    <p>A bare hard-disk image keeps its drive geometry in a companion <code>.geo</code> file. The file you already selected has been retained; choose only its missing companion.</p>
-    ${warning ? `<div class="scan-notes"><span>${esc(warning)}</span></div>` : ""}
-    <div class="pair-file-drop" data-pair-drop>Drop the drive image and its geometry sidecar here together</div>
-    <div class="field"><label>Drive image${image ? " · selected" : ""}</label>
-      ${image ? `<small class="prefilled-file">${esc(image.name)} · ${humanSize(image.size)}</small>` : ""}
-      <input type="file" name="image" accept=".img,.hd,.ahd,.acsi,.ide,.raw,.bin">
-      <div class="file-selection-summary compact" data-selected-image aria-live="polite"></div>
-      ${image ? "<small>Optional: choose a different drive image to replace the retained file.</small>" : ""}
-    </div>
-    <div class="field"><label>Matching geometry sidecar${descriptor ? " · selected" : ""}</label>
-      ${descriptor ? `<small class="prefilled-file">${esc(descriptor.name)} · ${humanSize(descriptor.size)}</small>` : ""}
-      <input type="file" name="descriptor" accept=".geo">
-      <div class="file-selection-summary compact" data-selected-geo aria-live="polite"></div>
-      ${descriptor ? "<small>Optional: choose a different sidecar to replace the retained file.</small>" : ""}
-    </div>
-    <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="open" data-open-pair disabled>Open the pair</button></div>`,
-  async () => {
-    const chosenImage = imageSelection.files[0]
-      ? imageSelection.files[0]
-      : image;
-    const chosenDescriptor = descriptorSelection.files[0]
-      ? descriptorSelection.files[0]
-      : descriptor;
-    if (!(chosenImage instanceof File) || formats.isDescriptor(chosenImage.name)) {
-      throw new Error("Choose the drive image itself.");
-    }
-    if (!(chosenDescriptor instanceof File) || !formats.isDescriptor(chosenDescriptor.name)) {
-      throw new Error("Choose the matching .geo sidecar.");
-    }
-    if (formats.stem(chosenDescriptor.name).toLowerCase() !== formats.stem(chosenImage.name).toLowerCase()) {
-      throw new Error(`Choose ${formats.stem(chosenImage.name)}.geo for this HDA image.`);
-    }
-    await openFiles(index, [chosenImage, chosenDescriptor], targetHardware);
-  });
-  const pairButton = modalContent.querySelector("[data-open-pair]");
-  const updatePairButton = () => {
-    pairButton.disabled = !(imageSelection.files[0] || image)
-      || !(descriptorSelection.files[0] || descriptor);
-  };
-  const datSummary = modalContent.querySelector("[data-selected-image]");
-  const dscSummary = modalContent.querySelector("[data-selected-geo]");
-  imageSelection = trackFileInput(
-    modalContent.querySelector('input[name="image"]'),
-    datSummary
-  );
-  descriptorSelection = trackFileInput(
-    modalContent.querySelector('input[name="descriptor"]'),
-    dscSummary
-  );
-  acceptFileDrop(datSummary, files => {
-    const selected = files.find(file => !formats.isDescriptor(file.name));
-    if (selected) imageSelection.setFiles([selected]);
-  });
-  acceptFileDrop(dscSummary, files => {
-    const selected = files.find(file => formats.isDescriptor(file.name));
-    if (selected) descriptorSelection.setFiles([selected]);
-  });
-  acceptFileDrop(modalContent.querySelector("[data-pair-drop]"), files => {
-    const selectedImage = files.find(file => !formats.isDescriptor(file.name));
-    const selectedDescriptor = files.find(file => formats.isDescriptor(file.name));
-    if (selectedImage) imageSelection.setFiles([selectedImage]);
-    if (selectedDescriptor) descriptorSelection.setFiles([selectedDescriptor]);
-  });
-  datSummary.addEventListener("selectionchange", updatePairButton);
-  dscSummary.addEventListener("selectionchange", updatePairButton);
-  updatePairButton();
 }
 
 async function openFiles(index, files, targetHardware = null) {
@@ -2021,35 +1933,14 @@ async function openFiles(index, files, targetHardware = null) {
       setTimeout(() => openFiles(index, [combined], targetHardware), 0);
     });
   }
-  let image = files.find(file => !formats.isDescriptor(file.name));
-  const descriptor = files.find(file => formats.isDescriptor(file.name));
-  if (!image) {
-    if (descriptor) {
-      promptGeometrySidecarPair(index, null, descriptor, "", targetHardware || "auto");
-      return;
-    }
-    return;
-  }
+  const image = files[0];
+  if (!image) return;
   if (targetHardware === null && formats.isPotentialGemdosImage(image.name)) {
     return promptTargetMedia(index, files);
   }
   targetHardware ||= "auto";
-  if (
-    descriptor
-    && formats.stem(descriptor.name).toLowerCase() !== formats.stem(image.name).toLowerCase()
-  ) {
-    promptGeometrySidecarPair(
-      index,
-      image,
-      descriptor,
-      `${image.name} and ${descriptor.name} do not have matching base names. Replace the incorrect file.`,
-      targetHardware
-    );
-    return;
-  }
   const form = new FormData();
   form.append("image", image);
-  if (descriptor) form.append("descriptor", descriptor);
   form.append("targetHardware", targetHardware);
   if (image.atariForceKind) form.append("forceKind", image.atariForceKind);
   if (image.atariRomLayout) {
@@ -4254,7 +4145,7 @@ function showDownloadReady(image, url) {
   modal.classList.remove("busy", "failed");
   showModal(`
     <div class="modal-heading"><span class="modal-kicker">SAVE IMAGE</span><h2>Your download is ready</h2></div>
-    <p>The timestamped ZIP contains <strong>${esc(image.name)}</strong>, its matching <code>.geo</code> geometry sidecar when one is required, and a technical README.</p>
+    <p>The timestamped ZIP contains <strong>${esc(image.name)}</strong> and a technical README.</p>
     <div class="help-note"><strong>Did the automatic download not appear?</strong> Select Download ZIP below. This direct link remains available until you close this message.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><a class="button primary download-ready-link" href="${esc(url)}" download>Download ZIP</a></div>
   `, null, { replace: modal.open });
@@ -4279,7 +4170,7 @@ async function saveImage(index) {
       showModal('<div class="analysis-loading"><span class="modal-progress-icon">↻</span><h2>Preparing download</h2></div>');
       modal.classList.add("busy");
       setModalProgress({
-        title: pane.image.hasDescriptor ? "Preparing the drive image and its geometry sidecar" : "Preparing image download",
+        title: "Preparing image download",
         message: "Starting hardware and filesystem checks…",
         details: [
           { label: "Stages", value: "Validate, checksum, index, then build the complete ZIP" },
@@ -4289,7 +4180,7 @@ async function saveImage(index) {
     }
     const data = await trackedPaneOperation(
       index,
-      pane.image.hasDescriptor ? "Validating the drive image and its geometry before download…" : "Validating image before download…",
+      "Validating image before download…",
       operationId => api(`/api/images/${pane.image.id}/download/prepare`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4330,7 +4221,7 @@ function exportImageAs(index) {
     <div class="field"><label>Target format</label><select name="format">
       ${formats.map(entry => `<option value="${esc(entry.format)}">${esc(entry.label)}</option>`).join("")}
     </select></div>
-    <div class="help-note">HFE and SCP exports are verified by decoding the result again and comparing it byte-for-byte with the current sectors before the download starts. Converting a hard drive between its two shapes copies the volume unchanged: adding an AHDI partition table puts the geometry inside the file, and removing one writes that geometry to a <code>.geo</code> sidecar which must stay beside the image.</div>
+    <div class="help-note">HFE and SCP exports are verified by decoding the result again and comparing it byte-for-byte with the current sectors before the download starts.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="export">Export</button></div>`,
   async form => {
     const format = form.get("format");
@@ -4361,9 +4252,8 @@ async function recoverPreviousSession(index) {
     const recoverable = data.images.filter(image => !openIds.has(image.id));
     const options = recoverable.map((image, position) => {
       const modified = new Date(image.modified).toLocaleString();
-      const pair = image.hasDescriptor ? " · with geometry sidecar" : "";
       const selected = position === 0 ? " selected" : "";
-      return `<option value="${esc(image.id)}"${selected}>${esc(image.name)} · ${esc(humanSize(image.size))}${pair} · ${esc(modified)}</option>`;
+      return `<option value="${esc(image.id)}"${selected}>${esc(image.name)} · ${esc(humanSize(image.size))} · ${esc(modified)}</option>`;
     }).join("");
     const emptyMessage = recoverable.length
       ? ""
@@ -7722,7 +7612,7 @@ function showImageComparison(index) {
         return true;
       };
       const rawComponents = report.raw?.components || [];
-      const rawMarkup = `<details class="raw-comparison" ${report.summary.total < 40 ? "open" : ""}><summary>Raw image evidence · ${Number(report.raw?.changedBytes || 0).toLocaleString()} changed byte${Number(report.raw?.changedBytes) === 1 ? "" : "s"}</summary>${rawComponents.map(component => `<section><b>${component.component === "descriptor" ? "Companion descriptor" : "Primary image"}</b><small>${Number(component.count).toLocaleString()} changed bytes · ${humanSize(component.sourceSize)} → ${humanSize(component.candidateSize)}${component.truncated ? " · comparison bounded at 1 GiB" : ""}</small>${component.ranges.slice(0, 100).map(range => `<code>+&amp;${Number(range[0]).toString(16).toUpperCase()} to +&amp;${Number(range[1]).toString(16).toUpperCase()} · ${(Number(range[1]) - Number(range[0]) + 1).toLocaleString()} bytes</code>`).join("") || "<em>Byte-identical</em>"}${component.rangesTruncated ? "<em>Additional ranges are retained only in the changed-byte total.</em>" : ""}</section>`).join("") || "<p>No comparable local image components were available.</p>"}</details>`;
+      const rawMarkup = `<details class="raw-comparison" ${report.summary.total < 40 ? "open" : ""}><summary>Raw image evidence · ${Number(report.raw?.changedBytes || 0).toLocaleString()} changed byte${Number(report.raw?.changedBytes) === 1 ? "" : "s"}</summary>${rawComponents.map(component => `<section><b>Primary image</b><small>${Number(component.count).toLocaleString()} changed bytes · ${humanSize(component.sourceSize)} → ${humanSize(component.candidateSize)}${component.truncated ? " · comparison bounded at 1 GiB" : ""}</small>${component.ranges.slice(0, 100).map(range => `<code>+&amp;${Number(range[0]).toString(16).toUpperCase()} to +&amp;${Number(range[1]).toString(16).toUpperCase()} · ${(Number(range[1]) - Number(range[0]) + 1).toLocaleString()} bytes</code>`).join("") || "<em>Byte-identical</em>"}${component.rangesTruncated ? "<em>Additional ranges are retained only in the changed-byte total.</em>" : ""}</section>`).join("") || "<p>No comparable local image components were available.</p>"}</details>`;
       resultHost.innerHTML = `<div class="comparison-summary">${sections.map(name => `<strong><span>${report.summary[name].toLocaleString()}</span>${name}</strong>`).join("")}<strong><span>${report.summary.total.toLocaleString()}</span>total</strong></div>
         ${report.sameFormat ? "" : '<p class="help-warning">These images use different filesystem families. The report is useful for inventory comparison but cannot become a directly applicable patch.</p>'}
         <div class="comparison-change-list">${sections.map(name => report.changes[name].length ? `<details ${report.summary.total < 40 ? "open" : ""}><summary>${name[0].toUpperCase() + name.slice(1)} (${report.changes[name].length})</summary>${report.changes[name].slice(0, 1000).map(change => `<div>${patchable(change) ? `<input type="checkbox" data-patch-key="${esc(change.key)}" aria-label="Include ${esc(comparisonRecordLabel(change))} in a selective patch">` : '<span class="patch-choice-placeholder" aria-hidden="true"></span>'}<b>${esc(comparisonRecordLabel(change))}</b><small>${change.changedFields?.length ? esc(change.changedFields.join(", ")) : name}</small></div>`).join("")}${report.changes[name].length > 1000 ? `<p>${(report.changes[name].length - 1000).toLocaleString()} more changes are included in the JSON export.</p>` : ""}</details>` : "").join("") || '<p class="help-note">The logical contents and metadata are identical.</p>'}${rawMarkup}</div>
@@ -8012,7 +7902,7 @@ async function renderWorkbench(section = "profiles") {
   const recipes = storedCollection(RECIPE_STORAGE_KEY, []);
   const imageOptions = panes.map((pane, index) => pane.image ? `<option value="${index}">${esc(paneLabel(index))}</option>` : "").join("");
   showModal(`<div class="workbench-dialog"><header><div><small>ATARI FILE FORGE</small><h2>Workbench</h2></div><select name="workbenchSection"><option value="profiles" ${section === "profiles" ? "selected" : ""}>Hardware profiles</option><option value="recipes" ${section === "recipes" ? "selected" : ""}>Import recipes</option><option value="project" ${section === "project" ? "selected" : ""}>Portable project</option></select></header>
-    ${section === "profiles" ? `<div class="workbench-profile-picker field"><label>Hardware profile</label><select name="profileSelect">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)}</option>`).join("")}</select><small>Start with a common system, then build the exact target from compatible additions.</small></div><div class="workbench-grid workbench-profile-grid"><section><div class="field"><label>Profile name</label><input name="profileName" value="${esc(profiles[0]?.name || "My Atari setup")}"></div><div class="field"><label>Base machine</label><select name="profileMachine">${hardware.machines.map(machine => `<option value="${esc(machine.id)}">${esc(machine.label)} · ${esc(machine.baseRam)} · ${esc(machine.processor)}</option>`).join("")}</select></div><div class="field"><label>Online Library filter</label><select name="profileCatalogMachine">${ONLINE_MACHINES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Filing system</label><select name="profileFs">${WORKBENCH_FILE_SYSTEMS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Target validation</label><select name="profileTarget">${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Hard-disk driver</label><select name="profileDriver">${DRIVE_DRIVER_BUILDS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Program flags</label><input name="profilePage" value="${esc(profiles[0]?.page || "0")}"><small>The <code>_p_flags</code> longword a program header on this machine is expected to carry.</small></div><section class="workbench-addon-builder"><header><div><small>COMPATIBLE HARDWARE</small><h3>Add-ons</h3></div><span data-addon-summary></span></header><div class="hardware-addon-groups" data-hardware-addons></div></section><details class="workbench-emulator-settings" open><summary>Emulator and debugger integration</summary><div class="help-note"><strong>Managed tools:</strong> Atari File Forge translates supported additions into Hatari machine types, memory sizes, floppy and hard-drive attachments, processor options and monitor modes. Items marked Validation only still affect compatibility analysis but are not falsely claimed as emulated.</div><div class="workbench-emulator-controls"><div class="field"><label>Emulator</label><select name="profileEmulator">${WORKBENCH_EMULATORS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Debugger</label><select name="profileDebugger">${WORKBENCH_DEBUGGERS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Emulated RAM</label><select name="profileEmulatorRam"><option value="auto">From base machine and add-ons</option>${WORKBENCH_MEMORY.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Startup action</label><select name="profileEmulatorBoot"><option value="auto">Use image default</option><option value="boot">Boot from this image</option><option value="catalogue">Open catalogue only</option></select></div></div></details><div class="field"><label>Apply to open pane</label><select name="profilePane">${imageOptions || '<option value="">No open images</option>'}</select></div><div class="modal-actions"><button type="button" class="button" data-save-profile>Save profile</button><button type="button" class="button primary" data-apply-profile ${imageOptions ? "" : "disabled"}>Apply profile</button></div></section></div>` : section === "recipes" ? `<div class="workbench-grid"><aside>${recipes.map((recipe, index) => `<button type="button" data-recipe-index="${index}"><b>${esc(recipe.name)}</b><small>${esc(recipe.naming)} · ${recipe.addMenu ? "menu" : "off-menu"}</small></button>`).join("") || "<p>No saved recipes yet.</p>"}</aside><section><div class="field"><label>Recipe name</label><input name="recipeName" value="Collection import"></div><div class="field"><label>Folder naming</label><select name="recipeNaming"><option value="source">Use source titles</option><option value="generic">DISK0000 sequence</option></select></div><div class="field"><label>Group prefix</label><input name="recipeGroup" maxlength="8" value="DISKS"></div><label class="check-field"><input type="checkbox" name="recipeOnline" checked> Use online metadata for ambiguous titles</label><label class="check-field"><input type="checkbox" name="recipeCompat" checked> Rewrite host names to GEMDOS 8.3 automatically</label><label class="check-field"><input type="checkbox" name="recipeMenu" checked> Offer imported titles to a menu</label><div class="modal-actions"><button type="button" class="button primary" data-save-recipe>Save recipe</button></div></section></div>` : `<div class="project-tools"><p>A project description preserves the pane layout, working session references, current paths, profiles and recipes. Image bytes remain in their private recoverable sessions and normal timestamped save ZIPs. Theme remains a browser preference.</p><div class="modal-actions"><button type="button" class="button" data-export-project>Export project JSON</button><label class="button primary">Import project JSON<input type="file" accept="application/json,.json" data-import-project hidden></label></div><hr><h3>Deterministic workflow</h3><p>Export the earliest retained pre-change checkpoint identity, a guarded patch containing every later filesystem change, and the exact hashes expected from a successful rebuild. Original image bytes are not included.</p><label class="field"><span>Completed image</span><select name="workflowPane">${imageOptions || '<option value="">No open images</option>'}</select></label><div class="help-note">The CLI verifies the base image, its optional <code>.geo</code> geometry sidecar, the patch and the final saved output. Flux workflows remain unavailable until their container-level reconstruction is provably lossless.</div><div class="modal-actions"><button type="button" class="button primary" data-export-workflow ${imageOptions ? "" : "disabled"}>Export workflow bundle</button></div></div>`}
+    ${section === "profiles" ? `<div class="workbench-profile-picker field"><label>Hardware profile</label><select name="profileSelect">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)}</option>`).join("")}</select><small>Start with a common system, then build the exact target from compatible additions.</small></div><div class="workbench-grid workbench-profile-grid"><section><div class="field"><label>Profile name</label><input name="profileName" value="${esc(profiles[0]?.name || "My Atari setup")}"></div><div class="field"><label>Base machine</label><select name="profileMachine">${hardware.machines.map(machine => `<option value="${esc(machine.id)}">${esc(machine.label)} · ${esc(machine.baseRam)} · ${esc(machine.processor)}</option>`).join("")}</select></div><div class="field"><label>Online Library filter</label><select name="profileCatalogMachine">${ONLINE_MACHINES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Filing system</label><select name="profileFs">${WORKBENCH_FILE_SYSTEMS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Target validation</label><select name="profileTarget">${TARGET_MEDIA.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Hard-disk driver</label><select name="profileDriver">${DRIVE_DRIVER_BUILDS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Program flags</label><input name="profilePage" value="${esc(profiles[0]?.page || "0")}"><small>The <code>_p_flags</code> longword a program header on this machine is expected to carry.</small></div><section class="workbench-addon-builder"><header><div><small>COMPATIBLE HARDWARE</small><h3>Add-ons</h3></div><span data-addon-summary></span></header><div class="hardware-addon-groups" data-hardware-addons></div></section><details class="workbench-emulator-settings" open><summary>Emulator and debugger integration</summary><div class="help-note"><strong>Managed tools:</strong> Atari File Forge translates supported additions into Hatari machine types, memory sizes, floppy and hard-drive attachments, processor options and monitor modes. Items marked Validation only still affect compatibility analysis but are not falsely claimed as emulated.</div><div class="workbench-emulator-controls"><div class="field"><label>Emulator</label><select name="profileEmulator">${WORKBENCH_EMULATORS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Debugger</label><select name="profileDebugger">${WORKBENCH_DEBUGGERS.map(([value,label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Emulated RAM</label><select name="profileEmulatorRam"><option value="auto">From base machine and add-ons</option>${WORKBENCH_MEMORY.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></div><div class="field"><label>Startup action</label><select name="profileEmulatorBoot"><option value="auto">Use image default</option><option value="boot">Boot from this image</option><option value="catalogue">Open catalogue only</option></select></div></div></details><div class="field"><label>Apply to open pane</label><select name="profilePane">${imageOptions || '<option value="">No open images</option>'}</select></div><div class="modal-actions"><button type="button" class="button" data-save-profile>Save profile</button><button type="button" class="button primary" data-apply-profile ${imageOptions ? "" : "disabled"}>Apply profile</button></div></section></div>` : section === "recipes" ? `<div class="workbench-grid"><aside>${recipes.map((recipe, index) => `<button type="button" data-recipe-index="${index}"><b>${esc(recipe.name)}</b><small>${esc(recipe.naming)} · ${recipe.addMenu ? "menu" : "off-menu"}</small></button>`).join("") || "<p>No saved recipes yet.</p>"}</aside><section><div class="field"><label>Recipe name</label><input name="recipeName" value="Collection import"></div><div class="field"><label>Folder naming</label><select name="recipeNaming"><option value="source">Use source titles</option><option value="generic">DISK0000 sequence</option></select></div><div class="field"><label>Group prefix</label><input name="recipeGroup" maxlength="8" value="DISKS"></div><label class="check-field"><input type="checkbox" name="recipeOnline" checked> Use online metadata for ambiguous titles</label><label class="check-field"><input type="checkbox" name="recipeCompat" checked> Rewrite host names to GEMDOS 8.3 automatically</label><label class="check-field"><input type="checkbox" name="recipeMenu" checked> Offer imported titles to a menu</label><div class="modal-actions"><button type="button" class="button primary" data-save-recipe>Save recipe</button></div></section></div>` : `<div class="project-tools"><p>A project description preserves the pane layout, working session references, current paths, profiles and recipes. Image bytes remain in their private recoverable sessions and normal timestamped save ZIPs. Theme remains a browser preference.</p><div class="modal-actions"><button type="button" class="button" data-export-project>Export project JSON</button><label class="button primary">Import project JSON<input type="file" accept="application/json,.json" data-import-project hidden></label></div><hr><h3>Deterministic workflow</h3><p>Export the earliest retained pre-change checkpoint identity, a guarded patch containing every later filesystem change, and the exact hashes expected from a successful rebuild. Original image bytes are not included.</p><label class="field"><span>Completed image</span><select name="workflowPane">${imageOptions || '<option value="">No open images</option>'}</select></label><div class="help-note">The CLI verifies the base image, the patch and the final saved output. Flux workflows remain unavailable until their container-level reconstruction is provably lossless.</div><div class="modal-actions"><button type="button" class="button primary" data-export-workflow ${imageOptions ? "" : "disabled"}>Export workflow bundle</button></div></div>`}
     <div class="modal-actions"><button class="button primary" value="cancel">Close workbench</button></div></div>`, null, { replace: modal.open });
   modalContent.querySelector('[name="workbenchSection"]').onchange = event => renderWorkbench(event.target.value);
   if (section === "profiles") wireProfileWorkbench(profiles, activeProfile.index, hardware);

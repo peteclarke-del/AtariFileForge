@@ -64,9 +64,6 @@ window.AtariHexEditor = (() => {
   }
 
   function editorMarkup(image, initialPageSize, scope, kicker, title, exportUrl) {
-    const descriptorOption = image.hasDescriptor
-      ? `<option value="descriptor">${image.descriptorName || "Geometry descriptor"}</option>`
-      : "";
     return `<section class="hex-editor" tabindex="-1" aria-label="${scope === "file" ? "File" : "Raw image"} hex editor">
       <header class="hex-editor-head">
         <div><small>${kicker}</small><h2>${title}</h2><span class="hex-target-name"></span></div>
@@ -105,12 +102,12 @@ window.AtariHexEditor = (() => {
           <button type="button" class="hex-menu-compare"><span>Compare with binary file…</span></button>
           <button type="button" class="hex-menu-next-difference" disabled><span>Next difference</span></button>
           <span class="editor-menu-separator" role="separator"></span>
-          <label class="hex-template-menu">Structure template<select class="hex-template"><option value="auto">Automatic</option><option value="generic">Generic values</option><option value="boot-sector">GEMDOS boot sector</option><option value="directory-entry">GEMDOS directory entry</option><option value="partition-table">AHDI partition table</option><option value="tos-rom">TOS ROM header</option><option value="program-header">GEMDOS program header</option><option value="geometry-sidecar">Hard-disk geometry sidecar</option><option value="msa-track">MSA header and track</option><option value="custom" hidden>Custom JSON template</option></select></label>
+          <label class="hex-template-menu">Structure template<select class="hex-template"><option value="auto">Automatic</option><option value="generic">Generic values</option><option value="boot-sector">GEMDOS boot sector</option><option value="directory-entry">GEMDOS directory entry</option><option value="partition-table">AHDI partition table</option><option value="tos-rom">TOS ROM header</option><option value="program-header">GEMDOS program header</option><option value="msa-track">MSA header and track</option><option value="custom" hidden>Custom JSON template</option></select></label>
           <button type="button" class="hex-menu-load-template"><span>Load custom JSON template…</span></button><input class="hex-template-file" type="file" accept="application/json,.json" hidden>
         </div></details>
       </nav>
       <div class="hex-toolbar">
-        <label ${scope === "file" ? "hidden" : ""}>Component<select class="hex-target"><option value="image">${image.name}</option>${descriptorOption}</select></label>
+        <label ${scope === "file" ? "hidden" : ""}>Component<select class="hex-target"><option value="image">${image.name}</option></select></label>
         <label>Go to offset<input class="hex-goto" spellcheck="false" placeholder="00000000"></label>
         <button type="button" class="button small hex-go">Go</button>
         <span class="hex-separator"></span>
@@ -277,7 +274,6 @@ window.AtariHexEditor = (() => {
       // An MSA image opens with $0E0F, and a DIM with the FastCopy Pro
       // signature $4242 at the very front of its 32-byte header.
       if (lowerName.endsWith(".msa") || word(first, 0, false) === 0x0E0F) return "msa-track";
-      if (lowerName.endsWith(".geo")) return "geometry-sidecar";
       // A GEMDOS program starts with the branch word $601A; TOS itself starts
       // with a branch over its header to the reset routine.
       if (word(first, 0, false) === 0x601A) return "program-header";
@@ -407,18 +403,6 @@ window.AtariHexEditor = (() => {
           row("Symbol table", long(0x0E) == null ? null : `${long(0x0E).toLocaleString()} bytes`),
           row("Program flags", flags == null ? null : `$${hex(flags, 8)} · ${flagText}`),
           row("Absolute flag", short(0x1A) == null ? null : short(0x1A) === 0 ? "0 · relocation information follows" : `$${hex(short(0x1A), 4)} · no relocation`),
-        ].join("");
-      } else if (template === "geometry-sidecar") {
-        name = "Hard-disk geometry sidecar";
-        const text = values.filter(value => value != null).map(value => printable(value)).join("");
-        const field = key => text.match(new RegExp(`^\\s*${key}\\s*=\\s*(\\S+)`, "im"))?.[1] || null;
-        rows = [
-          row("Heads", field("heads") || field("surfaces")),
-          row("Sectors per track", field("sectors") || field("sectorspertrack") || field("blockspertrack")),
-          row("Cylinders", field("cylinders")),
-          row("Sector size", field("sectorsize") || field("blocksize")),
-          row("Reserved sectors", field("reserved")),
-          row("Descriptor bytes", Math.min(state.size, 512)),
         ].join("");
       } else if (template === "msa-track") {
         name = "MSA header and first track";
@@ -831,7 +815,7 @@ window.AtariHexEditor = (() => {
     async function compareWithFile() {
       const picker = document.createElement("input");
       picker.type = "file";
-      picker.accept = ".bin,.rom,.tos,.img,.hd,.geo,.st,.msa,.dim,*/*";
+      picker.accept = ".bin,.rom,.tos,.img,.hd,.st,.msa,.dim,*/*";
       picker.onchange = async () => {
         const file = picker.files?.[0];
         if (!file) return;
