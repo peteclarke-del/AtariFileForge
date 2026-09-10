@@ -1,0 +1,18 @@
+# Hatari debugger commands for a managed debug session.
+#
+# Hatari runs this file through --parse when the workbench starts it with
+# --debug. It is fixed text shipped with the application; nothing from a
+# profile or a filename is ever written into it.
+
+# Enter the debugger on any CPU exception (bus error, address error, illegal
+# instruction, privilege violation) rather than letting TOS show its bombs.
+setopt -D
+
+# Keep the last 512 instructions so a crash shows what ran up to it.
+history cpu 512
+
+# Show the registers whenever the debugger is entered.
+lock regs
+
+# Continue running; the machine boots normally until something goes wrong.
+c

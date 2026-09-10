@@ -117,8 +117,9 @@ and decoder-library builds:
 
 | Variable | Default |
 | --- | --- |
-| `ATARI_FSUAE_ROOT` | `/usr/bin` |
-| `ATARI_FILE_FORGE_KICKSTART_DIR` | `~/.config/atari-file-forge/kickstarts` |
+| `ATARI_HATARI_ROOT` | `/usr/bin` |
+| `ATARI_HATARI_EXECUTABLE` | unset; the packaged names under the root and on `PATH` are searched |
+| `ATARI_FILE_FORGE_TOS_DIR` | `~/.config/atari-file-forge/tos` |
 | `ATARI_FILE_FORGE_CAPSIMAGE` | unset; the SPS decoder library is searched for |
 
 The web Docker image continues to use those defaults. A Linux installation may

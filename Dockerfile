@@ -31,15 +31,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# fs-uae is the reference Atari emulator for the hand-off feature. It needs a
-# Kickstart ROM the user supplies; none is shipped, because Kickstart is not
+# hatari is the managed Atari emulator for the hand-off feature. It boots the
+# bundled EmuTOS (GPL, committed under firmware/emutos) unless the operator
+# supplies a real TOS ROM; no TOS is shipped or downloaded, because TOS is not
 # redistributable.
 #
-# Only the emulator itself is installed. fs-uae-launcher is its GTK front end,
-# it was dropped from Debian after bookworm, and nothing here invokes it: the
-# workbench builds an fs-uae command line directly.
+# Only the emulator itself is installed. Nothing here needs a front end: the
+# workbench builds a hatari command line directly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    fs-uae xvfb xauth x11vnc novnc websockify imagemagick xdotool \
+    hatari xvfb xauth x11vnc novnc websockify imagemagick xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=python-deps /python-install/usr/local /usr/local
