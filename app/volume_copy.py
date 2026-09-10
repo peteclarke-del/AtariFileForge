@@ -1,33 +1,36 @@
 """Reading an Atari volume, and copying its contents into another one.
 
-Two things in this application copy a whole volume into a drawer on a second
-volume: staging the discs of a title onto the drive it is destined for, and
-installing TOS from the Workbench floppies. They were written separately
-and came out almost identical, which is the usual way a subtle difference
-appears between two paths that were supposed to behave the same.
+Two things in this application copy a whole volume into a folder on a second
+volume: staging the disks of a title onto the drive it is destined for, and
+installing a system from its distribution floppies. They were written
+separately and came out almost identical, which is the usual way a subtle
+difference appears between two paths that were supposed to behave the same.
 
 The steps are the same either way. Read what is already at the destination, so
 a file that is there can be recognised without asking the volume about every
 name in turn. Walk the source. Spill each file to a host temporary, because the
 volume writer takes a batch of host paths and writing the batch in one mount is
 what makes a thousand-file disk take a moment rather than minutes. Then create
-the drawers that ended up with no files in them, because a drawer an installer
-writes into has to exist even when the disc shipped it empty.
+the folders that ended up with no files in them, because a folder an installer
+writes into has to exist even when the disk shipped it empty.
+
+Names are the one thing that cannot simply be carried across. GEMDOS holds a
+name in eight characters and a three-character extension, so a source name
+that will not fit is renamed through the filename policy rather than being
+silently truncated into a collision.
 
 Only one thing genuinely differs, and it is what to do about a file that is
 already there:
 
 ``replace``
-    Write it anyway. This is a disc being staged again after correction: the
+    Write it anyway. This is a disk being staged again after correction: the
     newer copy is the point of the exercise.
 ``skip``
-    Leave what is there. This is the second and later disks of an TOS
-    release, where the copy order was chosen precisely so that the earlier
-    disk wins, and the Workbench disk's full ``C:`` is not overwritten by the
-    cut-down copy Extras carries.
+    Leave what is there. This is the second and later disks of a release,
+    where the copy order was chosen precisely so that the earlier disk wins.
 ``divert``
     Leave what is there, and put a file whose bytes disagree somewhere else so
-    that neither is lost. This is a multi-disc set merging into one tree, where
+    that neither is lost. This is a multi-disk set merging into one tree, where
     which copy an installer wants is not knowable from here. A file whose bytes
     are identical is simply skipped; only a real disagreement is diverted.
 
@@ -68,7 +71,7 @@ class CopyReport:
     skipped: list[str] = dataclasses.field(default_factory=list)
     #: Paths whose bytes disagreed with what was there, written elsewhere.
     diverted: list[str] = dataclasses.field(default_factory=list)
-    #: Drawers created because the source carried them and no file landed in them.
+    #: Folders created because the source carried them and no file landed in them.
     directories: list[str] = dataclasses.field(default_factory=list)
     #: Files that could not be read, or that the destination would not accept.
     warnings: list[str] = dataclasses.field(default_factory=list)
@@ -94,7 +97,7 @@ def walk_volume(
     """List every entry on a volume, parents before the things inside them.
 
     ``list_directory`` is used rather than a mount so this works the same for
-    an ADF, a DMS still in its archive, and a partition of a drive.
+    a floppy image, a bare volume and a partition of a hard disk.
     """
     collected: list[dict] = []
     pending = [directory]
@@ -111,15 +114,15 @@ def walk_volume(
                 "path": path,
                 "directory": False,
                 "length": int(entry.get("length") or 0),
-                "protection": entry.get("protection"),
-                "comment": str(entry.get("comment") or ""),
+                "attributes": entry.get("attributes"),
+                "datestamp": str(entry.get("datestamp") or ""),
                 "filetype": str(entry.get("filetype") or ""),
             })
     return collected
 
 
-def drawer_exists(service: DiskService, session: ImageSession, path: str) -> bool:
-    """Whether a drawer is present, asked in the way every format answers."""
+def directory_exists(service: DiskService, session: ImageSession, path: str) -> bool:
+    """Whether a folder is present, asked in the way every format answers."""
     try:
         service.list_directory(session, path)
     except DiskError:
@@ -130,10 +133,10 @@ def drawer_exists(service: DiskService, session: ImageSession, path: str) -> boo
 def entry_exists(service: DiskService, session: ImageSession, path: str) -> bool:
     """Whether anything at all, file or drawer, is at this path.
 
-    ``drawer_exists`` can only answer for drawers, because listing is what it
-    asks. Asking it about a file says the file is absent, which once turned a
-    finished Workbench install into one that warned its own
-    ``S:Startup-Sequence`` was missing while the file sat there.
+    ``directory_exists`` can only answer for folders, because listing is what
+    it asks. Asking it about a file says the file is absent, which would turn
+    a finished install into one that warned its own ``AUTO\\FOO.PRG`` was
+    missing while the file sat there.
     """
     normalised = atari_paths.normalise(path)
     if not normalised:
@@ -175,7 +178,7 @@ def files_present(
     the difference is an install that takes a moment against one that takes
     minutes.
     """
-    if not drawer_exists(service, session, directory or atari_paths.ROOT):
+    if not directory_exists(service, session, directory or atari_paths.ROOT):
         return {}
     present: dict[str, str] = {}
     for entry in walk_volume(service, session, directory or atari_paths.ROOT):
@@ -188,12 +191,18 @@ def files_present(
 
 
 def entry_metadata(entry: dict) -> dict:
-    """The Atari metadata that has to travel with a file, in writer form.
+    """The GEMDOS metadata that has to travel with a file, in writer form.
 
-    A loader that arrives without its ``e`` bit will not start, and the failure
-    looks nothing like a missing permission, so this is not decoration.
+    A file that arrives without its read-only bit can be deleted by something
+    that should have been stopped, and one that arrives with the bit it did
+    not have cannot be replaced by an installer. Both are worth carrying, and
+    so is the datestamp, because a build that reproduces an image has to
+    reproduce its dates too.
     """
-    return {"protection": entry.get("protection"), "comment": entry.get("comment")}
+    return {
+        "attributes": entry.get("attributes"),
+        "datestamp": entry.get("datestamp"),
+    }
 
 
 def write_file(
@@ -227,9 +236,9 @@ def write_file(
 
 def delete_tree(service: DiskService, target: ImageSession, path: str) -> None:
     """Remove a drawer and everything below it."""
-    from .ffs_items import delete_ffs_items
+    from .gemdos_items import delete_gemdos_items
 
-    delete_ffs_items(service, target, [path])
+    delete_gemdos_items(service, target, [path])
 
 
 def copy_volume_tree(
@@ -246,7 +255,7 @@ def copy_volume_tree(
     """Copy everything on ``source`` into ``destination`` on ``target``.
 
     ``existing`` says what to do about a file the destination already has, and
-    is one of ``EXISTING_POLICIES``. ``divert_to`` names the drawer that a
+    is one of ``EXISTING_POLICIES``. ``divert_to`` names the folder that a
     disagreeing file is written into, and is required by the ``divert`` policy.
     """
     if existing not in EXISTING_POLICIES:
@@ -260,6 +269,8 @@ def copy_volume_tree(
 
     entries = walk_volume(service, source)
     carried_directories: list[str] = []
+    renamed: dict[str, str] = {}
+    allocated: dict[str, set[str]] = {}
     temporary: list[Path] = []
     destination_items: list[dict] = []
     diverted_items: list[dict] = []
@@ -280,8 +291,7 @@ def copy_volume_tree(
                 continue
             report(f"{message} {relative}", index, len(entries))
             try:
-                for part in atari_paths.split(relative):
-                    service.validate_leaf_name(target, part)
+                relative = _accepted_path(service, target, relative, renamed, allocated)
             except DiskError as exc:
                 result.warnings.append(f"{source.name}: {relative} was left out ({exc}).")
                 continue
@@ -322,6 +332,12 @@ def copy_volume_tree(
             result.written.append(relative)
             result.bytes_written += len(data)
 
+        for source_path, target_path in sorted(renamed.items()):
+            if source_path.casefold() != target_path.casefold():
+                result.warnings.append(
+                    f"{source.name}: {source_path} was renamed to {target_path} to "
+                    "fit the 8.3 pattern GEMDOS stores."
+                )
         for batch, into in ((destination_items, destination), (diverted_items, divert_to)):
             if not batch:
                 continue
@@ -349,12 +365,11 @@ def _create_carried_drawers(
     written_items: list[dict],
     warnings: list[str],
 ) -> list[str]:
-    """Make the drawers the source had that no file landed in.
+    """Make the folders the source had that no file landed in.
 
-    A drawer the disc carried but put no files in is still part of the disc: an
-    installer that writes into it fails if it is absent, and a Workbench
-    without ``Prefs/Presets`` cannot save a preference. Drawers that a written
-    file already created are left alone, which is most of them.
+    A folder the disk carried but put no files in is still part of the disk:
+    an installer that writes into it fails if it is absent. Folders that a
+    written file already created are left alone, which is most of them.
     """
     written_parents = {
         parent for parent in (atari_paths.parent(item["targetPath"]) for item in written_items)
@@ -369,7 +384,7 @@ def _create_carried_drawers(
         ):
             continue
         path = atari_paths.join(destination, relative) if destination else relative
-        if drawer_exists(service, target, path):
+        if directory_exists(service, target, path):
             continue
         try:
             service.make_directory(target, path)
@@ -380,12 +395,56 @@ def _create_carried_drawers(
     return created
 
 
+def _accepted_path(
+    service: DiskService,
+    target: ImageSession,
+    relative: str,
+    renamed: dict[str, str],
+    allocated: dict[str, set[str]],
+) -> str:
+    """Return the path this entry will occupy on the destination.
+
+    Every component is checked against the destination's own name policy, and
+    one that will not fit is renamed rather than refused. The renaming is
+    remembered per directory so that two source names that fold to the same
+    8.3 name become two different files rather than one overwriting the other,
+    and so that a directory renamed once keeps the same new name for every
+    file inside it.
+    """
+    from .filename_policy import session_name_policy
+
+    if relative in renamed:
+        return renamed[relative]
+    policy = session_name_policy(target)
+    parts = atari_paths.split(relative)
+    result: list[str] = []
+    for depth, part in enumerate(parts):
+        branch = atari_paths.SEPARATOR.join(parts[: depth + 1])
+        if branch in renamed:
+            result.append(atari_paths.leaf(renamed[branch]))
+            continue
+        parent = atari_paths.SEPARATOR.join(result)
+        used = allocated.setdefault(parent.casefold(), set())
+        try:
+            chosen = policy.validate(part)
+            if chosen.casefold() in used:
+                chosen = policy.allocate(part, used)
+        except DiskError:
+            chosen = policy.allocate(part, used)
+        used.add(chosen.casefold())
+        result.append(chosen)
+        renamed[branch] = atari_paths.SEPARATOR.join(result)
+    accepted = atari_paths.SEPARATOR.join(result)
+    renamed[relative] = accepted
+    return accepted
+
+
 __all__ = [
     "EXISTING_POLICIES",
     "CopyReport",
     "copy_volume_tree",
     "delete_tree",
-    "drawer_exists",
+    "directory_exists",
     "entry_exists",
     "entry_metadata",
     "files_present",

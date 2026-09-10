@@ -401,7 +401,7 @@ class WorkbenchInstallMixin:
         """
         created: list[str] = []
         for drawer in CREATED_DRAWERS:
-            if volume_copy.drawer_exists(self, target, drawer):
+            if volume_copy.directory_exists(self, target, drawer):
                 continue
             try:
                 self.make_directory(target, drawer)

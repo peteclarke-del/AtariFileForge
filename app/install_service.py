@@ -131,7 +131,7 @@ class InstallMixin:
 
     def _read_staged_manifest(self, target: ImageSession, staging: str, leaf: str) -> dict:
         drawer = self._housekeeping_drawer(staging, leaf)
-        if not volume_copy.drawer_exists(self, target, drawer):
+        if not volume_copy.directory_exists(self, target, drawer):
             return {}
         try:
             return json.loads(
@@ -220,7 +220,7 @@ class InstallMixin:
         # correction, so its files replace what the earlier attempt wrote and
         # anything filed aside for that disc stops being true.
         replacing = any(disc["label"] == label for disc in discs)
-        if replacing and volume_copy.drawer_exists(self, target, alternates):
+        if replacing and volume_copy.directory_exists(self, target, alternates):
             volume_copy.delete_tree(self, target, alternates)
 
         report(f"Reading {source.name}", 0, None)
@@ -348,7 +348,7 @@ class InstallMixin:
         """
         self.require_mounted_volume(target)
         staging = self.staging_parent(parent)
-        if not volume_copy.drawer_exists(self, target, staging):
+        if not volume_copy.directory_exists(self, target, staging):
             return []
         listing = self.list_directory(target, staging)
         titles = [
@@ -363,11 +363,11 @@ class InstallMixin:
         """Remove a staged title from the drive, payload and record together."""
         self.require_mounted_volume(target)
         staging, leaf, drawer = self._staging_paths(target, name, parent)
-        if not volume_copy.drawer_exists(self, target, drawer):
+        if not volume_copy.directory_exists(self, target, drawer):
             raise DiskError(f"There is no staged title called {leaf} in {staging}.")
         volume_copy.delete_tree(self, target, drawer)
         housekeeping = self._housekeeping_drawer(staging, leaf)
-        if volume_copy.drawer_exists(self, target, housekeeping):
+        if volume_copy.directory_exists(self, target, housekeeping):
             volume_copy.delete_tree(self, target, housekeeping)
         self._persist_session(target)
 
@@ -394,7 +394,7 @@ class InstallMixin:
         self.require_mounted_volume(target)
         self.require_writable_geometry(target)
         staging_parent, leaf, source = self._staging_paths(target, name, staging)
-        if not volume_copy.drawer_exists(self, target, source):
+        if not volume_copy.directory_exists(self, target, source):
             raise DiskError(f"There is no staged title called {leaf} in {staging_parent}.")
 
         manifest = self._read_staged_manifest(target, staging_parent, leaf)
@@ -403,7 +403,7 @@ class InstallMixin:
         destination = atari_paths.join(parent, target_leaf)
         if destination.casefold() == source.casefold():
             raise DiskError(f"{readable} is already installed at {destination}.")
-        if volume_copy.drawer_exists(self, target, destination):
+        if volume_copy.directory_exists(self, target, destination):
             raise DiskError(f"{destination} already exists. Choose another drawer name.")
 
         report = progress_module.reporter(progress)
@@ -417,12 +417,12 @@ class InstallMixin:
         if parent:
             for part in atari_paths.split(parent):
                 self.validate_leaf_name(target, part)
-            if not volume_copy.drawer_exists(self, target, parent):
+            if not volume_copy.directory_exists(self, target, parent):
                 self.make_directory(target, parent)
         move_ffs_items(self, target, [{"source": source, "destination": destination}])
         repairs, warnings = self._repair_copied_ffs_loaders(target, destination)
         housekeeping = self._housekeeping_drawer(staging_parent, leaf)
-        if volume_copy.drawer_exists(self, target, housekeeping):
+        if volume_copy.directory_exists(self, target, housekeeping):
             volume_copy.delete_tree(self, target, housekeeping)
         self._persist_session(target)
         report("Installed", len(staged_files), len(staged_files))
