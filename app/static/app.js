@@ -7371,16 +7371,16 @@ function focusEditorCheatCandidate(root, navigation) {
 //: two custom properties below are quoted exactly as those files declare
 //: them; only the code in this file reads plainly.
 function dockEditorIntelligence(root) {
-  const panel = root?.querySelector(".code-intelligence-drawer");
+  const panel = root?.querySelector(".code-intelligence-panel");
   const editorSurface = root?.querySelector(".code-editor-surface, .disassembly-source");
   if (!panel || !editorSurface) return;
-  let workspace = root.querySelector(":scope > .code-editor-drawer-workspace");
+  let workspace = root.querySelector(":scope > .code-editor-panel-workspace");
   if (!workspace) {
     workspace = document.createElement("div");
-    workspace.className = "code-editor-drawer-workspace";
+    workspace.className = "code-editor-panel-workspace";
     const splitter = document.createElement("button");
     splitter.type = "button";
-    splitter.className = "code-editor-drawer-splitter";
+    splitter.className = "code-editor-panel-splitter";
     splitter.setAttribute("role", "separator");
     splitter.setAttribute("aria-label", "Resize code and cheat-candidate panels");
     splitter.setAttribute("aria-valuemin", "20");
@@ -7390,12 +7390,12 @@ function dockEditorIntelligence(root) {
     workspace.append(editorSurface, splitter, panel);
     installEditorPanelSplitter(workspace, splitter);
   }
-  root.classList.add("code-drawer-docked-right");
-  panel.classList.add("code-intelligence-drawer-docked");
-  const close = panel.querySelector(".code-drawer-close");
+  root.classList.add("code-panel-docked-right");
+  panel.classList.add("code-intelligence-panel-docked");
+  const close = panel.querySelector(".code-panel-close");
   close?.addEventListener("click", () => {
-    root.classList.remove("code-drawer-docked-right");
-    panel.classList.remove("code-intelligence-drawer-docked");
+    root.classList.remove("code-panel-docked-right");
+    panel.classList.remove("code-intelligence-panel-docked");
   }, { once: true });
 }
 
@@ -7406,11 +7406,11 @@ function installEditorPanelSplitter(workspace, splitter) {
     const bounds = workspace.getBoundingClientRect();
     if (narrow()) {
       const height = Math.max(180, Math.min(bounds.height - 150, bounds.bottom - event.clientY));
-      workspace.style.setProperty("--code-drawer-height", `${height}px`);
+      workspace.style.setProperty("--code-panel-height", `${height}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(height / Math.max(1, bounds.height) * 100)));
     } else {
       const width = Math.max(280, Math.min(bounds.width - 320, bounds.right - event.clientX));
-      workspace.style.setProperty("--code-drawer-width", `${width}px`);
+      workspace.style.setProperty("--code-panel-width", `${width}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(width / Math.max(1, bounds.width) * 100)));
     }
   };
@@ -7435,15 +7435,15 @@ function installEditorPanelSplitter(workspace, splitter) {
     if (!keys.includes(event.key)) return;
     event.preventDefault();
     const bounds = workspace.getBoundingClientRect();
-    const panel = workspace.querySelector(".code-intelligence-drawer").getBoundingClientRect();
+    const panel = workspace.querySelector(".code-intelligence-panel").getBoundingClientRect();
     const delta = (event.key === "ArrowLeft" || event.key === "ArrowUp") ? 24 : -24;
     if (narrow()) {
       const height = Math.max(180, Math.min(bounds.height - 150, panel.height + delta));
-      workspace.style.setProperty("--code-drawer-height", `${height}px`);
+      workspace.style.setProperty("--code-panel-height", `${height}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(height / Math.max(1, bounds.height) * 100)));
     } else {
       const width = Math.max(280, Math.min(bounds.width - 320, panel.width + delta));
-      workspace.style.setProperty("--code-drawer-width", `${width}px`);
+      workspace.style.setProperty("--code-panel-width", `${width}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(width / Math.max(1, bounds.width) * 100)));
     }
   });
