@@ -105,27 +105,29 @@ tester supplied until managed watchpoint correlation is complete. See the
 
 ### Identify what a disk is and how it starts
 
-An imported disk arrives with a volume name, a set of files and nothing else.
-Atari File Forge reads that evidence and proposes a title, the file that starts
-the software, and the stack that file needs. `DiskMenu` outranks the
-`Startup-Sequence`, because it is what the disk's own author wrote to be run;
-conventional loader names follow, judged by their actual content rather than
-their name alone. Every proposal carries its evidence, and one the evidence
-does not support is marked ambiguous so the caller asks rather than writes.
+An imported disk arrives with a volume label, a set of files and nothing else.
+Atari File Forge reads that evidence and proposes a title and the file that
+starts the software. A program in the `AUTO` folder outranks the rest, because
+TOS runs it before the desktop appears; a `DESKTOP.INF` that installs an
+application follows, and then conventional loader names, each judged by its
+actual content rather than its name alone. Every proposal carries its evidence,
+and one the evidence does not support is marked ambiguous so the caller asks
+rather than writes.
 
 ### Test against a hardware profile
 
-The Workbench describes the base machine, filing system, compatible additions,
-accelerator state, memory and FastFileSystem ROM build. Analysis and help use
-that profile when deciding whether a command, loader or image is appropriate.
-A managed FS-UAE session provides launch and debugging paths for every medium
-it can genuinely mount; it is the one bundled emulator because a single
-portable build covers the whole Atari range.
+The Workbench describes the base machine, the TOS release, compatible
+additions, memory, storage interface and display. Analysis and help use that
+profile when deciding whether a program, image or partition size is
+appropriate. A managed Hatari session provides launch and debugging paths for
+every medium it can genuinely mount; it is the one bundled emulator because a
+single build covers the whole Atari range, and it boots the bundled EmuTOS when
+you have supplied no TOS ROM of your own.
 
 ![Hardware profile and emulator configuration](images/hardware-workbench-current.png)
 
-Use **Tools → Build hardware deployment** to create a validated Gotek,
-whole-drive, Hardfile, PiStorm or TOS directory tree from the open image. The assistant
+Use **Tools → Build hardware deployment** to create a validated Gotek, SD
+card, CF card, host folder or ACSI drive package from the open image. The assistant
 works on an isolated snapshot, shows exact paths and SHA-256 values, and writes
 the installation, verification and rollback procedure into the downloaded
 ZIP. See the [deployment guide](HARDWARE-DEPLOYMENT-GUIDE.md).
@@ -142,7 +144,7 @@ generated README.
 ### Automate a repeatable build
 
 The supported headless CLI exposes image creation, finalisation, validation,
-manifest export, host-file import, DMS conversion, compaction, comparison and
+manifest export, host-file import, container conversion, compaction, comparison and
 guarded patches. Mutating commands have a dry-run
 mode with stable JSON status and exit codes. Completed commands can record a
 versioned recipe containing exact source hashes and replayable non-secret
@@ -168,9 +170,10 @@ and a smaller report export remain separate. See the
 - Distinguish implemented behaviour, retained test evidence and work that
   still requires hardware or architecture-specific validation.
 - Menu paths use **File → Save image** style notation.
-- Atari paths use their native syntax: `/` between components and a bare `:`
-  for the volume root, as in `Games/Chuckulus` or `S/Startup-Sequence`. A full
-  stop is an ordinary character in a name, never a separator.
+- Atari paths use GEMDOS syntax: a backslash between components and an optional
+  drive letter, as in `GAMES\STARBALL.PRG` or `C:\AUTO\FOLDRXXX.PRG`. Names
+  are upper case, at most eight characters with a three character extension,
+  and the full stop separates the two.
 - Sizes use KiB, MiB and GiB when describing byte capacity.
 - “Working image” means the private server-side copy, not the source selected
   from the local computer.

@@ -91,21 +91,21 @@ managed emulator binaries. Configure installed emulators with the variables in
 the Emulator paths section below.
 
 Launch **Atari File Forge** from the desktop application menu, run
-`~/.local/bin/atari-file-forge`, or open a registered ADF, ADZ, HDF, FFS,
-Hardfile, DMS, HFE or ROM image from the file manager. HDA and GEO partners are
+`~/.local/bin/atari-file-forge`, or open a registered ST, MSA, DIM, STX, HFE,
+SCP, hard-disk or ROM image from the file manager. Partitioned drives are
 matched automatically when they share a basename.
 
 The folder button in the native header, **File → Open image** in a pane and
 <kbd>Ctrl</kbd>+<kbd>O</kbd> all use the GTK file chooser. This keeps local media
 off the browser upload path. A compact review appears before anything opens.
-It starts with the active Workbench target, permits an explicit FFS target and
+It starts with the active hardware target, permits an explicit target and
 lets multiple ROM files be opened independently or assembled as one linear or
 byte-interleaved component set. The same review is used for file associations
 and file-manager drops.
 
 You can also drag image files from the Linux file manager onto a workbench
 pane. The first image targets the pane under the pointer and further images use
-successive empty panes. HDA and GEO partners are paired before opening, so a
+successive empty panes. Each dropped image opens on its own, so a
 matching pair creates one Hardfile session. The GTK drop controller uses the
 same trusted local-path adapter as the native chooser and does not upload image
 bytes through WebKit.
@@ -123,9 +123,9 @@ bytes through WebKit.
   survive the random loopback port and WebView-origin change.
 - Native path selection avoids uploading through a browser request. The source
   is cloned by the filesystem when supported, otherwise it is sparse-copied to
-  a safe working session before editing. A 512 MiB Hardfile HDA therefore does
+  a safe working session before editing. A 512 MiB hard-disk image therefore does
   not need to be uploaded, spooled and copied a second time.
-- Opening an HDA validates its GEO pairing, geometry and root GEMDOS metadata.
+- Opening a hard-disk image validates its partition table, geometry and boot sector.
   The expensive full-image sparse optimisation is deferred until Save, where
   the existing progress dialog describes directory repair, checksum and final
   validation stages.
@@ -137,7 +137,7 @@ bytes through WebKit.
 - Save image produces the same timestamped ZIP and technical README. WebKitGTK
   writes it to the user's normal Downloads directory.
 - **Tools → Build hardware deployment** uses the same isolated snapshot and
-  target layouts as Docker. The finished Gotek, FastFileSystem, Hardfile, PiStorm or RISC
+  target layouts as Docker. The finished Gotek, SD card, CF card, host folder or ACSI
   OS ZIP is written through WebKitGTK to the normal Downloads directory.
 - Run and Debug use native emulator windows. The Docker edition continues to
   use its browser-visible noVNC display.
@@ -151,11 +151,11 @@ bytes through WebKit.
   until a user theme is chosen, and uses flatter desktop-sized controls. Its
   Atari-inspired media colours remain consistent with the browser edition.
 
-### Why a large HDA used to pause at 24 percent
+### Why a large drive image used to pause at 24 percent
 
 The old pane chooser was an HTML upload control. Its percentage measured the
-transfer from WebKit into the loopback Flask request, not FFS parsing. A large
-HDA was then spooled by Werkzeug, copied into the private session and scanned
+transfer from WebKit into the loopback Flask request, not filesystem parsing. A
+large image was then spooled by Werkzeug, copied into the private session and scanned
 again for zero ranges. On a 512 MiB Hardfile image that meant several complete
 passes over the file before the root directory appeared.
 
@@ -174,7 +174,7 @@ drift. The detailed rules are in the
 
 Greaseweazle is optional and is not installed automatically. Install the
 official tools and Linux udev rules, then confirm `gw info` works in the same
-desktop session that launches Atari File Forge. ADF, ADZ and sector-based FFS
+desktop session that launches Atari File Forge. ST, MSA and sector-based
 floppies are written with automatic read-back verification. HFE can be written,
 but its raw bitcell representation does not support automatic verification.
 
