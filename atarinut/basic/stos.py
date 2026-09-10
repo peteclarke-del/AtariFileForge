@@ -449,8 +449,7 @@ def detokenise_stos(data: bytes) -> str:
 def _reverse_tables() -> list[tuple[str, bytes]]:
     entries: list[tuple[str, bytes]] = []
     for code, text in BASE_TOKENS.items():
-        payload = bytes((code,)) if code not in BRANCH_TOKENS else bytes((code,))
-        entries.append((text.upper(), payload))
+        entries.append((text.upper(), bytes((code,))))
     for code, text in INSTRUCTION_TOKENS.items():
         entries.append((text.upper(), bytes((INSTRUCTION_ESCAPE, code))))
     for code, text in FUNCTION_TOKENS.items():
