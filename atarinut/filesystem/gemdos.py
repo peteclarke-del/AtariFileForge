@@ -599,8 +599,23 @@ class GEMDOSVolume:
         return self.geometry.data_start + (cluster - 2) * self.geometry.sectors_per_cluster
 
     def _check_cluster(self, cluster: int) -> None:
-        if not 2 <= cluster <= self.max_cluster:
-            raise DataError(f"Cluster {cluster} is outside this volume.")
+        if 2 <= cluster <= self.max_cluster:
+            return
+        # A cluster number this far out of range did not come from a formatter.
+        # The usual cause is not damage but a disk that never held a filing
+        # system: a game whose loader reads its own tracks leaves whatever it
+        # likes where the root directory would be, and a plausible parameter
+        # block in the boot sector is not evidence to the contrary. Say that,
+        # because "cluster 6911 is outside this volume" sends somebody looking
+        # for a fault in a disk that is exactly as its author wrote it.
+        damage = self._root_directory_damage()
+        if damage:
+            raise DataError(
+                f"This disk has no readable filing system: {damage}. It was "
+                "probably written to be started by its own loader rather than "
+                "through GEMDOS. Its bytes can still be inspected."
+            )
+        raise DataError(f"Cluster {cluster} is outside this volume.")
 
     def _read_cluster(self, cluster: int) -> bytes:
         self._check_cluster(cluster)
