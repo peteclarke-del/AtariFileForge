@@ -65,9 +65,20 @@ class DocumentationTests(unittest.TestCase):
         self.assertEqual([], missing)
 
     def test_current_status_names_completed_safety_work(self) -> None:
+        """The handbook must keep naming the guarantees a reader relies on.
+
+        These are claims about safety, so they are pinned: whether a whole
+        drive is handed to the emulator as it stands, and whether a patch is
+        bound to the exact bytes it was made against. A guarantee that
+        quietly disappears from the handbook is how a reader ends up trusting
+        something the application no longer does.
+
+        A third phrase was pinned here for a container the previous platform
+        had and this one does not. It was dropped rather than kept alive by a
+        sentence written to satisfy a test.
+        """
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for required in (
-            "same-length member edits",
             "whole-drive hand-off",
             "exact-hash guarded patches",
         ):
