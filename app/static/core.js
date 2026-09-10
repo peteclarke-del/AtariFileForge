@@ -257,7 +257,7 @@ window.AtariUI = (() => {
       ...(Array.isArray(skipped) && skipped.length
         ? [{
             label: "Items skipped",
-            value: `${skipped.length} ${skipped.length === 1 ? "item was" : "items were"} not copied to FFS`
+            value: `${skipped.length} ${skipped.length === 1 ? "item was" : "items were"} not copied to the destination`
           }]
         : []),
       ...(error?.data?.path ? [{ label: "Last path", value: error.data.path }] : []),

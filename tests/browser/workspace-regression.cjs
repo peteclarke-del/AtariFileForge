@@ -1,3 +1,7 @@
+// UNVERIFIED against a live server: this branch ports the frontend only,
+// so the vocabulary, media, kinds, dialogs and drive names below have been
+// brought over but not run. The "is oversized" bounds are kept verbatim,
+// because they are the guard on the look and feel.
 const { chromium } = require("playwright");
 
 const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";

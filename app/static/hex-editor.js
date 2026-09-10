@@ -65,7 +65,7 @@ window.AtariHexEditor = (() => {
 
   function editorMarkup(image, initialPageSize, scope, kicker, title, exportUrl) {
     const descriptorOption = image.hasDescriptor
-      ? `<option value="descriptor">${image.descriptorName || "GEO geometry descriptor"}</option>`
+      ? `<option value="descriptor">${image.descriptorName || "Geometry descriptor"}</option>`
       : "";
     return `<section class="hex-editor" tabindex="-1" aria-label="${scope === "file" ? "File" : "Raw image"} hex editor">
       <header class="hex-editor-head">
@@ -105,7 +105,7 @@ window.AtariHexEditor = (() => {
           <button type="button" class="hex-menu-compare"><span>Compare with binary file…</span></button>
           <button type="button" class="hex-menu-next-difference" disabled><span>Next difference</span></button>
           <span class="editor-menu-separator" role="separator"></span>
-          <label class="hex-template-menu">Structure template<select class="hex-template"><option value="auto">Automatic</option><option value="generic">Generic values</option><option value="boot-block">GEMDOS boot block</option><option value="root-block">GEMDOS root block</option><option value="rigid-disk">Rigid Disk Block</option><option value="kickstart-rom">Kickstart ROM header</option><option value="resident-tag">Resident module tag</option><option value="hardfile-geo">Hardfile GEO geometry</option><option value="dms-track">DMS header and track</option><option value="custom" hidden>Custom JSON template</option></select></label>
+          <label class="hex-template-menu">Structure template<select class="hex-template"><option value="auto">Automatic</option><option value="generic">Generic values</option><option value="boot-sector">GEMDOS boot sector</option><option value="directory-entry">GEMDOS directory entry</option><option value="partition-table">AHDI partition table</option><option value="tos-rom">TOS ROM header</option><option value="program-header">GEMDOS program header</option><option value="geometry-sidecar">Hard-disk geometry sidecar</option><option value="msa-track">MSA header and track</option><option value="custom" hidden>Custom JSON template</option></select></label>
           <button type="button" class="hex-menu-load-template"><span>Load custom JSON template…</span></button><input class="hex-template-file" type="file" accept="application/json,.json" hidden>
         </div></details>
       </nav>
@@ -271,142 +271,168 @@ window.AtariHexEditor = (() => {
     };
     const textValue = values => values.filter(value => value != null && value !== 0).map(value => printable(value)).join("").trim();
     function detectedTemplate() {
-      const first = loadedValues(0, 16);
+      const first = loadedValues(0, 32);
       const lowerName = String(image.name || "").toLowerCase();
       const signature = textValue(first.slice(0, 4));
-      if (lowerName.endsWith(".dms") || signature === "DMS!") return "dms-track";
-      if (lowerName.endsWith(".geo")) return "hardfile-geo";
-      if (signature === "RDSK") return "rigid-disk";
-      if (lowerName.endsWith(".hdf") || lowerName.endsWith(".hda")) return "rigid-disk";
-      // A Kickstart image begins with $1111 or $1114 followed by a JMP.
-      if ((word(first, 0, false) === 0x1111 || word(first, 0, false) === 0x1114) && word(first, 4, false) === 0x4EF9) return "kickstart-rom";
-      if (word(first, 0, false) === 0x4AFC) return "resident-tag";
-      if (signature.startsWith("DOS") || signature.startsWith("PFS") || signature.startsWith("SFS")) return "boot-block";
-      if (dword(first, 0, false) === 2) return "root-block";
+      // An MSA image opens with $0E0F, and a DIM with the FastCopy Pro
+      // signature $4242 at the very front of its 32-byte header.
+      if (lowerName.endsWith(".msa") || word(first, 0, false) === 0x0E0F) return "msa-track";
+      if (lowerName.endsWith(".geo")) return "geometry-sidecar";
+      // A GEMDOS program starts with the branch word $601A; TOS itself starts
+      // with a branch over its header to the reset routine.
+      if (word(first, 0, false) === 0x601A) return "program-header";
+      if (word(first, 0, false) === 0x602E || dword(first, 0x14, false) === 0x87654321) return "tos-rom";
+      if (/\.(img|hd|ahd|acsi|ide|raw)$/.test(lowerName)) return "partition-table";
+      // A FAT boot sector starts with a branch and declares 512-byte sectors
+      // at offset $0B, little-endian, the one place TOS follows the PC.
+      if (first[0] === 0x60 && word(first, 0x0B, true) === 512) return "boot-sector";
+      if (signature === "GEM" || signature === "BGM" || signature === "RAW") return "partition-table";
       return "generic";
     }
     function renderStructure() {
       const template = state.template === "auto" ? detectedTemplate() : state.template;
-      const fixedTemplate = ["boot-block", "root-block", "rigid-disk", "kickstart-rom", "resident-tag", "hardfile-geo", "dms-track"].includes(template);
+      // A directory entry is 32 bytes anywhere inside a directory, so it is
+      // read from the cursor. Everything else sits at a known place in its
+      // own file.
+      const fixedTemplate = ["boot-sector", "partition-table", "tos-rom", "program-header", "geometry-sidecar", "msa-track"].includes(template);
       const base = fixedTemplate ? 0 : state.active;
       const values = loadedValues(base, 512);
       const row = (name, value) => value == null || value === "" ? "" : `<dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd>`;
-      // Every structure the Atari writes on disk or in ROM is big-endian.
+      // A 68000 stores its words the big end first, which is how TOS writes
+      // its ROM header, its program headers and the AHDI partition table. The
+      // FAT parameter block in a boot sector is the exception: it keeps the
+      // little-endian layout it inherited from the PC.
       const long = offset => dword(values, offset, false);
       const short = offset => word(values, offset, false);
-      // GEMDOS stores a name as a BSTR: a length byte followed by that many
-      // characters, in a fixed-size field.
-      const bstr = offset => {
-        const length = values[offset];
-        return length == null ? null : textValue(values.slice(offset + 1, offset + 1 + Math.min(length, 30)));
-      };
+      const shortLE = offset => word(values, offset, true);
+      const longLE = offset => dword(values, offset, true);
+      // A fixed-width field of characters, padded with spaces or zeroes.
+      const fixedText = (offset, length) => textValue(values.slice(offset, offset + length));
       let name = "Generic values";
       let rows = valuesMarkup();
-      if (template === "boot-block") {
-        name = "GEMDOS boot block";
-        const dosType = values[3];
-        const flags = dosType == null ? null : [
-          dosType & 1 ? "FFS" : "OFS",
-          dosType & 2 ? "international" : "original character set",
-          dosType & 4 ? "directory cache" : "no directory cache",
-        ].join(", ");
+      if (template === "boot-sector") {
+        name = "GEMDOS boot sector";
+        const sectors = shortLE(0x13);
+        const media = values[0x15];
         rows = [
-          row("Signature", textValue(values.slice(0, 3))),
-          row("DOS type", dosType == null ? null : `DOS\\${dosType} (${flags})`),
-          row("Boot-block checksum", long(4) == null ? null : `$${hex(long(4), 8)}`),
-          row("Root block", long(8)),
-          row("Boot code", values.slice(12, 24).every(value => value === 0) ? "None; the disk is not bootable" : "Present"),
+          row("Branch instruction", values[0] == null ? null : `$${hex(values[0])}${values[0] === 0x60 ? " (BRA.S)" : ""}`),
+          row("Loader name", fixedText(2, 6)),
+          row("Disk serial", values[8] == null ? null : `$${hex(values[8])}${hex(values[9])}${hex(values[10])}`),
+          row("Bytes per sector", shortLE(0x0B)),
+          row("Sectors per cluster", values[0x0D]),
+          row("Reserved sectors", shortLE(0x0E)),
+          row("Copies of the FAT", values[0x10]),
+          row("Root directory entries", shortLE(0x11)),
+          row("Total sectors", sectors),
+          row("Media descriptor", media == null ? null : `$${hex(media)}`),
+          row("Sectors per FAT", shortLE(0x16)),
+          row("Sectors per track", shortLE(0x18)),
+          row("Sides", shortLE(0x1A)),
+          row("Hidden sectors", shortLE(0x1C)),
+          row("Boot code", values.slice(0x1E, 0x2E).every(value => value === 0) ? "None; the disk is not executable" : "Present"),
+          row("Checksum word", short(0x1FE) == null ? null : `$${hex(short(0x1FE), 4)}`),
         ].join("");
-      } else if (template === "root-block") {
-        name = "GEMDOS root block";
-        const blockSize = 512;
+      } else if (template === "directory-entry") {
+        name = "GEMDOS directory entry";
+        const attributes = values[0x0B];
+        const letters = "rhsvda";
+        const masks = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20];
+        const attributeText = attributes == null
+          ? null
+          : [...letters].map((letter, index) => (attributes & masks[index] ? letter : "-")).join("");
+        const date = shortLE(0x18);
+        const time = shortLE(0x16);
+        const pad = value => String(value).padStart(2, "0");
+        const stamp = date == null || time == null
+          ? null
+          : `${1980 + ((date >> 9) & 0x7F)}-${pad((date >> 5) & 0x0F)}-${pad(date & 0x1F)} ${pad((time >> 11) & 0x1F)}:${pad((time >> 5) & 0x3F)}:${pad((time & 0x1F) * 2)}`;
+        const firstByte = values[0];
         rows = [
-          row("Primary type", long(0) === 2 ? "2 (T_HEADER)" : long(0)),
-          row("Hash table size", long(12)),
-          row("Bitmap valid", long(blockSize - 200) === 0xFFFFFFFF ? "Yes" : "No; the volume needs validating"),
-          row("First bitmap block", long(blockSize - 196)),
-          row("Root protection", long(blockSize - 192) == null ? null : `$${hex(long(blockSize - 192), 8)}`),
-          row("Last root change", `${long(blockSize - 92)} days, ${long(blockSize - 88)} minutes, ${long(blockSize - 84)} ticks`),
-          row("Volume name", bstr(blockSize - 80)),
-          row("Volume created", `${long(blockSize - 28)} days, ${long(blockSize - 24)} minutes, ${long(blockSize - 20)} ticks`),
-          row("Secondary type", long(blockSize - 4) === 1 ? "1 (ST_ROOT)" : long(blockSize - 4)),
-          row("Block checksum", long(20) == null ? null : `$${hex(long(20), 8)}`),
+          row("Entry state", firstByte == null ? null : firstByte === 0 ? "Free; no entry follows" : firstByte === 0xE5 ? "Deleted" : "In use"),
+          row("Name", fixedText(0, 8)),
+          row("Extension", fixedText(8, 3)),
+          row("Attributes", attributeText == null ? null : `${attributeText} ($${hex(attributes)})`),
+          row("Last change", stamp),
+          row("First cluster", shortLE(0x1A)),
+          row("Length in bytes", longLE(0x1C) == null ? null : longLE(0x1C).toLocaleString()),
         ].join("");
-      } else if (template === "rigid-disk") {
-        name = "Rigid Disk Block";
+      } else if (template === "partition-table") {
+        name = "AHDI partition table";
+        const identifiers = { GEM: "GEM · up to 16 MB, FAT16", BGM: "BGM · larger than 16 MB, FAT16", RAW: "RAW · no filing system", XGM: "XGM · extended partition container" };
+        const partition = (offset, number) => {
+          const flag = values[offset];
+          if (flag == null) return "";
+          const identifier = fixedText(offset + 1, 3);
+          const detail = flag & 1
+            ? `${identifiers[identifier] || identifier || "unrecognised"} · start ${long(offset + 4)} · ${long(offset + 8)} sectors${flag & 0x80 ? " · bootable" : ""}`
+            : "Not present";
+          return row(`Partition ${number} (${String.fromCharCode(67 + number)}:)`, detail);
+        };
         rows = [
-          row("Identifier", textValue(values.slice(0, 4))),
-          row("Block size in longs", long(4)),
-          row("Checksum", long(8) == null ? null : `$${hex(long(8), 8)}`),
-          row("Host identifier", long(12)),
-          row("Block bytes", long(16)),
-          row("Flags", long(20) == null ? null : `$${hex(long(20), 8)}`),
-          row("First partition block", long(28)),
-          row("First filesystem header block", long(32)),
-          row("Cylinders", long(64)),
-          row("Sectors per track", long(68)),
-          row("Heads", long(72)),
-          row("Low cylinder", long(88)),
-          row("High cylinder", long(92)),
-          row("Drive manufacturer", textValue(values.slice(160, 176))),
+          row("Drive size in sectors", long(0x1C2)),
+          partition(0x1C6, 0), partition(0x1D2, 1), partition(0x1DE, 2), partition(0x1EA, 3),
+          row("Bad-sector list start", long(0x1F6)),
+          row("Bad-sector count", long(0x1FA)),
+          row("Checksum word", short(0x1FE) == null ? null : `$${hex(short(0x1FE), 4)} (a bootable root sector sums to $1234)`),
         ].join("");
-      } else if (template === "kickstart-rom") {
-        name = "Kickstart ROM header";
-        const size = long(16);
+      } else if (template === "tos-rom") {
+        name = "TOS ROM header";
+        const version = short(2);
+        const built = long(0x18);
         rows = [
-          row("Header word", short(0) == null ? null : `$${hex(short(0), 4)} (${short(0) === 0x1114 ? "512 KiB or larger" : "256 KiB"})`),
-          row("Jump instruction", short(4) === 0x4EF9 ? "JMP absolute long" : short(4) == null ? null : `$${hex(short(4), 4)}`),
-          row("Entry point", long(6) == null ? null : `$${hex(long(6), 8)}`),
-          row("Exec version", short(12)),
-          row("Declared size", size == null ? null : `${size.toLocaleString()} bytes`),
+          row("Branch to reset", short(0) == null ? null : `$${hex(short(0), 4)}${short(0) === 0x602E ? " (BRA.S over the header)" : ""}`),
+          row("TOS version", version == null ? null : `$${hex(version, 4)} · TOS ${(version >> 8) & 0xFF}.${hex(version & 0xFF)}`),
+          row("Reset entry point", long(4) == null ? null : `$${hex(long(4), 6)}`),
+          row("Base of the operating system", long(8) == null ? null : `$${hex(long(8), 6)}`),
+          row("End of operating system memory", long(0x0C) == null ? null : `$${hex(long(0x0C), 6)}`),
+          row("GEM entry (MUPB)", long(0x14) == null ? null : `$${hex(long(0x14), 8)}${long(0x14) === 0x87654321 ? " (valid)" : ""}`),
+          row("Build date", built == null ? null : `$${hex(built, 8)} (day, month and year in packed decimal)`),
+          row("Country and video", short(0x1C) == null ? null : `$${hex(short(0x1C), 4)}`),
+          row("GEMDOS build date", short(0x1E) == null ? null : `$${hex(short(0x1E), 4)}`),
         ].join("");
-      } else if (template === "resident-tag") {
-        name = "Resident module tag";
-        const type = values[10];
-        const typeNames = { 0: "NT_UNKNOWN", 1: "NT_TASK", 2: "NT_INTERRUPT", 3: "NT_DEVICE", 4: "NT_MSGPORT", 9: "NT_LIBRARY", 10: "NT_MEMORY", 11: "NT_RESOURCE" };
+      } else if (template === "program-header") {
+        name = "GEMDOS program header";
+        const flags = long(0x16);
+        const flagText = flags == null ? null : [
+          flags & 0x01 ? "fast load" : "",
+          flags & 0x02 ? "may load into TT RAM" : "",
+          flags & 0x04 ? "Malloc may return TT RAM" : "",
+          `MiNT memory protection mode ${(flags >> 4) & 0x0F}`,
+        ].filter(Boolean).join(", ");
         rows = [
-          row("Match word", short(0) == null ? null : `$${hex(short(0), 4)}${short(0) === 0x4AFC ? " (RTC_MATCHWORD)" : ""}`),
-          row("Match tag", long(2) == null ? null : `$${hex(long(2), 8)}`),
-          row("End of module", long(6) == null ? null : `$${hex(long(6), 8)}`),
-          row("Flags", values[10] == null ? null : `$${hex(values[10])}`),
-          row("Version", values[11]),
-          row("Type", values[12] == null ? null : `${values[12]}${typeNames[values[12]] ? ` (${typeNames[values[12]]})` : ""}`),
-          row("Priority", values[13] == null ? null : (values[13] > 127 ? values[13] - 256 : values[13])),
-          row("Name pointer", long(14) == null ? null : `$${hex(long(14), 8)}`),
-          row("Identification pointer", long(18) == null ? null : `$${hex(long(18), 8)}`),
-          row("Initialisation routine", long(22) == null ? null : `$${hex(long(22), 8)}`),
-          row("Node type byte", type == null ? null : `$${hex(type)}`),
+          row("Magic", short(0) == null ? null : `$${hex(short(0), 4)}${short(0) === 0x601A ? " (executable)" : " (not a GEMDOS program)"}`),
+          row("Text segment", long(2) == null ? null : `${long(2).toLocaleString()} bytes`),
+          row("Data segment", long(6) == null ? null : `${long(6).toLocaleString()} bytes`),
+          row("BSS segment", long(0x0A) == null ? null : `${long(0x0A).toLocaleString()} bytes`),
+          row("Symbol table", long(0x0E) == null ? null : `${long(0x0E).toLocaleString()} bytes`),
+          row("Program flags", flags == null ? null : `$${hex(flags, 8)} · ${flagText}`),
+          row("Absolute flag", short(0x1A) == null ? null : short(0x1A) === 0 ? "0 · relocation information follows" : `$${hex(short(0x1A), 4)} · no relocation`),
         ].join("");
-      } else if (template === "hardfile-geo") {
-        name = "UAE hardfile geometry sidecar";
+      } else if (template === "geometry-sidecar") {
+        name = "Hard-disk geometry sidecar";
         const text = values.filter(value => value != null).map(value => printable(value)).join("");
         const field = key => text.match(new RegExp(`^\\s*${key}\\s*=\\s*(\\S+)`, "im"))?.[1] || null;
         rows = [
-          row("Surfaces", field("surfaces")),
-          row("Blocks per track", field("blockspertrack")),
+          row("Heads", field("heads") || field("surfaces")),
+          row("Sectors per track", field("sectors") || field("sectorspertrack") || field("blockspertrack")),
           row("Cylinders", field("cylinders")),
-          row("Sector size", field("blocksize") || field("sectorsize")),
-          row("Reserved blocks", field("reserved")),
+          row("Sector size", field("sectorsize") || field("blocksize")),
+          row("Reserved sectors", field("reserved")),
           row("Descriptor bytes", Math.min(state.size, 512)),
         ].join("");
-      } else if (template === "dms-track") {
-        name = "DMS archive header and first track";
-        const modes = { 0: "NOCOMP", 1: "SIMPLE", 2: "QUICK", 3: "MEDIUM", 4: "DEEP", 5: "HEAVY1", 6: "HEAVY2" };
-        const trackMode = values[73];
+      } else if (template === "msa-track") {
+        name = "MSA header and first track";
+        const sectorsPerTrack = short(2);
+        const trackLength = short(0x0A);
+        const uncompressed = sectorsPerTrack != null && trackLength != null && trackLength === sectorsPerTrack * 512;
         rows = [
-          row("Signature", textValue(values.slice(0, 4))),
-          row("Low track", short(14)),
-          row("High track", short(16)),
-          row("Packed size", long(18)),
-          row("Unpacked size", long(22)),
-          row("Archive compression", values[53] == null ? null : `${values[53]}${modes[values[53]] ? ` (${modes[values[53]]})` : ""}`),
-          row("First track header", textValue(values.slice(56, 58))),
-          row("Track number", short(58)),
-          row("Packed length", short(62)),
-          row("Unpacked length", short(66)),
-          row("Track compression", trackMode == null ? null : `${trackMode}${modes[trackMode] ? ` (${modes[trackMode]})` : ""}`),
-          row("Packed checksum", short(70) == null ? null : `$${hex(short(70), 4)}`),
-          row("Header checksum", short(74) == null ? null : `$${hex(short(74), 4)}`),
+          row("Identifier", short(0) == null ? null : `$${hex(short(0), 4)}${short(0) === 0x0E0F ? " (Magic Shadow Archiver)" : ""}`),
+          row("Sectors per track", sectorsPerTrack),
+          row("Sides", short(4) == null ? null : short(4) === 0 ? "1 (single sided)" : `${short(4) + 1}`),
+          row("First track", short(6)),
+          row("Last track", short(8)),
+          row("First track data length", trackLength == null ? null : `${trackLength.toLocaleString()} bytes`),
+          row("First track packing", uncompressed ? "Stored whole" : "Run-length packed with the $E5 escape"),
         ].join("");
       } else if (template === "custom" && state.customTemplate) {
         name = state.customTemplate.name;
@@ -805,7 +831,7 @@ window.AtariHexEditor = (() => {
     async function compareWithFile() {
       const picker = document.createElement("input");
       picker.type = "file";
-      picker.accept = ".bin,.rom,.img,.hda,.geo,.adf,.adz,.adf,*/*";
+      picker.accept = ".bin,.rom,.tos,.img,.hd,.geo,.st,.msa,.dim,*/*";
       picker.onchange = async () => {
         const file = picker.files?.[0];
         if (!file) return;
@@ -911,7 +937,7 @@ window.AtariHexEditor = (() => {
     $(".hex-menu-next-difference").onclick = nextDifference;
     $(".hex-template").onchange = async event => {
       state.template = event.target.value;
-      if (["boot-block", "root-block", "rigid-disk", "kickstart-rom", "resident-tag", "hardfile-geo", "dms-track"].includes(state.template)) {
+      if (["boot-sector", "directory-entry", "partition-table", "tos-rom", "program-header", "geometry-sidecar", "msa-track"].includes(state.template)) {
         await ensureRange(0, Math.min(state.size - 1, 511));
       }
       renderStructure();
