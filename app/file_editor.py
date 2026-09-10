@@ -993,29 +993,31 @@ def update_file_properties(
     comment: str = "",
     filetype: str = "",
     writable: bool = True,
+    datestamp: str | None = None,
 ) -> dict:
-    """Rewrite catalogue metadata without changing the file's bytes."""
+    """Rewrite directory metadata without changing the file's bytes.
+
+    A GEMDOS entry keeps its attribute byte and its datestamp in the
+    directory itself, so both are changed in place. Nothing is rewritten,
+    which is what makes this safe on a file whose contents the editor has
+    not read in full.
+    """
+    del comment, filetype
     content = service.read_file(session, path, side)
     if sha256_bytes(content) != expected_sha256:
         raise DiskError("The file changed after the editor opened it. Reopen the file before changing its properties.")
     _find_row(service, session, path, side)
-    with tempfile.NamedTemporaryFile(dir=service.work_dir, prefix="file-properties-", delete=False) as temporary:
-        temporary.write(content)
-        temporary_path = Path(temporary.name)
-    try:
-        service.set_access(session, [path], writable=True, side=side)
-        service.mutate(session, ["rm", "--force", "{image}:" + path], side)
-        service.put(
-            session, path, temporary_path,
-            str(protection or "") or None,
-            str(comment or "") or None,
-            str(filetype or "") or None,
-            side,
+    if protection:
+        service.set_file_metadata(session, path, str(protection), datestamp=datestamp)
+    elif datestamp:
+        current = service.file_metadata(session, path)
+        service.set_file_metadata(
+            session,
+            path,
+            format_protection(current.get("attributes")),
+            datestamp=datestamp,
         )
-        if not writable:
-            service.set_access(session, [path], writable=False, side=side)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    service.set_access(session, [path], writable=writable)
     return service.summary(session)
 
 

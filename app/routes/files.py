@@ -377,6 +377,7 @@ def create_files_blueprint(
             service.put(
                 session, destination, temp_path,
                 attributes_field(data.get("attributes")),
+                datestamp=str(data.get("datestamp") or "") or None,
             )
         finally:
             temp_path.unlink(missing_ok=True)
@@ -441,6 +442,7 @@ def create_files_blueprint(
                 destination,
                 temp_path,
                 attributes_field(request.form.get("attributes")),
+                datestamp=request.form.get("datestamp") or None,
             )
         finally:
             temp_path.unlink(missing_ok=True)

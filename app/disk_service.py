@@ -1773,6 +1773,7 @@ class DiskService(
             )
             row = {
                 "name": child.name,
+                "path": str(child.path),
                 "type": "dir" if child.is_dir else "file",
                 "attributes": attributes,
                 "attributeBits": bits,
@@ -2269,14 +2270,19 @@ class DiskService(
         comment: str | None = None,
         filetype: str | None = None,
         side: int | None = None,
+        datestamp: str | None = None,
     ) -> None:
         """Import one host file with the metadata GEMDOS actually records.
 
         A host file arrives with no attribute byte of its own. Whatever the
-        caller could establish, from a sidecar, from an Atari-written ZIP, or
-        from the source volume in an image-to-image copy, is applied here;
-        anything it could not is left at the filing system's own default
-        rather than invented.
+        caller could establish, from an attribute sidecar, from an
+        Atari-written ZIP, or from the source volume in an image-to-image
+        copy, is applied here; anything it could not is left at the filing
+        system's own default rather than invented.
+
+        ``datestamp`` is normally left alone, so a newly written file carries
+        the moment it was written. A caller reproducing a recorded image
+        passes the datestamp it recorded instead.
 
         ``comment`` and ``filetype`` are accepted and ignored: a GEMDOS
         directory entry records neither.
@@ -2294,6 +2300,7 @@ class DiskService(
             from atarinut.file import AtariMeta
         except ImportError as exc:
             raise DiskError("The Atarinut import API is unavailable.") from exc
+        requested_datestamp = self._parse_datestamp(datestamp)
         with self.gemdos_mount(session) as mount:
             target = self.inner_for(session, destination)
             mount.write_bytes(target, host_path.read_bytes())
@@ -2306,7 +2313,7 @@ class DiskService(
                         if attributes
                         else int(current.attributes)
                     ),
-                    datestamp=current.datestamp,
+                    datestamp=requested_datestamp or current.datestamp,
                 ),
             )
         self._mark_mutated(session)
@@ -2398,13 +2405,18 @@ class DiskService(
                 )
                 metadata = plan.get("metadata") or {}
                 supplied = metadata.get("attributes", metadata.get("access"))
-                if supplied not in (None, ""):
+                stamp = self._parse_datestamp(metadata.get("datestamp"))
+                if supplied not in (None, "") or stamp is not None:
                     current = mount.atari_meta(plan["destination"])
                     mount.set_atari_meta(
                         plan["destination"],
                         AtariMeta(
-                            attributes=attribute_value(supplied),
-                            datestamp=current.datestamp,
+                            attributes=(
+                                attribute_value(supplied)
+                                if supplied not in (None, "")
+                                else int(current.attributes)
+                            ),
+                            datestamp=stamp or current.datestamp,
                         ),
                     )
                 imported.append(plan["destination"])

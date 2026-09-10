@@ -323,9 +323,9 @@ class ArchiveBrowserTests(unittest.TestCase):
                 return {"entries": []}
 
             def put(self, _session, destination, host_path, attributes=None,
-                    comment=None, filetype=None, side=None):
+                    comment=None, filetype=None, side=None, datestamp=None):
                 self.written = (
-                    destination, host_path.read_bytes(), attributes, comment, filetype, side,
+                    destination, host_path.read_bytes(), attributes, datestamp,
                 )
 
             def summary(self, _session):
@@ -394,8 +394,8 @@ class ArchiveBrowserTests(unittest.TestCase):
         # The attribute value reaches the service in the form the person typed,
         # which the service parses once rather than each route guessing at it.
         self.assertEqual(
-            service.written[:5],
-            ("GAMES\\NEWFILE.TXT", b"", "r----a", None, None),
+            service.written,
+            ("GAMES\\NEWFILE.TXT", b"", "r----a", None),
         )
 
 

@@ -468,21 +468,21 @@ def create_tools_blueprint(
             report = health_report(service, service.get(image_id), progress)
             return jsonify(report)
 
-    @blueprint.get("/api/images/<image_id>/ffs-installations/audit")
+    @blueprint.get("/api/images/<image_id>/drive-software/audit")
     def audit_ffs_installations(image_id):
         session = service.get(image_id)
         operation_id = request.args.get("operationId")
         root = str(request.args.get("root") or "$")
         with operations.tracked(
             operation_id,
-            "Finding installed FFS software",
-            "Installed FFS software audit complete",
+            "Finding installed drive software",
+            "Installed drive-software audit complete",
         ) as progress:
             result = service.audit_ffs_installations(session, root, progress)
             return jsonify(result)
 
-    @blueprint.post("/api/images/<image_id>/ffs-installations/repair")
-    @image_mutation("repairing installed FFS software")
+    @blueprint.post("/api/images/<image_id>/drive-software/repair")
+    @image_mutation("repairing installed drive software")
     def repair_ffs_installations(image_id):
         session = service.get(image_id)
         data = payload()
@@ -492,8 +492,8 @@ def create_tools_blueprint(
             raise DiskError("Choose the installed disk directories to repair.")
         with operations.tracked(
             operation_id,
-            "Rechecking proposed FFS repairs",
-            "Installed FFS software repair complete",
+            "Rechecking the proposed drive-software repairs",
+            "Installed drive-software repair complete",
         ) as progress:
             result = service.repair_ffs_installations(session, directories, progress)
             return jsonify(image=service.summary(session), repair=result)
@@ -889,26 +889,27 @@ def create_tools_blueprint(
         )
         return jsonify(image=image, path=path, inspection=inspect_editable_file(service, session, path, side))
 
-    @blueprint.post("/api/images/<image_id>/inspect/dms-rebuild-preview")
-    @request_effect("read-only", "proving a DMS DMS track rebuild")
-    def preview_dms_member_rebuild(image_id):
+    @blueprint.post("/api/images/<image_id>/inspect/container-rebuild-preview")
+    @request_effect("read-only", "proving a track rebuild inside a disk container")
+    def preview_container_member_rebuild(image_id):
+        """Say whether one track of a container can be rewritten in place.
+
+        MSA and DIM are plain sectors under a header, so a complete track can
+        be rebuilt by converting to a sector image, editing and converting
+        back. A Pasti capture never can: it records a physical read that no
+        edit can be proved against.
+        """
         data = payload()
         session = service.get(image_id)
-        if session.kind != "dms":
-            raise DiskError("This structural comparison is only used by DMS archive projects.")
+        if session.kind not in {"msa", "dim", "stx"}:
+            raise DiskError(
+                "This structural comparison is only used by MSA, DIM and Pasti "
+                "container projects."
+            )
         path = str(data.get("path") or "")
-        apply_partition(service, session, data.get("partition"))
-        side = optional_int(data.get("side"))
-        current = inspect_editable_file(service, session, path, side)
-        if not current["editable"] or current["readOnly"]:
-            raise DiskError("This DMS member does not have a complete reconstruction proof.")
-        if str(data.get("sha256") or "") != current["sha256"]:
-            raise DiskError("The DMS member changed after the editor opened it. Reopen it before reviewing the rebuild.")
-        original = service.read_file(session, path, side)
-        replacement = encode_editor_replacement(
-            original, str(data.get("text") or ""), bool(current["tokenisedBasic"]),
-        )
-        return jsonify(service.preview_dms_member_replacement(session, path, replacement))
+        if not path:
+            raise DiskError("Choose a track to inspect before reviewing its rebuild.")
+        return jsonify(service.container_member_editability(session, path))
 
     @blueprint.put("/api/images/<image_id>/inspect/properties")
     @image_mutation("editing file properties")
@@ -923,9 +924,8 @@ def create_tools_blueprint(
         image = update_file_properties(
             service, session, path, side, str(data.get("sha256") or ""),
             protection=attributes_field(data.get("attributes")) or "",
-            comment="",
-            filetype="",
             writable=bool(data.get("writable", True)),
+            datestamp=str(data.get("datestamp") or "") or None,
         )
         return jsonify(image=image, inspection=inspect_editable_file(service, session, path, side))
 
@@ -1155,7 +1155,7 @@ def create_tools_blueprint(
             raise DiskError("Running an installer needs a hard-drive image to install onto.")
         data = payload()
         configured = requested_emulator_session(session, data)
-        discs = [service.get(str(item)) for item in (data.get("discs") or [])]
+        discs = [service.get(str(item)) for item in (data.get("disks") or [])]
         if not discs:
             raise DiskError("Choose at least one disc for the installer to read.")
         if len(discs) > MAXIMUM_FLOPPY_DRIVES:
@@ -1183,7 +1183,7 @@ def create_tools_blueprint(
             "interactive": True,
             "emulator": emulator.label,
             "machine": str(started.hardware_profile.get("machine") or ""),
-            "discs": [disc.name for disc in discs],
+            "disks": [disc.name for disc in discs],
             "summary": (
                 f"{emulator.label} is running with {len(discs)} disc"
                 f"{'' if len(discs) == 1 else 's'} inserted. "

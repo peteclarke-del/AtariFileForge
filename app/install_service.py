@@ -211,7 +211,7 @@ class InstallMixin:
         staging, leaf, drawer = self._staging_paths(target, readable, parent)
 
         manifest = self._read_staged_manifest(target, staging, leaf)
-        discs = list(manifest.get("discs") or [])
+        discs = list(manifest.get("disks") or [])
         label = self._next_disc_label(discs, disc_label)
         alternates = atari_paths.join(
             self._housekeeping_drawer(staging, leaf), self.validate_leaf_name(target, label)
@@ -289,7 +289,7 @@ class InstallMixin:
             "parent": staging,
             "created": manifest.get("created") or _now(),
             "updated": _now(),
-            "discs": discs,
+            "disks": discs,
             "conflicts": carried + conflicts,
         })
         self._write_staged_manifest(target, staging, leaf, manifest)
@@ -307,7 +307,7 @@ class InstallMixin:
             else self._read_staged_manifest(target, staging, leaf)
         )
         drawer = atari_paths.join(staging, leaf)
-        discs = list(manifest.get("discs") or [])
+        discs = list(manifest.get("disks") or [])
         if discs:
             file_count = sum(int(disc.get("files") or 0) for disc in discs)
             total_bytes = sum(int(disc.get("bytes") or 0) for disc in discs)
@@ -326,11 +326,11 @@ class InstallMixin:
             "title": str(manifest.get("title") or leaf),
             "path": drawer,
             "parent": staging,
-            "discs": [
+            "disks": [
                 {key: value for key, value in disc.items() if key != "paths"}
                 for disc in discs
             ],
-            "discCount": len(discs),
+            "diskCount": len(discs),
             "fileCount": file_count,
             "bytes": total_bytes,
             "conflicts": list(manifest.get("conflicts") or []),

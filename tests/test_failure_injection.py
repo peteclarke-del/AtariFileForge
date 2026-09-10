@@ -32,7 +32,21 @@ class FailureInjectionTests(unittest.TestCase):
             self.assertEqual(list(work.iterdir()), [])
             self.assertEqual(service.sessions, {})
 
-    def test_rollback_restores_exact_bytes_after_a_partial_write(self):
+    def test_checkpoint_rollback_restores_exact_bytes_after_partial_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            service = DiskService(Path(folder) / "work")
+            session = service.create_blank("volume", "ROLLBACK", capacity="4MB")
+            original = session.path.read_bytes()
+            token = service.begin_automatic_checkpoint(session, "injected partial write")
+            with session.path.open("r+b") as image:
+                image.seek(16)
+                image.write(b"BROKEN WRITE")
+
+            service.rollback_automatic_checkpoint(session, token)
+
+            self.assertEqual(session.path.read_bytes(), original)
+
+    def test_import_rollback_restores_exact_bytes_after_a_partial_write(self):
         """An import into an existing directory is undone byte for byte.
 
         Expanding a disk image into a directory that already exists cannot be
