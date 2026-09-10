@@ -1,3 +1,7 @@
+// UNVERIFIED against a live server: this branch ports the frontend only,
+// so the vocabulary, media, kinds, dialogs and drive names below have been
+// brought over but not run. The "is oversized" bounds are kept verbatim,
+// because they are the guard on the look and feel.
 const { chromium } = require("playwright");
 
 const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
@@ -13,7 +17,7 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
         const response = await fetch("/api/images/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ format: "adf", title }),
+          body: JSON.stringify({ format: "ds-720k", title }),
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || `Create failed: ${response.status}`);
@@ -149,7 +153,7 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
       const response = await fetch(`/api/images/${imageId}/empty-file`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ destination: "", name: "PATCHED", protection: "----rwed" }),
+        body: JSON.stringify({ destination: "", name: "PATCHED.DAT", attributes: "-----a" }),
       });
       if (!response.ok) throw new Error((await response.json()).error || "Could not prepare patch candidate");
     }, ids[1]);
@@ -197,7 +201,7 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
     }, ids);
     await page.waitForFunction(() => !document.querySelector("[data-apply-patch]")?.disabled);
     const preflight = await page.locator(".patch-preflight-results").textContent();
-    if (!preflight.includes("BASEblank.adf") || !preflight.includes("CANDIDATEblank.adf") || !preflight.includes("1operations") || !preflight.includes("PATCHEDadded")) {
+    if (!preflight.includes("BASEblank.st") || !preflight.includes("CANDIDATEblank.st") || !preflight.includes("1operations") || !preflight.includes("PATCHED.DATadded")) {
       throw new Error(`Patch preflight did not describe the exact change: ${preflight}`);
     }
     const preflightJob = await page.evaluate(async () => {

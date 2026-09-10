@@ -16,20 +16,20 @@ function test(name, callback) {
 }
 
 const manifest = (name, hash, title) => ({
-  image: { id: `session-${name}`, name, kind: "hdf", title, size: 100 },
+  image: { id: `session-${name}`, name, kind: "hd", title, size: 100 },
   fingerprint: hash.repeat(64),
   revision: `100-${hash}`,
   records: [
-    { recordType: "partition", partition: 0, device: "DH0", title, path: "DH0:" },
-    { recordType: "file", partition: 0, path: "Game", size: 4, sha256: hash.repeat(64) },
+    { recordType: "partition", partition: 0, device: "C:", identifier: "BGM", title, path: "C:\\" },
+    { recordType: "file", partition: 0, path: "GAME.PRG", size: 4, sha256: hash.repeat(64) },
   ],
   menus: [],
 });
 
 test("collection entries retain deterministic identity and decoded titles", () => {
   const entry = catalogue.catalogueEntry(
-    manifest("games.hdf", "a", "Arcadians"),
-    { location: "SD card 1", machines: ["Atari 500"] },
+    manifest("games.img", "a", "Arcadians"),
+    { location: "SD card 1", machines: ["Atari 1040STE"] },
     null,
     () => "2026-08-17T12:00:00Z",
     () => "entry-1",
@@ -41,8 +41,8 @@ test("collection entries retain deterministic identity and decoded titles", () =
 });
 
 test("collection reports span closed-image manifests by hash and title", () => {
-  const first = catalogue.catalogueEntry(manifest("one.hdf", "b", "Repton 2"), {}, null, () => "now", () => "one");
-  const second = catalogue.catalogueEntry(manifest("two.hdf", "b", "REPTON-2"), {}, null, () => "now", () => "two");
+  const first = catalogue.catalogueEntry(manifest("one.img", "b", "Repton 2"), {}, null, () => "now", () => "one");
+  const second = catalogue.catalogueEntry(manifest("two.img", "b", "REPTON-2"), {}, null, () => "now", () => "two");
   const report = catalogue.collectionReport([first, second], ["Repton 2", "Elite"]);
   assert.equal(report.exactDuplicates.length, 1);
   assert.equal(report.titleVariants.length, 1);
@@ -66,7 +66,7 @@ test("collection backup validation rejects unversioned input", () => {
     now: () => "2026-08-24T12:00:00Z",
     uuid: () => "remote-one",
   });
-  await remote.upsertManifest(manifest("desktop.hdf", "c", "Chuckie Egg"), { sessionId: "desktop-session" });
+  await remote.upsertManifest(manifest("desktop.img", "c", "Chuckie Egg"), { sessionId: "desktop-session" });
   await remote.saveSettings({ wanted: ["Elite"] });
   assert.equal((await remote.list())[0].id, "remote-one");
   assert.deepEqual(Array.from((await remote.settings()).wanted), ["Elite"]);
