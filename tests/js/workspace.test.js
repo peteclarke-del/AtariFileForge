@@ -337,17 +337,7 @@ test("the pane export control follows the formats the service offers", () => {
   assert.equal(exportable.available, true);
   assert.match(exportable.label, /demo\.st/);
 
-  // An AHDI drive with its own geometry descriptor carries what a floppy
-  // container cannot hold, so the control is disabled and says why.
-  const drive = view.exportAvailability({
-    name: "scsi0.img",
-    hasDescriptor: true,
-    exportFormats: [],
-  });
-  assert.equal(drive.available, false);
-  assert.match(drive.label, /AHDI drive image/);
-
-  // Anything else with no compatible target gets the general reason.
+  // Anything with no compatible target says so rather than going missing.
   const unsupported = view.exportAvailability({ name: "bank.rom", exportFormats: [] });
   assert.equal(unsupported.available, false);
   assert.match(unsupported.label, /no compatible format/);

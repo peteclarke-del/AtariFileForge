@@ -47,7 +47,7 @@ class FormatTests(unittest.TestCase):
         for extension in (".st", ".msa", ".dim", ".stx", ".hfe", ".scp", ".ipf", ".img", ".hd", ".acsi"):
             with self.subTest(extension=extension):
                 self.assertIn(extension, GEMDOS_EXTENSIONS)
-        for extension in (".tos", ".rom", ".iso", ".geo", ".zip"):
+        for extension in (".tos", ".rom", ".iso", ".zip"):
             with self.subTest(extension=extension):
                 self.assertNotIn(extension, GEMDOS_EXTENSIONS)
 

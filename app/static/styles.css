@@ -1098,16 +1098,13 @@ body:has(dialog[open].failed) .pane .loading { display: none; }
 @media (max-width: 620px) {
   .field-grid.two, .field-grid.three { grid-template-columns: minmax(0, 1fr); }
 }
-.prefilled-file { color: var(--teal); font: 10px DM Mono, monospace; }
 .file-selection-summary { display: grid; gap: 4px; min-height: 38px; padding: 9px 11px; border: 1px dashed var(--line); border-radius: 8px; background: var(--cream); color: var(--muted); font: 10px/1.45 DM Mono, monospace; }
-.file-selection-summary.compact { min-height: 31px; padding: 6px 9px; }
 .file-selection-summary.has-files { border-style: solid; border-color: color-mix(in srgb, var(--teal) 55%, var(--line)); background: color-mix(in srgb, var(--teal) 8%, var(--paper)); color: var(--ink); }
-.file-selection-summary.drop-target, .pair-file-drop.drop-target { border-color: var(--teal); background: color-mix(in srgb, var(--teal) 16%, var(--paper)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 18%, transparent); }
+.file-selection-summary.drop-target { border-color: var(--teal); background: color-mix(in srgb, var(--teal) 16%, var(--paper)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 18%, transparent); }
 .file-selection-summary.chooser-failed { border-color: var(--danger-border); background: var(--danger-surface); color: var(--danger); }
 .file-selection-summary span { overflow-wrap: anywhere; }
 .file-selection-summary strong { color: var(--teal); }
 .file-selection-empty { align-self: center; }
-.pair-file-drop { margin: 14px 0 5px; padding: 14px; border: 2px dashed var(--line); border-radius: 9px; background: var(--cream); color: var(--muted); text-align: center; font: 10px/1.45 DM Mono, monospace; transition: border-color .12s ease, background .12s ease, box-shadow .12s ease; }
 .check-field { display: flex; align-items: center; gap: 8px; margin: 15px 0; color: var(--muted); font-size: 11px; }
 .check-field input { width: 16px; height: 16px; accent-color: var(--teal); }
 /* The install methods differ in what they can and cannot do, and the choice
