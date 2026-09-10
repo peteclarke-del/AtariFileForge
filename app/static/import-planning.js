@@ -164,8 +164,5 @@
     targetNameRule,
     uniqueGemdosNames,
     // The names app.js still imports.
-    allocateFilesToOfsDisks: allocateFilesToDisks,
-    normaliseProtection: normaliseAttributes,
-    uniqueOfsNames: uniqueGemdosNames,
   });
 })();
