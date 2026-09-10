@@ -69,6 +69,11 @@ BS_SPF = 0x16
 BS_SPT = 0x18
 BS_NSIDES = 0x1A
 BS_NHID = 0x1C
+#: The 32-bit sector count DOS-compatible formatters write when the volume is
+#: too large for the 16-bit field at ``BS_NSECTS``. The Atari's own BPB stops
+#: before this and puts boot code here instead, so it is read only when the
+#: 16-bit count is zero, which is how the layout says it is not in use.
+BS_NSECTS32 = 0x20
 BS_CODE = 0x1E
 
 # Directory entry offsets.
@@ -274,9 +279,27 @@ class BootSector:
 
 
 def parse_boot_sector(data: bytes) -> BootSector:
-    """Decode the little-endian BPB out of a 512-byte boot sector."""
+    """Decode the little-endian BPB out of a 512-byte boot sector.
+
+    There are two ways an Atari volume states its size, and both are found on
+    real drives. Atari's own drivers keep the 16-bit count at ``BS_NSECTS``
+    usable by growing the *logical* sector to 2 KiB or 8 KiB, which is what
+    AHDI and ICD write. Anything aiming to be readable by a PC keeps 512-byte
+    sectors, sets that field to zero and puts the real count in the 32-bit
+    field that follows, which is what MagiC and HDDRIVER write. Reading only
+    the first refuses every partition over 32 MiB written by the second.
+
+    A zero 16-bit count is the format's own way of saying the wide field is in
+    use, so it is the only thing this has to test. In that layout the hidden
+    count widens to 32 bits along with it.
+    """
     if len(data) < SECTOR_SIZE:
         data = bytes(data).ljust(SECTOR_SIZE, b"\0")
+    total_sectors = le16_at(data, BS_NSECTS)
+    hidden = le16_at(data, BS_NHID)
+    if total_sectors == 0:
+        total_sectors = le32_at(data, BS_NSECTS32)
+        hidden = le32_at(data, BS_NHID)
     return BootSector(
         oem=bytes(data[BS_OEM:BS_OEM + 6]),
         serial=int.from_bytes(data[BS_SERIAL:BS_SERIAL + 3], "big"),
@@ -285,12 +308,12 @@ def parse_boot_sector(data: bytes) -> BootSector:
         reserved=le16_at(data, BS_RES),
         fats=data[BS_NFATS],
         root_entries=le16_at(data, BS_NDIRS),
-        total_sectors=le16_at(data, BS_NSECTS),
+        total_sectors=total_sectors,
         media=data[BS_MEDIA],
         sectors_per_fat=le16_at(data, BS_SPF),
         sectors_per_track=le16_at(data, BS_SPT),
         sides=le16_at(data, BS_NSIDES),
-        hidden=le16_at(data, BS_NHID),
+        hidden=hidden,
         executable=is_executable_sector(data),
         raw=bytes(data[:SECTOR_SIZE]),
     )
@@ -327,6 +350,17 @@ def build_boot_sector(
     put_le16(raw, BS_RES, geometry.reserved)
     raw[BS_NFATS] = geometry.fats
     put_le16(raw, BS_NDIRS, geometry.root_entries)
+    if geometry.total_sectors > 0xFFFF:
+        # Every geometry this builds keeps the count inside sixteen bits by
+        # growing the logical sector, so reaching here means a caller has
+        # asked for something this writer cannot express. Saying so is the
+        # only safe answer: the 16-bit field would silently keep the low half
+        # and describe a volume a fraction of the intended size.
+        raise DataError(
+            f"A volume of {geometry.total_sectors} logical sectors does not fit "
+            "the 16-bit count an Atari boot sector holds. Use a larger logical "
+            "sector size."
+        )
     put_le16(raw, BS_NSECTS, geometry.total_sectors)
     raw[BS_MEDIA] = geometry.media
     put_le16(raw, BS_SPF, geometry.sectors_per_fat)
