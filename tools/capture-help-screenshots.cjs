@@ -247,7 +247,7 @@ function scene(name, where, run) {
   SHOTS.push({ name, where, run });
 }
 
-scene("workspace", HELP, async page => {
+async function twoPaneWorkspace(page) {
   await openImage(page, DISKS.battleHawks, 0);
   await click(page, "#addPaneButton");
   await wait(page, 900);
@@ -263,6 +263,51 @@ scene("workspace", HELP, async page => {
     if (pane) { pane.style.left = "300px"; pane.style.top = "230px"; }
   });
   await wait(page, 1500);
+}
+
+// The theme is chosen by an attribute on the root element rather than by the
+// operating system's preference, so a screenshot run sets it directly instead
+// of trying to persuade the browser it is dark outside.
+async function setTheme(page, theme) {
+  await page.evaluate(chosen => {
+    document.documentElement.dataset.theme = chosen;
+    try { localStorage.setItem("atari-file-forge-theme", chosen); } catch { /* private window */ }
+  }, theme);
+  await wait(page, 900);
+}
+
+scene("workspace", HELP, async page => {
+  await twoPaneWorkspace(page);
+});
+
+scene("atari-file-forge-light", DOCS, async page => {
+  await setTheme(page, "light");
+  await twoPaneWorkspace(page);
+});
+
+scene("atari-file-forge-dark", DOCS, async page => {
+  await setTheme(page, "dark");
+  await twoPaneWorkspace(page);
+});
+
+scene("getting-started", DOCS, async page => {
+  // Deliberately nothing open: this is what the reader sees first.
+  await wait(page, 1500);
+});
+
+scene("hardware-workbench-current", DOCS, async page => {
+  await openImage(page, DISKS.battleHawks);
+  await click(page, "#workbenchButton");
+  await wait(page, 4000);
+});
+
+scene("in-app-help", DOCS, async page => {
+  await openImage(page, DISKS.battleHawks);
+  // The handbook is behind the Help menu, which is a <details> popup.
+  await page.evaluate(() => { document.querySelector("#helpMenu").open = true; });
+  await wait(page, 400);
+  await click(page, "#helpGuideButton");
+  await wait(page, 5000);
 });
 
 scene("hex-editor", HELP, async page => {
