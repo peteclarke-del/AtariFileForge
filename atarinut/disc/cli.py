@@ -49,7 +49,7 @@ from ..filesystem.blocks import (
     HD_BLOCKS,
     Geometry,
 )
-from ..kickfs.kickfs import Kickstart
+from ..tosrom import TOSRom
 from .mount import mount_image, resolve_mount, split_compound
 
 
@@ -389,22 +389,11 @@ def command_identify(args) -> int:
 
 def command_create(args) -> int:
     path = Path(args.image)
-    if args.filesystem == "kickfs":
-        from ..kickfs.kickfs import SIZE_256K, SIZE_512K, build_rom
-
-        sizes = {"256k": SIZE_256K, "512k": SIZE_512K, "1m": 2 * SIZE_512K}
-        request = str(args.geometry or "256k").strip().lower().replace("ib", "")
-        if request not in sizes:
-            raise ConfigurationError("A ROM image is 256k, 512k or 1m.")
-        label = str(args.title or "forge").strip() or "forge"
-        path.write_bytes(
-            build_rom(
-                size=sizes[request],
-                name=f"{label}.library",
-                id_string=f"{label}.library 1.0 (2026)",
-            )
+    if args.filesystem == "tosrom":
+        raise ConfigurationError(
+            "A TOS ROM is not created blank: open an existing TOS or EmuTOS image, "
+            "or build a cartridge ROM in the ROM Workbench."
         )
-        return 0
     blocks, geometry = _geometry_for(args.geometry or "dd")
     if args.filesystem == "rdb":
         size = blocks * BLOCK_SIZE
@@ -965,18 +954,24 @@ def command_describe_filesystem(args) -> int:
     return 0
 
 
-def command_kickstart(args) -> int:
-    rom = Kickstart(Path(args.image).read_bytes())
+def command_tosrom(args) -> int:
+    rom = TOSRom(Path(args.image).read_bytes())
     if args.output_format == "json":
         _emit(rom.to_dict())
         return 0
-    print(f"{rom.release} (exec {rom.version}), {len(rom.data) // 1024} KiB")
-    print(f"Checksum {'valid' if rom.checksum_valid else 'INVALID'}")
-    for module in rom.modules:
+    header = rom.header
+    print(f"{rom.release}, {len(rom.data) // 1024} KiB at ${rom.base:06X}")
+    print(
+        f"{header.country} {header.video_standard}, {header.machine}, "
+        f"built {header.date.isoformat() if header.date else 'unknown date'}"
+    )
+    for segment in rom.segments:
         print(
-            f"  {module.name:<24} v{module.version:<4} pri {module.priority:>4} "
-            f"{module.length:>8} bytes  {module.id_string}"
+            f"  {segment.name:<8} ${segment.start:06X} {segment.length:>8} bytes  "
+            f"{'proven' if segment.proven else 'unsegmented'}: {segment.evidence}"
         )
+    for point in rom.entry_points:
+        print(f"  {point.name:<36} ${point.address:06X}  {point.evidence}")
     return 0
 
 
@@ -986,7 +981,7 @@ def command_kickstart(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="adisc",
-        description="Work with GEMDOS OFS and FFS volumes, RDB hard drives and Kickstart ROMs.",
+        description="Work with GEMDOS OFS and FFS volumes, RDB hard drives and TOS ROMs.",
     )
     parser.add_argument("--version", action="store_true", help="Show the engine version and exit.")
     parser.add_argument(
@@ -1129,7 +1124,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = add("describe-filesystem", command_describe_filesystem, "Describe one filing system.")
     sub.add_argument("name")
 
-    sub = add("kickstart", command_kickstart, "Decode a Kickstart ROM's resident modules.")
+    sub = add("tosrom", command_tosrom, "Decode a TOS ROM's header, segments and entry points.")
     sub.add_argument("--as", dest="output_format", default="text", choices=("text", "json"))
     sub.add_argument("image")
 
