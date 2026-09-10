@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import Mock, PropertyMock, patch
 
 from flask import Flask
@@ -565,3 +568,75 @@ class EmulatorRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RomChoiceTests(unittest.TestCase):
+    """A collection from the preservation archives is not a tidy folder.
+
+    It carries alternative dumps beside the good ones, some of them
+    truncated and some not ROMs at all, and the later releases were never
+    published per country. All of that decides which file the emulator gets.
+    """
+
+    def _rom(self, size: int, version: int = 0x0404, base: int = 0xE00000) -> bytes:
+        """A ROM the decoder accepts: the header fields it insists on."""
+        data = bytearray(size)
+        struct.pack_into(">H", data, 0x00, 0x602E)
+        struct.pack_into(">H", data, 0x02, version)
+        struct.pack_into(">I", data, 0x04, base + 0x30)
+        struct.pack_into(">I", data, 0x08, base)
+        struct.pack_into(">I", data, 0x0C, base + size)
+        struct.pack_into(">I", data, 0x18, 0x04141993)
+        struct.pack_into(">H", data, 0x1C, 0x0006)
+        return bytes(data)
+
+    def _folder(self, files: dict[str, bytes]):
+        folder = Path(tempfile.mkdtemp())
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        self.addCleanup(shutil.rmtree, folder, True)
+        return folder
+
+    def _choose(self, folder, machine: str):
+        with mock.patch.object(emulator_config, "tos_directories", lambda: [folder]):
+            return emulator_config.tos_for(machine)
+
+    def test_a_release_with_no_language_prefers_the_plain_file(self) -> None:
+        """The later releases were not published per country.
+
+        `tos404.img` is the ROM. `tos404-a.img` is somebody's other dump of
+        it, and sorting names alone put that first.
+        """
+        whole = self._rom(512 * 1024)
+        folder = self._folder({
+            "tos404-a.img": whole,
+            "tos404-a2.img": whole,
+            "tos404.img": whole,
+        })
+        self.assertEqual(self._choose(folder, "falcon030").name, "tos404.img")
+
+    def test_a_truncated_dump_loses_to_a_whole_one(self) -> None:
+        """A half-length dump still carries a perfectly good header.
+
+        So the header cannot settle this and the length has to: every genuine
+        dump of one release is the same size.
+        """
+        folder = self._folder({
+            "tos404-a.img": self._rom(256 * 1024),
+            "tos404-b.img": self._rom(512 * 1024),
+        })
+        self.assertEqual(self._choose(folder, "falcon030").name, "tos404-b.img")
+
+    def test_a_file_that_is_not_a_rom_is_never_offered(self) -> None:
+        """Better the bundled firmware than a machine that hangs."""
+        folder = self._folder({"tos404.img": bytes(12345)})
+        self.assertIsNone(self._choose(folder, "falcon030"))
+
+    def test_the_language_order_still_decides_between_whole_roms(self) -> None:
+        early = self._rom(192 * 1024, version=0x0104, base=0xFC0000)
+        folder = self._folder({
+            "tos104us.img": early,
+            "tos104uk.img": early,
+            "tos104fr.img": early,
+        })
+        self.assertEqual(self._choose(folder, "st").name, "tos104uk.img")
