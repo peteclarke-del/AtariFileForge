@@ -271,7 +271,11 @@ def st_to_dim(image: bytes, geometry: FloppyGeometry | None = None) -> bytes:
     header[_START_TRACK] = 0
     header[_END_TRACK] = geometry.tracks - 1
     header[_DENSITY] = 1 if geometry.sectors >= 15 else 0
-    header[_SECTOR_SIZE : _SECTOR_SIZE + 2] = SECTOR_SIZE.to_bytes(2, "big")
+    # Zero, not 512. The field records a departure from the ordinary sector
+    # size and the tools that read this format treat a literal 512 here as
+    # something else entirely: the reference converter read such a header as a
+    # single-sided disk and returned half the image.
+    header[_SECTOR_SIZE : _SECTOR_SIZE + 2] = (0).to_bytes(2, "big")
     return bytes(header) + image
 
 
