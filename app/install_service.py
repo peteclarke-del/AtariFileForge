@@ -448,7 +448,7 @@ class InstallMixin:
         self.require_mounted_volume(target)
         if not self.mountable(target):
             raise DiskError("WHDLoad can only be installed into an GEMDOS volume.")
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             found = whdload.detect(mount)
         return {
             **found,
@@ -477,7 +477,7 @@ class InstallMixin:
         release = whdload.read_release(data, source, url)
         report = progress_module.reporter(progress)
 
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             existing = whdload.detect(mount)
         keep = keep_preferences and existing["installed"]
         plan = whdload.installation_plan(release.archive, keep_preferences=keep)
@@ -493,7 +493,7 @@ class InstallMixin:
                 raise DiskError(f"The WHDLoad archive could not be read: {exc}") from exc
 
         written: list[str] = []
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             for index, (destination, payload) in enumerate(contents):
                 report(f"Writing {destination}", index, len(contents))
                 parent = atari_paths.parent(destination)
@@ -554,7 +554,7 @@ class InstallMixin:
         if not whdload.is_slave_name(leaf):
             raise DiskError(f"{leaf} is not a WHDLoad slave; a slave's name ends in .slave.")
         path = atari_paths.join(destination, self.validate_leaf_name(target, leaf))
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             if destination and not mount.exists(destination):
                 mount.make_directory(destination, parents=True, exist_ok=True)
             mount.write_bytes(path, payload)
