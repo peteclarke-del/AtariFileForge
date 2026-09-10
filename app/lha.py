@@ -1,12 +1,11 @@
-"""Read LHA and LZX-era ``.lha`` archives without an external decompressor.
+"""Read ``.lzh`` and ``.lha`` archives without an external decompressor.
 
-Atari software is distributed as LHA. WHDLoad itself ships as
-``WHDLoad_usr.lha``, and the installer needs to open it to put ``C:WHDLoad``
-and the ``S:`` prefs into a hard-disk image. Debian's ``lhasa`` would do the
-job, but adding it would make the feature depend on a package that is present
-in the container and absent from the Debian and Snap builds, which is exactly
-the kind of split that shows up only in the field. DMS is already decoded in
-this tree for the same reason, so LHA is decoded here too.
+A great deal of Atari software was distributed as LZH, which was the usual
+archive on the ST alongside ZIP and ARC, so importing a downloaded title
+means opening one. Debian's ``lhasa`` would do the job, but adding it would
+make the feature depend on a package that is present in the container and
+absent from the Debian and Snap builds, which is exactly the kind of split
+that shows up only in the field. It is decoded here instead.
 
 Three header levels and four methods cover what the Atari world actually
 produced: ``-lh0-`` stored, ``-lh5-``, ``-lh6-`` and ``-lh7-`` sliding-window
