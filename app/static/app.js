@@ -432,6 +432,16 @@ function paneTableDescription(pane) {
     : "Select a partition to browse the volume it mounts";
 }
 
+//: The root directory of a GEMDOS volume is a fixed table rather than a file
+//: of its own, so it runs out of entries long before the disk runs out of
+//: space: 112 on a 720K floppy and 224 on a 1.44M one. A folder further down
+//: has no such limit, so the count is only shown at the root.
+function rootEntryNote(pane) {
+  const limit = Number(pane.image?.filesystemCapabilities?.directoryEntryLimit || 0);
+  if (!limit || pane.path !== "" || pane.archivePath) return "";
+  return ` · ${pane.entries.length} of ${limit} root entries`;
+}
+
 function partitionTableLabel(table) {
   if (!table) return "Partition table";
   const scheme = PARTITION_SCHEMES[String(table.scheme || "").toLowerCase()] || "Partition table";
@@ -794,8 +804,8 @@ function renderPane(index, preserveScroll = false) {
       : pane.partition !== null
         ? `${pane.partitionName || `Partition ${pane.partition}`} · ${drivePath(driveLetter, pane.path)}`
         : pane.image.filesystemCapabilities
-          ? `${pane.image.filesystemCapabilities.format} · ${drivePath(driveLetter, pane.path)}`
-          : `Volume root · ${drivePath(driveLetter, pane.path)}`;
+          ? `${pane.image.filesystemCapabilities.format} · ${drivePath(driveLetter, pane.path)}${rootEntryNote(pane)}`
+          : `Volume root · ${drivePath(driveLetter, pane.path)}${rootEntryNote(pane)}`;
   const hasParentEntry = isArchive || (!isPartitionIndex && !isContainer && !isRom && (
     pane.partition !== null || pane.path !== ""
   ));
