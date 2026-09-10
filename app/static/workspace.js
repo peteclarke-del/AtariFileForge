@@ -102,7 +102,5 @@ window.AtariWorkspace = (() => {
     selectionKeys,
     setSelection,
     // The names app.js and workspace-persistence.js still import.
-    isOfsPane: isGemdosPane,
-    restoredOfsPath: restoredGemdosPath,
   };
 })();
