@@ -285,10 +285,8 @@ row in the [backlog](docs/BACKLOG.md).
 - **Archives.** ZIP and LZH archives are read in-tree and their members can be
   extracted into writable media. The LZH decoder covers `-lh0-`, `-lh4-`
   through `-lh7-` and directory entries, and names any other method rather than
-  guessing at it. Editing a member inside its container is not yet in this
-  build; when it returns it is confined to same-length member edits, because a
-  container's own size and offset tables cannot survive a member changing
-  length.
+  guessing at it. Editing a member in place, without extracting it first, is
+  not yet in this build.
 - **The release gate.** The architecture build matrix, the generated-media and
   fault-injection gates and the real-hardware gate on an ST or STE with a real
   drive and a real hard-disk interface have not been run for this baseline.
