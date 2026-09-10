@@ -8400,10 +8400,17 @@ window.AtariDesktopHost = Object.freeze({
       if (platformSelect && ["tt030", "falcon030"].includes(activeWorkbenchProfile().profile?.machine)) platformSelect.value = "tos";
   },
   showOpening(name, preferredIndex = null) {
-    const index = Number.isInteger(preferredIndex) && panes[preferredIndex]
+    let index = Number.isInteger(preferredIndex) && panes[preferredIndex]
       ? preferredIndex
       : panes.findIndex(pane => !pane.image);
-    if (index < 0) return;
+    // Progress is drawn inside the pane the image is destined for, so with
+    // nowhere to draw it the operator watches a still workspace while the
+    // work happens. Make somewhere.
+    if (index < 0) index = addPane();
+    // That pane can be underneath another window, which hides the progress
+    // just as completely. Raise it, the way opening an image raises the pane
+    // it lands in.
+    paneWindowManager.bringToFront(index);
     setLoading(
       index,
       true,

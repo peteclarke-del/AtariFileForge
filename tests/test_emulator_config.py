@@ -532,8 +532,14 @@ class EmulatorRouteTests(unittest.TestCase):
         self.assertEqual(result["firmwareKind"], "emutos")
         self.assertIn("--machine ste", result["command"])
 
-    def test_a_drive_run_attaches_the_whole_drive(self):
-        """A hard drive is handed to the emulator entire, not partition by partition."""
+    def test_a_drive_run_attaches_the_drive_image_itself(self):
+        """A hard drive is handed over entire, and as the image, not a wrapper.
+
+        An Atari hard-disk interface reads the partition table out of the
+        image's own first sector. Wrapping the image in a container means the
+        machine finds a disk it does not recognise and starts with no drive,
+        after a long wait while the wrapper is built.
+        """
         with tempfile.TemporaryDirectory() as temporary:
             service = DiskService(temporary)
             drive = service.create_blank("hd", "Collection", capacity="4MB")
@@ -555,7 +561,12 @@ class EmulatorRouteTests(unittest.TestCase):
             self.assertTrue(attached.startswith("0="), attached)
             media = Path(attached.split("=", 1)[1])
             self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-            self.assertFalse(media.exists())
+            # The session's own working image, so a change made inside the
+            # emulator is a change to the image being worked on, and nothing
+            # the size of the drive has to be built first.
+            self.assertEqual(media, drive.path)
+            self.assertTrue(media.exists())
+            self.assertEqual(media.read_bytes()[:2], drive.path.read_bytes()[:2])
 
     def test_hardware_profile_retains_only_bounded_managed_choices(self):
         temporary = tempfile.TemporaryDirectory()
