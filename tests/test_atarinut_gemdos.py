@@ -144,6 +144,66 @@ class GeometryTests(unittest.TestCase):
         with self.assertRaises(DataError):
             geometry_from_bpb(bytes(512))
 
+    def test_a_dos_compatible_bpb_states_its_size_in_the_wide_field(self) -> None:
+        """MagiC and HDDRIVER write the size where a PC expects to read it.
+
+        Atari's own drivers keep the 16-bit count usable by growing the
+        logical sector to 2 KiB or 8 KiB. Anything meant to be readable by a
+        PC keeps 512-byte sectors, sets that field to zero and puts the real
+        count in the 32-bit field that follows. Reading only the first refused
+        every partition over 32 MiB written by the second, which is most of a
+        MagiC installation.
+
+        These are the exact figures from the first partition of a real MagiC 6
+        drive: 475,136 sectors of 512 bytes, sixteen to a cluster.
+        """
+        boot = bytearray(512)
+        boot[0x00:0x03] = b"\xeb\x3c\x90"
+        boot[0x03:0x0B] = b"PPGDODBC"
+        struct.pack_into("<H", boot, 0x0B, 512)     # bytes per sector
+        boot[0x0D] = 16                             # sectors per cluster
+        struct.pack_into("<H", boot, 0x0E, 9)       # reserved
+        boot[0x10] = 2                              # FATs
+        struct.pack_into("<H", boot, 0x11, 512)     # root entries
+        struct.pack_into("<H", boot, 0x13, 0)       # the 16-bit count, unused
+        boot[0x15] = 0xF8
+        struct.pack_into("<H", boot, 0x16, 120)     # sectors per FAT
+        struct.pack_into("<I", boot, 0x1C, 63)      # hidden, 32 bits here
+        struct.pack_into("<I", boot, 0x20, 475_136)  # the count that counts
+
+        parsed = parse_boot_sector(bytes(boot))
+        self.assertEqual(parsed.total_sectors, 475_136)
+        self.assertEqual(parsed.hidden, 63)
+        self.assertEqual(bpb_problems(parsed, 475_136), [])
+
+    def test_an_atari_bpb_still_reads_its_own_narrow_field(self) -> None:
+        """The wide field must not be read where boot code lives.
+
+        An Atari BPB stops at 0x1E and the bytes beyond are the boot sector's
+        own code. Reading them as a sector count would turn a working volume
+        into a nonsensical one, so the wide field is consulted only when the
+        narrow one is zero.
+        """
+        boot = bytearray(build_boot_sector(named_geometry("ds-720k"), serial=1))
+        boot[0x20:0x24] = b"\xff\xff\xff\xff"
+        parsed = parse_boot_sector(bytes(boot))
+        self.assertEqual(parsed.total_sectors, 1440)
+        self.assertEqual(parsed.hidden, 0)
+
+    def test_a_volume_too_large_for_the_narrow_field_is_refused_not_truncated(self) -> None:
+        """Keeping the low half of a count describes a volume that is not there.
+
+        Every geometry this builds keeps the count inside sixteen bits by
+        growing the logical sector, so this is unreachable through the normal
+        path. It is asserted because the failure it prevents is silent: the
+        volume would look valid and be a fraction of its intended size.
+        """
+        geometry = named_geometry("ds-720k")
+        oversized = Geometry(**{**geometry.__dict__, "total_sectors": 70_000})
+        with self.assertRaises(DataError) as caught:
+            build_boot_sector(oversized)
+        self.assertIn("70000", str(caught.exception).replace(",", ""))
+
     def test_partition_geometry_follows_the_driver_rule(self) -> None:
         mib = 1024 * 1024
         cases = {
