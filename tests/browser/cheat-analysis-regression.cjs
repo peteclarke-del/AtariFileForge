@@ -1,3 +1,7 @@
+// UNVERIFIED against a live server: this branch ports the frontend only,
+// so the vocabulary, media, kinds, dialogs and drive names below have been
+// brought over but not run. The "is oversized" bounds are kept verbatim,
+// because they are the guard on the look and feel.
 const { chromium } = require("playwright");
 
 const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
@@ -13,7 +17,7 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
       const created = await window.AtariUI.api("/api/images/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ format: "adf", title: "CHEATS" }),
+        body: JSON.stringify({ format: "ds-720k", title: "CHEATS" }),
       });
       const form = new FormData();
       // A 68000 lives counter: initialise a byte to three, decrement it, and
@@ -29,10 +33,10 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
         0x53, 0x38, 0x12, 0x34,
         0x67, 0x06,
         0x4E, 0x71, 0x4E, 0x71, 0x4E, 0x75,
-      ])], "GAME", { type: "application/octet-stream" }));
+      ])], "GAME.PRG", { type: "application/octet-stream" }));
       form.append("destination", "");
-      form.append("targetName", "GAME");
-      form.append("protection", "----rwed");
+      form.append("targetName", "GAME.PRG");
+      form.append("attributes", "-----a");
       const inserted = await fetch(`/api/images/${created.image.id}/files`, { method: "POST", body: form });
       if (!inserted.ok) throw new Error((await inserted.json()).error || "Could not create cheat-analysis fixture");
       localStorage.setItem("atari-file-forge-dynamic-panes", JSON.stringify([{
@@ -70,9 +74,9 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
       throw new Error("No machine-code cheat candidate was rendered");
     }
     const sourceBounds = await editor.locator(".disassembly-source").boundingBox();
-    const drawerBounds = await editor.locator(".code-intelligence-drawer-docked").boundingBox();
-    if (!sourceBounds || !drawerBounds || drawerBounds.x <= sourceBounds.x || drawerBounds.height < sourceBounds.height * 0.75) {
-      throw new Error(`Cheat report did not dock to the right at editor height: ${JSON.stringify({ sourceBounds, drawerBounds })}`);
+    const panelBounds = await editor.locator(".code-intelligence-drawer-docked").boundingBox();
+    if (!sourceBounds || !panelBounds || panelBounds.x <= sourceBounds.x || panelBounds.height < sourceBounds.height * 0.75) {
+      throw new Error(`Cheat report did not dock to the right at editor height: ${JSON.stringify({ sourceBounds, panelBounds })}`);
     }
     const splitter = editor.locator(".code-editor-drawer-splitter");
     const splitterBounds = await splitter.boundingBox();
@@ -81,9 +85,9 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
     await page.mouse.down();
     await page.mouse.move(splitterBounds.x - 60, splitterBounds.y + splitterBounds.height / 2, { steps: 4 });
     await page.mouse.up();
-    const resizedDrawer = await editor.locator(".code-intelligence-drawer-docked").boundingBox();
-    if (!resizedDrawer || resizedDrawer.width < drawerBounds.width + 40) {
-      throw new Error(`Dragging the splitter did not enlarge the cheat panel: ${JSON.stringify({ drawerBounds, resizedDrawer })}`);
+    const resizedPanel = await editor.locator(".code-intelligence-drawer-docked").boundingBox();
+    if (!resizedPanel || resizedPanel.width < panelBounds.width + 40) {
+      throw new Error(`Dragging the splitter did not enlarge the cheat panel: ${JSON.stringify({ panelBounds, resizedPanel })}`);
     }
     const firstCandidate = editor.locator(".cheat-candidate").first();
     const navigation = JSON.parse(await firstCandidate.getAttribute("data-cheat-navigation"));

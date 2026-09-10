@@ -1,3 +1,7 @@
+// UNVERIFIED against a live server: this branch ports the frontend only,
+// so the vocabulary, media, kinds, dialogs and drive names below have been
+// brought over but not run. The "is oversized" bounds are kept verbatim,
+// because they are the guard on the look and feel.
 const { chromium } = require("playwright");
 
 const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
@@ -18,13 +22,13 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
       const data = await window.AtariUI.api("/api/images/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ format: "adf", title: "COLLECT" }),
+        body: JSON.stringify({ format: "ds-720k", title: "COLLECT" }),
       });
       localStorage.setItem("atari-file-forge-dynamic-panes", JSON.stringify([{
         imageId: data.image.id,
         slot: null,
         side: null,
-        path: "$",
+        path: "",
         windowState: { x: 20, y: 20, width: 1200, height: 720, z: 1, minimized: false, snap: "", restore: null },
       }]));
       return data.image.id;
@@ -33,18 +37,18 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
     page = await context.newPage();
     await page.goto(target, { waitUntil: "domcontentloaded" });
     try {
-      await page.waitForFunction(() => document.querySelector(".pane .image-title")?.textContent.includes("blank.adf"));
+      await page.waitForFunction(() => document.querySelector(".pane .image-title")?.textContent.includes("blank.st"));
     } catch (error) {
       const state = await page.evaluate(() => ({ saved: localStorage.getItem("atari-file-forge-dynamic-panes"), titles: [...document.querySelectorAll(".pane .image-title")].map(item => item.textContent), text: document.body.innerText.slice(0, 800) }));
       throw new Error(`Collection fixture pane was not restored: ${JSON.stringify(state)} · ${error.message}`);
     }
     await page.locator("#collectionButton").click();
-    await page.locator('[name="collectionLocation"]').fill("Workbench SD card");
-    await page.locator('[name="collectionMachines"]').fill("Atari B, Atari 600");
+    await page.locator('[name="collectionLocation"]').fill("Gotek USB stick");
+    await page.locator('[name="collectionMachines"]').fill("Atari 1040STE, Atari Mega ST");
     await page.locator("[data-index-pane]").click();
     await page.locator('.collection-list tr[data-collection-id]').waitFor({ state: "visible" });
     const row = page.locator('.collection-list tr[data-collection-id]').first();
-    if (!await row.textContent().then(value => value.includes("Workbench SD card") && value.includes("Atari B"))) {
+    if (!await row.textContent().then(value => value.includes("Gotek USB stick") && value.includes("Atari 1040STE"))) {
       throw new Error("Indexed collection metadata was not rendered");
     }
     await page.locator('#modalContent button[value="cancel"]').click();
