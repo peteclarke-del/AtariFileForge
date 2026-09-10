@@ -6,6 +6,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.disk_service import DiskError, DiskService, ImageSession
+from tests.msa_fixture import DS_720K, blank_image
+
+#: The everyday double-sided 720 KiB ST floppy, which is what HxCFE decodes a
+#: flux capture of one back to.
+DECODED_SIZE = DS_720K.size
+
+#: A shape HxCFE's ST loader has no counterpart for, so its sectors cannot be
+#: wrapped as flux: the 40-track 180 KiB PC disk.
+NO_FLUX_SIZE = 184_320
 
 
 def _write_output(arguments: list[str], content: bytes) -> None:
@@ -31,19 +40,20 @@ class ScpTests(unittest.TestCase):
                 if any(argument.startswith("-conv:SCP_FLUX_STREAM") for argument in arguments):
                     _write_output(arguments, b"SCP" + bytes(100))
                 else:
-                    _write_output(arguments, bytes(901_120))
+                    _write_output(arguments, bytes(DECODED_SIZE))
                 return ""
 
             with (
                 patch.object(service, "_run_hxcfe", side_effect=convert),
                 patch.object(service, "_run", return_value=""),
-                patch.object(service, "identify_kind", return_value="ofs"),
+                patch.object(service, "identify_kind", return_value="gemdos"),
             ):
                 working, kind, original_path, read_only, warnings = service._open_scp(original)
-            self.assertEqual(kind, "ofs")
+            self.assertEqual(kind, "gemdos")
             self.assertEqual(original_path, original)
             self.assertFalse(read_only)
             self.assertTrue(working.is_file())
+            self.assertEqual(working.suffix, ".st")
             self.assertTrue(any("Opened SCP flux capture" in warning for warning in warnings))
 
     def test_open_scp_marks_non_round_tripping_capture_read_only(self) -> None:
@@ -58,17 +68,63 @@ class ScpTests(unittest.TestCase):
                 elif any(argument.startswith("-finput") and "open-check" in argument for argument in arguments):
                     _write_output(arguments, bytes(1))
                 else:
-                    _write_output(arguments, bytes(901_120))
+                    _write_output(arguments, bytes(DECODED_SIZE))
                 return ""
 
             with (
                 patch.object(service, "_run_hxcfe", side_effect=convert),
                 patch.object(service, "_run", return_value=""),
-                patch.object(service, "identify_kind", return_value="ofs"),
+                patch.object(service, "identify_kind", return_value="gemdos"),
             ):
                 _working, _kind, _original, read_only, warnings = service._open_scp(original)
             self.assertTrue(read_only)
             self.assertTrue(any("read-only" in warning for warning in warnings))
+
+    def test_the_encoder_names_no_layout_and_relies_on_the_st_suffix(self) -> None:
+        """HxCFE picks its ST loader from the suffix and reads the boot sector.
+
+        Passing a layout name would override the shape the disk itself
+        declares, so the encode must not name one. What it must do instead is
+        hand HxCFE a file called ``.st``.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            original = Path(folder) / "capture.scp"
+            original.write_bytes(b"SCP" + bytes(100))
+            service = DiskService(Path(folder) / "work")
+            seen: list[list[str]] = []
+
+            def convert(arguments):
+                seen.append(list(arguments))
+                if any(argument.startswith("-conv:SCP_FLUX_STREAM") for argument in arguments):
+                    _write_output(arguments, b"SCP" + bytes(100))
+                else:
+                    _write_output(arguments, bytes(DECODED_SIZE))
+                return ""
+
+            with (
+                patch.object(service, "_run_hxcfe", side_effect=convert),
+                patch.object(service, "_run", return_value=""),
+                patch.object(service, "identify_kind", return_value="gemdos"),
+            ):
+                service._open_scp(original)
+
+            encodes = [
+                arguments
+                for arguments in seen
+                if any(item.startswith("-conv:SCP_FLUX_STREAM") for item in arguments)
+            ]
+            self.assertTrue(encodes)
+            for arguments in encodes:
+                self.assertFalse(
+                    [item for item in arguments if item.startswith("-uselayout")],
+                    arguments,
+                )
+                sectors = next(
+                    item.removeprefix("-finput:")
+                    for item in arguments
+                    if item.startswith("-finput:")
+                )
+                self.assertEqual(Path(sectors).suffix, ".st")
 
     def test_open_scp_rejects_non_atari_filesystem(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -77,7 +133,7 @@ class ScpTests(unittest.TestCase):
             service = DiskService(Path(folder) / "work")
 
             def convert(arguments):
-                _write_output(arguments, bytes(901_120))
+                _write_output(arguments, bytes(DECODED_SIZE))
                 return ""
 
             with (
@@ -93,12 +149,12 @@ class ScpTests(unittest.TestCase):
 
     def test_read_only_scp_session_cannot_be_edited(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
-            image = Path(folder) / "decoded.adf"
+            image = Path(folder) / "decoded.st"
             image.write_bytes(b"")
             session = ImageSession(
                 "a" * 32,
                 "protected.scp",
-                "ofs",
+                "gemdos",
                 image,
                 scp_original_path=Path(folder) / "protected.scp",
                 scp_read_only=True,
@@ -116,18 +172,18 @@ class ScpTests(unittest.TestCase):
                 if any(argument.startswith("-conv:SCP_FLUX_STREAM") for argument in arguments):
                     _write_output(arguments, b"SCP" + bytes(100))
                 else:
-                    _write_output(arguments, bytes(901_120 - 512))
+                    _write_output(arguments, bytes(DECODED_SIZE - 512))
                 return "Invalid rpm or tracklen"
 
             with (
                 patch.object(service, "_run_hxcfe", side_effect=convert),
                 patch.object(service, "_run", return_value=""),
-                patch.object(service, "identify_kind", return_value="ffs"),
+                patch.object(service, "identify_kind", return_value="gemdos"),
             ):
                 working, kind, _original, _read_only, warnings = service._open_scp(original)
-            self.assertEqual(kind, "ffs")
-            self.assertEqual(working.suffix, ".adf")
-            self.assertEqual(working.stat().st_size, 901_120)
+            self.assertEqual(kind, "gemdos")
+            self.assertEqual(working.suffix, ".st")
+            self.assertEqual(working.stat().st_size, DECODED_SIZE)
             self.assertTrue(any("restored the declared floppy geometry" in row for row in warnings))
             self.assertTrue(any("non-standard index timing" in row for row in warnings))
 
@@ -138,13 +194,13 @@ class ScpTests(unittest.TestCase):
             service = DiskService(Path(folder) / "work")
 
             def convert(arguments):
-                _write_output(arguments, bytes(901_120))
+                _write_output(arguments, bytes(DECODED_SIZE))
                 return ""
 
             with (
                 patch.object(service, "_run_hxcfe", side_effect=convert),
                 patch.object(service, "_run", side_effect=DiskError("Broken directory")),
-                patch.object(service, "identify_kind", return_value="ffs"),
+                patch.object(service, "identify_kind", return_value="gemdos"),
             ):
                 with self.assertRaisesRegex(DiskError, "complete directory tree is not safe"):
                     service._open_scp(original)
@@ -157,79 +213,91 @@ class ScpTests(unittest.TestCase):
             with self.assertRaisesRegex(DiskError, "valid SuperCard Pro SCP signature"):
                 service._open_scp(original)
 
-    def test_export_formats_offer_flux_containers_for_ofs_and_ffs(self) -> None:
+    def test_export_formats_offer_flux_containers_for_a_gemdos_floppy(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            ofs_image = Path(folder) / "disk.adf"
-            ofs_image.write_bytes(bytes(901_120))
-            ofs_session = ImageSession("a" * 32, "disk.adf", "ofs", ofs_image)
-            formats = {entry["format"] for entry in service.export_formats(ofs_session)}
-            self.assertEqual(formats, {"native", "adz", "hfe", "scp"})
+            image = Path(folder) / "disk.st"
+            image.write_bytes(bytes(DECODED_SIZE))
+            session = ImageSession("a" * 32, "disk.st", "gemdos", image)
+            formats = {entry["format"] for entry in service.export_formats(session)}
+            self.assertEqual(formats, {"native", "msa", "dim", "hfe", "scp"})
 
-            ffs_image = Path(folder) / "ffs.adf"
-            ffs_image.write_bytes(bytes(901_120))
-            ffs_session = ImageSession("b" * 32, "ffs.adf", "ffs", ffs_image)
+            second = Path(folder) / "other.st"
+            second.write_bytes(bytes(DS_720K.size))
+            second_session = ImageSession("b" * 32, "other.st", "gemdos", second)
             self.assertEqual(
-                {entry["format"] for entry in service.export_formats(ffs_session)},
-                {"native", "adz", "hfe", "scp"},
+                {entry["format"] for entry in service.export_formats(second_session)},
+                {"native", "msa", "dim", "hfe", "scp"},
             )
 
-            ffs_d = Path(folder) / "disk.adf"
-            ffs_d.write_bytes(bytes(800 * 1024))
-            ffs_d_session = ImageSession("c" * 32, "disk.adf", "ffs", ffs_d)
+            # A 40-track PC disk is a floppy TOS can read, but HxCFE's ST
+            # loader has no shape to read the flux back as, so only the
+            # sector containers are offered.
+            pc_image = Path(folder) / "pc.st"
+            pc_image.write_bytes(bytes(NO_FLUX_SIZE))
+            pc_session = ImageSession("c" * 32, "pc.st", "gemdos", pc_image)
             self.assertEqual(
-                {entry["format"] for entry in service.export_formats(ffs_d_session)},
-                {"native"},
+                {entry["format"] for entry in service.export_formats(pc_session)},
+                {"native", "msa", "dim"},
             )
 
     def test_export_formats_empty_for_media_that_is_not_a_filing_system(self) -> None:
-        """A ROM or a DMS archive has no decoded sectors to write elsewhere."""
+        """A ROM or a CD image has no GEMDOS sectors to write elsewhere."""
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            for kind, name in (("rom", "kick.rom"), ("dms", "game.dms")):
+            for kind, name in (("rom", "cartridge.rom"), ("iso", "disc.iso")):
                 image = Path(folder) / name
                 image.write_bytes(bytes(1024))
                 session = ImageSession("a" * 32, name, kind, image)
                 self.assertEqual(service.export_formats(session), [], kind)
 
-    def test_a_hard_drive_is_offered_the_conversion_it_does_not_already_have(self) -> None:
+    def test_a_hard_drive_is_offered_only_its_own_sector_image(self) -> None:
+        """Neither a partitioned drive nor a bare volume has a floppy container.
+
+        MSA, DIM, HFE and SCP all describe a floppy, so a drive is offered its
+        own sectors and nothing else. Which sector image that is still differs:
+        a partitioned drive writes ``.img`` and a bare volume writes ``.st``.
+        """
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            image = Path(folder) / "drive.hdf"
+            image = Path(folder) / "drive.img"
             image.write_bytes(bytes(8 * 1024 * 1024))
-            partitioned = ImageSession("a" * 32, "drive.hdf", "hdf", image)
+            partitioned = ImageSession("a" * 32, "drive.img", "hd", image)
             self.assertEqual(
-                {row["format"] for row in service.export_formats(partitioned)},
-                {"native", "hardfile"},
+                [
+                    (row["format"], row["extension"])
+                    for row in service.export_formats(partitioned)
+                ],
+                [("native", "img")],
             )
-            bare = ImageSession("b" * 32, "drive.hdf", "ffs", image)
+            bare = ImageSession("b" * 32, "drive.img", "gemdos", image)
             self.assertEqual(
-                {row["format"] for row in service.export_formats(bare)},
-                {"native", "rdb"},
+                [(row["format"], row["extension"]) for row in service.export_formats(bare)],
+                [("native", "st")],
             )
 
     def test_export_native_copies_current_sectors_with_canonical_extension(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            image = Path(folder) / "disk.adf"
-            image.write_bytes(b"payload" + bytes(901_120 - 7))
-            session = ImageSession("a" * 32, "disk.adf", "ofs", image)
+            image = Path(folder) / "disk.st"
+            image.write_bytes(b"payload" + bytes(DECODED_SIZE - 7))
+            session = ImageSession("a" * 32, "disk.st", "gemdos", image)
             output, name = service.export_image(session, "native")
             self.assertEqual(output.read_bytes(), image.read_bytes())
-            self.assertTrue(name.endswith(".adf"))
+            self.assertTrue(name.endswith(".st"))
 
     def test_export_scp_verifies_round_trip_before_returning(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            image = Path(folder) / "disk.adf"
-            image.write_bytes(bytes(901_120))
-            session = ImageSession("a" * 32, "disk.adf", "ofs", image)
+            image = Path(folder) / "disk.st"
+            image.write_bytes(bytes(DECODED_SIZE))
+            session = ImageSession("a" * 32, "disk.st", "gemdos", image)
 
             def convert(arguments):
                 if any(argument.startswith("-conv:SCP_FLUX_STREAM") for argument in arguments):
                     _write_output(arguments, b"SCP-EXPORT")
                 else:
-                    _write_output(arguments, bytes(901_120))
+                    _write_output(arguments, bytes(DECODED_SIZE))
                 return ""
 
             with patch.object(service, "_run_hxcfe", side_effect=convert):
@@ -240,9 +308,9 @@ class ScpTests(unittest.TestCase):
     def test_export_rejects_encoding_that_fails_to_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            image = Path(folder) / "disk.adf"
-            image.write_bytes(bytes(901_120))
-            session = ImageSession("a" * 32, "disk.adf", "ofs", image)
+            image = Path(folder) / "disk.st"
+            image.write_bytes(bytes(DECODED_SIZE))
+            session = ImageSession("a" * 32, "disk.st", "gemdos", image)
 
             def convert(arguments):
                 if any(argument.startswith("-conv:SCP_FLUX_STREAM") for argument in arguments):
@@ -258,9 +326,9 @@ class ScpTests(unittest.TestCase):
     def test_export_rejects_unavailable_format(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
-            image = Path(folder) / "disk.adf"
-            image.write_bytes(bytes(800 * 1024))
-            session = ImageSession("a" * 32, "disk.adf", "ffs", image)
+            image = Path(folder) / "disk.st"
+            image.write_bytes(bytes(NO_FLUX_SIZE))
+            session = ImageSession("a" * 32, "disk.st", "gemdos", image)
             with self.assertRaisesRegex(DiskError, "not an available export format"):
                 service.export_image(session, "hfe")
 
@@ -286,7 +354,7 @@ class ScpSaveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
             session = self._session(
-                folder, suffix=".adf", size=901_120, kind="ofs", dirty=False
+                folder, suffix=".st", size=DECODED_SIZE, kind="gemdos", dirty=False
             )
             with patch.object(service, "_run_hxcfe") as engine:
                 output = service._prepare_scp_download(session)
@@ -297,14 +365,14 @@ class ScpSaveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
             session = self._session(
-                folder, suffix=".adf", size=901_120, kind="ofs", dirty=True
+                folder, suffix=".st", size=DECODED_SIZE, kind="gemdos", dirty=True
             )
 
             def convert(arguments):
                 if any(item.startswith("-conv:SCP_FLUX_STREAM") for item in arguments):
                     _write_output(arguments, b"REBUILT-SCP")
                 else:
-                    _write_output(arguments, bytes(901_120))
+                    _write_output(arguments, bytes(DECODED_SIZE))
                 return ""
 
             with patch.object(service, "_run_hxcfe", side_effect=convert):
@@ -313,24 +381,24 @@ class ScpSaveTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"REBUILT-SCP")
             self.assertEqual(session.scp_export_path, output)
 
-    def test_edited_ffs_save_survives_an_omitted_tail_sector(self) -> None:
+    def test_edited_session_save_survives_an_omitted_tail_sector(self) -> None:
         """Regression: the SCP save path once lacked the tail-sector repair.
 
         HxCFE can drop the blank final sector when decoding its own
-        output. Without the repair the verification compared 900,608 bytes
-        against 901,120 and refused a save that was in fact byte-exact.
+        output. Without the repair the verification compared 736,768 bytes
+        against 737,280 and refused a save that was in fact byte-exact.
         """
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
             session = self._session(
-                folder, suffix=".adf", size=901_120, kind="ffs", dirty=True
+                folder, suffix=".st", size=DECODED_SIZE, kind="gemdos", dirty=True
             )
 
             def convert(arguments):
                 if any(item.startswith("-conv:SCP_FLUX_STREAM") for item in arguments):
                     _write_output(arguments, b"REBUILT-SCP")
                 else:
-                    _write_output(arguments, bytes(901_120 - 512))
+                    _write_output(arguments, bytes(DECODED_SIZE - 512))
                 return ""
 
             with patch.object(service, "_run_hxcfe", side_effect=convert):
@@ -341,14 +409,14 @@ class ScpSaveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
             session = self._session(
-                folder, suffix=".adf", size=901_120, kind="ofs", dirty=True
+                folder, suffix=".st", size=DECODED_SIZE, kind="gemdos", dirty=True
             )
 
             def convert(arguments):
                 if any(item.startswith("-conv:SCP_FLUX_STREAM") for item in arguments):
                     _write_output(arguments, b"REBUILT-SCP")
                 else:
-                    _write_output(arguments, b"\xFF" * 901_120)
+                    _write_output(arguments, b"\xFF" * DECODED_SIZE)
                 return ""
 
             with patch.object(service, "_run_hxcfe", side_effect=convert):
@@ -360,7 +428,7 @@ class ScpSaveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             service = DiskService(Path(folder) / "work")
             session = self._session(
-                folder, suffix=".adf", size=901_120, kind="ofs", dirty=True
+                folder, suffix=".st", size=DECODED_SIZE, kind="gemdos", dirty=True
             )
             session.scp_read_only = True
             with patch.object(service, "_run_hxcfe") as engine:
@@ -377,14 +445,14 @@ class ScpSessionPersistenceTests(unittest.TestCase):
         image_id = "b" * 32
         folder = work / image_id
         folder.mkdir(parents=True, exist_ok=True)
-        working = folder / "capture.adf"
-        working.write_bytes(bytes(901_120))
+        working = folder / "capture.st"
+        working.write_bytes(blank_image(DS_720K))
         original = folder / "capture.scp"
         original.write_bytes(b"SCP" + bytes(100))
         session = ImageSession(
             image_id,
             "capture.scp",
-            "ofs",
+            "gemdos",
             working,
             scp_original_path=original,
             scp_read_only=read_only,
@@ -474,7 +542,7 @@ class FluxSavePolicyTests(unittest.TestCase):
             with self.subTest(container=container):
                 with tempfile.TemporaryDirectory() as folder:
                     service, session, convert = self._prepared(
-                        folder, container, "ffs", 901_120, ".adf"
+                        folder, container, "gemdos", DECODED_SIZE, ".st"
                     )
                     with patch.object(service, "_run_hxcfe", side_effect=convert):
                         output = getattr(service, f"_prepare_{container}_download")(session)
@@ -486,7 +554,7 @@ class FluxSavePolicyTests(unittest.TestCase):
             with self.subTest(container=container):
                 with tempfile.TemporaryDirectory() as folder:
                     service, session, convert = self._prepared(
-                        folder, container, "ofs", 901_120, ".adf"
+                        folder, container, "gemdos", DECODED_SIZE, ".st"
                     )
                     seen: list[list[str]] = []
 
@@ -504,6 +572,34 @@ class FluxSavePolicyTests(unittest.TestCase):
                     )
                     original = getattr(session, f"{container}_original_path")
                     self.assertEqual(reference, f"-reffile:{original}")
+
+    def test_neither_container_names_a_layout_when_encoding(self) -> None:
+        """No ``-uselayout`` on either side of the shared encoder.
+
+        HxCFE settles a ``.st`` image's shape from its boot sector, so naming
+        a layout would replace the disk's own word on the matter with a name
+        the geometry table would have to be kept in step with by hand.
+        """
+        for container in ("hfe", "scp"):
+            with self.subTest(container=container):
+                with tempfile.TemporaryDirectory() as folder:
+                    service, session, convert = self._prepared(
+                        folder, container, "gemdos", DECODED_SIZE, ".st"
+                    )
+                    seen: list[list[str]] = []
+
+                    def record(arguments):
+                        seen.append(list(arguments))
+                        return convert(arguments)
+
+                    with patch.object(service, "_run_hxcfe", side_effect=record):
+                        getattr(service, f"_prepare_{container}_download")(session)
+                    self.assertTrue(seen)
+                    for arguments in seen:
+                        self.assertFalse(
+                            [item for item in arguments if item.startswith("-uselayout")],
+                            arguments,
+                        )
 
 
 if __name__ == "__main__":
