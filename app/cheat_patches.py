@@ -3,6 +3,11 @@
 The module does not claim that user observations prove gameplay semantics. It
 does ensure a reviewed patch can only touch the bytes and source revision that
 were actually examined.
+
+The hardware profile travels with the record because the same title is
+released differently for different machines: a patch tested on a plain ``st``
+with TOS 1.04 and a megabyte of memory is evidence about that build, and the
+record says so rather than implying it holds everywhere.
 """
 
 from __future__ import annotations

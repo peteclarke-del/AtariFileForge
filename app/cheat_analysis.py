@@ -1,4 +1,17 @@
-"""Conservative cheat-candidate analysis for BASIC and machine-code files."""
+"""Conservative cheat-candidate analysis for BASIC and machine-code files.
+
+The BASIC pass works on the listing text rather than on any one dialect's
+tokens, because an ST carries three of them and a game is as likely to be
+written in one as another. GFA BASIC, STOS and ST BASIC all spell a lives
+counter the same way in a listing: a named variable, a subtraction, and a test
+against zero. Reading the words means the same analysis covers all three, and
+covers a listing typed in a dialect nobody here has heard of.
+
+The machine-code pass is 68000, and its one piece of machine knowledge is where
+the hardware lives. A decrement of a register in the ST's I/O area is a
+timer, a sound channel or a disk controller, never a lives counter, and
+offering it as a cheat candidate wastes the reader's afternoon.
+"""
 
 from __future__ import annotations
 
@@ -22,18 +35,54 @@ _GAMEPLAY_TERMS = {
 _SEMANTIC_VARIABLE = re.compile(
     r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]*(?:[$%&])?)(?![A-Za-z0-9_$%&])", re.I,
 )
+#: A line number is optional. ST BASIC numbers its lines; a GFA BASIC or STOS
+#: listing usually does not, so the physical line stands in for one.
 _BASIC_LINE = re.compile(r"^\s*(\d+)\s*(.*)$")
-_ASSIGNMENT = re.compile(r"(?<![<>=])\b([A-Za-z][A-Za-z0-9_]*(?:[$%&])?)\s*=\s*([^:]+)", re.I)
+
+#: A variable may carry a dialect's type marker: ``%`` for an integer, ``$``
+#: for a string, ``&`` for a word and ``|`` for a byte in GFA BASIC.
+_ASSIGNMENT = re.compile(r"(?<![<>=])\b([A-Za-z][A-Za-z0-9_]*(?:[$%&|])?)\s*=\s*([^:]+)", re.I)
+
+#: A counter changed by a statement rather than by an assignment. Both GFA
+#: BASIC and STOS spell "one fewer life" as ``DEC LIVES%``, and GFA also writes
+#: ``SUB LIVES%,1``. A scan that only reads assignments sees neither of them.
+_COUNTER_STATEMENT = re.compile(
+    r"(?<![A-Za-z0-9_])(DEC|INC|SUB|ADD)\s+([A-Za-z][A-Za-z0-9_]*(?:[$%&|])?)"
+    r"(?:\s*,\s*([^:]+))?", re.I,
+)
+
+#: A write straight into memory, in the spellings the ST dialects use. GFA
+#: BASIC writes ``POKE``, ``DPOKE`` and ``LPOKE`` and the ``BYTE{}``,
+#: ``WORD{}`` and ``LONG{}`` forms; STOS writes ``POKE``, ``DOKE`` and
+#: ``LOKE``; ST BASIC writes ``POKE``. They differ only in width.
 _MEMORY_WRITE = re.compile(
-    r"(?<![A-Za-z0-9_])((?:[A-Za-z][A-Za-z0-9_]*%?|&[0-9A-F]+|\d+)?\s*[?!]\s*"
-    r"(?:[A-Za-z][A-Za-z0-9_]*%?|&[0-9A-F]+|\d+))\s*=\s*([^:]+)", re.I,
+    r"(?<![A-Za-z0-9_])(?:"
+    r"(?P<call>LPOKE|DPOKE|DOKE|LOKE|POKE)\s+(?P<target>[^,:]+?)\s*,\s*(?P<value>[^:]+)"
+    r"|(?P<size>BYTE|WORD|LONG|CARD)\s*\{(?P<braced>[^}]+)\}\s*=\s*(?P<braced_value>[^:]+)"
+    r")", re.I,
 )
 _CONDITION = re.compile(
     r"\bIF\s*([^:]+?)(?:\s+THEN\b|\s+GOTO\b|\s+GOSUB\b)", re.I,
 )
-_DIRECT_ADDRESS = re.compile(r"(?:^|[^A-Za-z0-9_])&([0-9A-F]{2,6})\b", re.I)
-_SMALL_INTEGER = re.compile(r"^\s*(?:&([0-9A-F]+)|(\d+))\s*$", re.I)
-_TRAINER_BYTES = {0xEA: "NOP", 0x60: "RTS", 0x4C: "JMP", 0x2C: "BIT"}
+
+#: Hexadecimal is written ``$FF8240`` in GFA BASIC and STOS and ``&HFF8240``
+#: in the Microsoft-descended dialects, so both are read.
+_DIRECT_ADDRESS = re.compile(r"(?:^|[^A-Za-z0-9_])(?:\$|&H?)([0-9A-F]{2,8})\b", re.I)
+_SMALL_INTEGER = re.compile(r"^\s*(?:(?:\$|&H?)([0-9A-F]+)|(\d+))\s*$", re.I)
+_ONE = re.compile(r"^\s*(?:\$|&H?)?0*1\s*$", re.I)
+
+#: The 68000 instructions a trainer writes over the code it wants to skip.
+#: A poke of one of these is a patch rather than a change to a game variable,
+#: which is worth saying explicitly because the two look identical otherwise.
+_TRAINER_VALUES = {
+    0x4E71: "NOP",
+    0x4E75: "RTS",
+    0x4E73: "RTE",
+    0x4EF9: "JMP",
+    0x6000: "BRA",
+    0x4E: "the high byte of NOP, RTS or JMP",
+    0x60: "the high byte of BRA",
+}
 _REFERENCE_SOURCES = json.loads(
     Path(__file__).with_name("cheat_sources.json").read_text("utf-8")
 )
@@ -79,8 +128,25 @@ def _candidate(
     }
 
 
+def _signal(variable: str) -> dict:
+    """A fresh record of everything one BASIC variable is seen doing."""
+    return {
+        "name": variable,
+        "category": _category(variable, "counter"),
+        "semantic": bool(_category(variable, "")),
+        "updates": [],
+        "initial": [],
+        "tests": [],
+    }
+
+
 def analyse_basic(source: str) -> list[dict]:
-    """Find gameplay-state and direct-memory evidence in an ST BASIC listing."""
+    """Find gameplay-state and direct-memory evidence in a BASIC listing.
+
+    Written against the listing rather than against a dialect: a GFA BASIC,
+    STOS or ST BASIC program all name a lives counter, subtract from it and
+    test it against zero in the same recognisable shape.
+    """
     findings: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     lines = []
@@ -96,8 +162,8 @@ def analyse_basic(source: str) -> list[dict]:
             if "IF" in statement_prefix and not re.search(r"\b(?:THEN|ELSE)\b", statement_prefix):
                 continue
             key = variable.casefold()
-            signal = variables.setdefault(key, {"name": variable, "category": _category(variable, "counter"), "semantic": bool(_category(variable, "")), "updates": [], "initial": [], "tests": []})
-            reference = rf"(?<![A-Za-z0-9_]){re.escape(variable)}(?![A-Za-z0-9_$%&])"
+            signal = variables.setdefault(key, _signal(variable))
+            reference = rf"(?<![A-Za-z0-9_]){re.escape(variable)}(?![A-Za-z0-9_$%&|])"
             if re.search(rf"{reference}\s*-\s*(?:1|&1)\b", expression, re.I):
                 signal["updates"].append((line_number, expression.strip(), "decrement"))
             elif re.search(rf"{reference}\s*\+\s*(?:1|&1)\b", expression, re.I):
@@ -108,13 +174,24 @@ def analyse_basic(source: str) -> list[dict]:
                     value = int(numeric.group(1), 16) if numeric.group(1) else int(numeric.group(2))
                     if 0 <= value <= 99:
                         signal["initial"].append((line_number, value))
+        for statement in _COUNTER_STATEMENT.finditer(code):
+            keyword, variable, argument = statement.groups()
+            # DEC and INC take no amount; SUB and ADD are only a counter update
+            # when the amount is one, because "SUB SCORE%,BONUS%" is arithmetic.
+            if argument is not None and not _ONE.match(argument):
+                continue
+            signal = variables.setdefault(variable.casefold(), _signal(variable))
+            signal["updates"].append((
+                line_number,
+                f"{keyword.upper()} {variable}" + (f",{argument.strip()}" if argument else ""),
+                "decrement" if keyword.upper() in {"DEC", "SUB"} else "increment",
+            ))
         for condition in _CONDITION.finditer(code):
             expression = condition.group(1).strip()
             if not re.search(r"(?:=|<>|<=|>=|<|>)\s*(?:0|1|&0|&1)\b", expression, re.I):
                 continue
             for variable in _SEMANTIC_VARIABLE.findall(expression):
-                key = variable.casefold()
-                signal = variables.setdefault(key, {"name": variable, "category": _category(variable, "counter"), "semantic": bool(_category(variable, "")), "updates": [], "initial": [], "tests": []})
+                signal = variables.setdefault(variable.casefold(), _signal(variable))
                 signal["tests"].append((line_number, expression))
 
     line_code = {int(number): code for number, code in lines if str(number).isdigit()}
@@ -158,8 +235,14 @@ def analyse_basic(source: str) -> list[dict]:
     for line_number, code in lines:
         location = f"BASIC line {line_number}"
         for write in _MEMORY_WRITE.finditer(code):
-            target, value = write.groups()
+            fields = write.groupdict()
+            target = str(fields.get("target") or fields.get("braced") or "").strip()
+            value = str(fields.get("value") or fields.get("braced_value") or "").strip()
+            if not target or not value:
+                continue
+            written_as = str(fields.get("call") or fields.get("size") or "").upper()
             address = _DIRECT_ADDRESS.search(target)
+            region = hardware_region(f"&{address.group(1).upper()}") if address else ""
             category = _category(code, "memory-write")
             confidence = "strong" if category != "memory-write" else "possible"
             key = (location, "memory-write", target.casefold())
@@ -168,18 +251,39 @@ def analyse_basic(source: str) -> list[dict]:
             seen.add(key)
             numeric = _SMALL_INTEGER.match(value)
             numeric_value = (int(numeric.group(1), 16) if numeric and numeric.group(1) else int(numeric.group(2))) if numeric else None
-            trainer_opcode = _TRAINER_BYTES.get(numeric_value)
+            trainer_opcode = _TRAINER_VALUES.get(numeric_value)
+            # A write nobody has explained, to an address that means nothing to
+            # this analysis, is more likely to be display or sound setup than a
+            # cheat. It is only kept when the line says what it is for, or when
+            # the value written is an instruction a trainer would write.
             if not trainer_opcode and category == "memory-write":
                 continue
             findings.append(_candidate(
                 category="code-patch" if trainer_opcode else category,
                 confidence="strong" if trainer_opcode else confidence,
                 location=location,
-                summary=(f"Possible trainer patch writes {trainer_opcode} to {target.strip()}" if trainer_opcode else f"Direct byte or word write to {target.strip()}"),
-                evidence=f"The program writes {value.strip()} to {target.strip()}"
-                         + (f" at &{address.group(1).upper()}" if address else ""),
-                suggestion=("Compare the target bytes before and after the write. NOP, RTS, JMP and BIT are commonly used by trainers to bypass existing code." if trainer_opcode else "Trace this location while the relevant game value changes. A fixed value may expose a lives, energy, ammunition or timer store."),
-                risk="The address may hold screen, sound, loader or operating-system state rather than a game variable.",
+                summary=(
+                    f"Possible trainer patch writes {trainer_opcode} to {target}"
+                    if trainer_opcode else f"{written_as} writes directly to {target}"
+                ),
+                evidence=f"The program writes {value} to {target}"
+                         + (f" at &{address.group(1).upper()}" if address else "")
+                         + (f", which is in the {region}" if region else ""),
+                suggestion=(
+                    "Compare the target bytes before and after the write. NOP, RTS, "
+                    "RTE, JMP and BRA are what a trainer writes over the code it "
+                    "wants the game to skip."
+                    if trainer_opcode else
+                    "Trace this location while the relevant game value changes. A "
+                    "fixed value may expose a lives, energy, ammunition or timer store."
+                ),
+                risk=(
+                    f"This address is in the {region}, so the write is configuring the "
+                    "machine rather than changing a game variable."
+                    if region else
+                    "The address may hold screen, sound, loader or operating-system "
+                    "state rather than a game variable."
+                ),
                 navigation={"kind": "basic-line", "line": int(line_number)},
             ))
     return findings
@@ -197,9 +301,51 @@ def _address_value(value: str) -> int | None:
     return int(match.group(1), 16) if match else None
 
 
-def _is_hardware_address(value: str) -> bool:
+#: The Atari ST address map, as far as this analysis needs it: every region
+#: where a changing value is the machine rather than the game.
+#:
+#: A decrement of an MFP timer register, a write to a palette entry or a step
+#: of the sound chip's envelope counter all look exactly like a counter update
+#: and none of them is one. Offering them as cheat candidates buries the real
+#: findings, so they are excluded before scoring rather than shown and
+#: explained away afterwards.
+HARDWARE_REGIONS = (
+    # System variables: _hz_200, the vertical-blank queue, the screen base and
+    # the rest of what TOS keeps in low memory.
+    (0x000380, 0x0005FF, "TOS system variables"),
+    # The Mega STE and Falcon serial controller. It sits inside the I/O window
+    # below, so it is listed first: the regions are searched in order and the
+    # more specific name is the more useful one to report.
+    (0xFF8C80, 0xFF8C87, "SCC serial controller"),
+    # The I/O area proper: memory controller, shifter and palette, DMA with
+    # the floppy controller and the ACSI bus behind it, the sound chip, the
+    # STE's DMA sound and microwire, the blitter and the STE joypad ports.
+    (0xFF8000, 0xFF8FFF, "ST and STE hardware registers"),
+    # The MFP: timers A to D, the interrupt controller and the serial port.
+    (0xFFFA00, 0xFFFAFF, "MFP 68901"),
+    # The keyboard and MIDI ACIAs.
+    (0xFFFC00, 0xFFFCFF, "keyboard and MIDI ACIAs"),
+    # TOS itself, in both the places a machine may map it.
+    (0xE00000, 0xEFFFFF, "TOS ROM"),
+    (0xFC0000, 0xFEFFFF, "TOS ROM"),
+    # The cartridge port.
+    (0xFA0000, 0xFBFFFF, "cartridge port"),
+)
+
+
+def hardware_region(value: str) -> str:
+    """Name the machine region an address falls in, or return an empty string."""
     address = _address_value(value)
-    return address is not None and 0xFC00 <= address <= 0xFEFF
+    if address is None:
+        return ""
+    return next(
+        (name for low, high, name in HARDWARE_REGIONS if low <= address <= high),
+        "",
+    )
+
+
+def _is_hardware_address(value: str) -> bool:
+    return bool(hardware_region(value))
 
 
 def _small_immediate(operand: str) -> int | None:
@@ -214,8 +360,8 @@ def _small_immediate(operand: str) -> int | None:
 
 def _initialised_targets(rows: list[dict]) -> dict[str, list[tuple[int, int]]]:
     """Find constant-to-memory initialisation without pretending to emulate code."""
-    loads = {"LDA", "LDX", "LDY", "LDR", "LDRB", "MOV", "MOVE", "MOVE.B", "MOVE.W", "MOVE.L"}
-    stores = {"STA", "STX", "STY", "STR", "STRB", "MOVE", "MOVE.B", "MOVE.W", "MOVE.L"}
+    loads = {"MOVE", "MOVEA", "MOVEQ"}
+    stores = {"MOVE", "MOVEA", "MOVEQ", "CLR"}
     result: dict[str, list[tuple[int, int]]] = {}
     for index, row in enumerate(rows):
         if _operation(row.get("mnemonic")) not in stores:
@@ -223,8 +369,14 @@ def _initialised_targets(rows: list[dict]) -> dict[str, list[tuple[int, int]]]:
         target = _operand_address(str(row.get("operand") or ""))
         if not target or _is_hardware_address(target):
             continue
+        immediate = _small_immediate(str(row.get("operand") or ""))
+        if immediate is not None and 0 <= immediate <= 255:
+            # On the 68000 the constant and its destination are one
+            # instruction: MOVE.W #3,lives is the load and the store at once.
+            result.setdefault(target, []).append((int(row.get("address") or 0), immediate))
+            continue
         preceding = rows[max(0, index - 3):index]
-        control_flow = {"BEQ", "BNE", "BPL", "BMI", "BCC", "BCS", "BVC", "BVS", "BHI", "BLS", "BLE", "BLT", "BGE", "BGT", "JMP", "JSR", "RTS", "BRA", "BL", "BX", "BRK"}
+        control_flow = {"BEQ", "BNE", "BPL", "BMI", "BCC", "BCS", "BVC", "BVS", "BHI", "BLS", "BLE", "BLT", "BGE", "BGT", "JMP", "JSR", "RTS", "RTE", "BRA", "BSR", "DBRA", "DBF", "TRAP"}
         barrier = next((position for position, item in reversed(list(enumerate(preceding)))
                         if _operation(item.get("mnemonic")) in control_flow), None)
         if barrier is not None:
@@ -274,10 +426,10 @@ def analyse_disassembly(report: dict) -> list[dict]:
     rows = ([row for row in decoded if row.get("reachable")]
             if any("reachable" in row for row in decoded) else decoded)
     findings: list[dict] = []
-    decrement = {"DEC", "DEA", "SBC", "SUB", "SUBQ", "SUBS"}
-    comparison = {"CMP", "CMN", "TST", "BIT"}
-    stores = {"STA", "STZ", "STR", "STRB", "MOVE", "MOVEQ"}
-    branches = {"BEQ", "BNE", "BPL", "BMI", "BCC", "BCS", "BVC", "BVS", "BHI", "BLS", "BLE", "BLT", "BGE", "BGT", "CBZ", "CBNZ"}
+    decrement = {"SUB", "SUBQ", "SUBI", "SUBX"}
+    comparison = {"CMP", "CMPI", "CMPM", "TST", "BTST"}
+    stores = {"MOVE", "MOVEQ", "CLR"}
+    branches = {"BEQ", "BNE", "BPL", "BMI", "BCC", "BCS", "BVC", "BVS", "BHI", "BLS", "BLE", "BLT", "BGE", "BGT"}
     initialised = _initialised_targets(rows)
     for index, row in enumerate(rows):
         mnemonic = _operation(row.get("mnemonic"))
@@ -343,10 +495,10 @@ def analyse_disassembly(report: dict) -> list[dict]:
                 navigation={"kind": "disassembly", "address": address, "offset": int(row.get("offset") or 0)},
             ))
 
-        if mnemonic in {"SBC", "SUB", "SUBQ", "SUBS"} and _small_immediate(operand) == 1:
+        if mnemonic in {"SUB", "SUBQ", "SUBI"} and _small_immediate(operand) == 1:
             before = rows[max(0, index - 4):index]
             after = rows[index + 1:index + 5]
-            loaded = next((item for item in reversed(before) if _operation(item.get("mnemonic")) in {"LDA", "LDR", "LDRB", "MOVE"} and _operand_address(str(item.get("operand") or ""))), None)
+            loaded = next((item for item in reversed(before) if _operation(item.get("mnemonic")) in {"MOVE", "MOVEA"} and _operand_address(str(item.get("operand") or ""))), None)
             stored = next((item for item in after if _operation(item.get("mnemonic")) in stores and _operand_address(str(item.get("operand") or ""))), None)
             loaded_target = _operand_address(str((loaded or {}).get("operand") or ""))
             stored_target = _operand_address(str((stored or {}).get("operand") or ""))
@@ -374,7 +526,7 @@ def analyse_disassembly(report: dict) -> list[dict]:
                 ))
         if mnemonic in comparison and _small_immediate(operand) in {0, 1}:
             before = rows[max(0, index - 3):index]
-            loaded = next((item for item in reversed(before) if _operation(item.get("mnemonic")) in {"LDA", "LDR", "LDRB", "MOVE"} and _operand_address(str(item.get("operand") or ""))), None)
+            loaded = next((item for item in reversed(before) if _operation(item.get("mnemonic")) in {"MOVE", "MOVEA"} and _operand_address(str(item.get("operand") or ""))), None)
             loaded_target = _operand_address(str((loaded or {}).get("operand") or ""))
             branch = next((item for item in following if _operation(item.get("mnemonic")) in branches), None)
             test_category = _category(f"{context} {_branch_context(rows, branch)}", "")
