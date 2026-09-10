@@ -770,5 +770,54 @@ class WorkspaceMetadataTests(unittest.TestCase):
         self.assertEqual(kinds, {"rom-project", "rom-symbol", "rom-region"})
 
 
+class PreflightFindingTests(unittest.TestCase):
+    """Which name changes are worth telling the operator about."""
+
+    class _Session:
+        kind = "gemdos"
+        name = "TARGET.st"
+        hardware_profile = {}
+
+    def _report(self, names):
+        return preflight_report(None, self._Session(), {
+            "operation": "import-file",
+            "sourceKind": "host",
+            "targetKind": "gemdos",
+            "changes": [{"name": name, "type": "file"} for name in names],
+        })
+
+    def test_upper_casing_a_name_is_not_a_finding(self) -> None:
+        """GEMDOS stores names in upper case, so nothing has been lost.
+
+        Reporting one warning per file for the case alone buried the
+        truncations underneath it: a folder of eight ordinary files produced
+        eight warnings, of which one was about a name that really had been cut
+        short.
+        """
+        report = self._report(["stars.bas", "clock.bas", "tilemap.gfa"])
+        self.assertEqual(report["issues"], [])
+        self.assertEqual(
+            [item["targetName"] for item in report["items"]],
+            ["STARS.BAS", "CLOCK.BAS", "TILEMAP.GFA"],
+        )
+
+    def test_the_conversion_is_still_recorded_for_every_file(self) -> None:
+        """A quiet change is still a change, and the report says so."""
+        report = self._report(["stars.bas"])
+        self.assertEqual(
+            report["items"][0]["conversions"],
+            ["Filename stars.bas becomes STARS.BAS"],
+        )
+
+    def test_a_name_cut_to_eight_characters_is_a_finding(self) -> None:
+        report = self._report(["build_fixtures.py"])
+        self.assertEqual(len(report["issues"]), 1)
+        self.assertIn("BUILD_FI.PY", report["issues"][0]["message"])
+
+    def test_a_forbidden_character_is_a_finding(self) -> None:
+        report = self._report(["read me.txt"])
+        self.assertEqual(len(report["issues"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1485,8 +1485,19 @@ def preflight_report(service, session, payload: dict) -> dict:
         conversions = []
         losses = []
         if validate_name and normal != leaf:
-            issues.append({"severity": "warning", "item": offset, "message": f"{leaf} becomes {normal or 'FILE'}"})
+            # GEMDOS stores every name in upper case and compares without
+            # regard to case, so a name that only changed case has not lost
+            # anything and is not worth a finding. Warning about each one
+            # buried the truncations and character replacements that do
+            # matter under a warning for every file in the batch.
+            renamed_beyond_case = normal.casefold() != leaf.casefold()
             conversions.append(f"Filename {leaf} becomes {normal or 'FILE'}")
+            if renamed_beyond_case:
+                issues.append({
+                    "severity": "warning",
+                    "item": offset,
+                    "message": f"{leaf} becomes {normal or 'FILE'}",
+                })
         # What TOS does with a file is decided by its extension alone, so a
         # conversion that changes the extension changes how it is launched.
         _leaf_base, leaf_extension = split_extension(leaf)
