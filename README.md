@@ -160,6 +160,14 @@ established; the Atari filing system, the media formats, the ROM tools and the
 emulator integration are working; the workflows built on top of them are not
 all finished. The first version that can be called usable is `0.1.0`.
 
+The port is being done in layers, from the formats upward. As this handbook is
+written the disk service, the file editor and the archive browser are still
+being retargeted, and some modules in `app/` do not yet import cleanly from
+this tree, so a checkout of this baseline may not start. The engines listed
+below sit under those services, are complete, and are covered by their own
+tests. Run them directly through `python -m atarinut` while the services are
+being finished.
+
 What works now:
 
 - The GEMDOS filing system, read and written: FAT12 floppies and FAT16
@@ -1469,9 +1477,11 @@ image. The creation dialog then offers:
 | 880 KiB | 80 x 2 x 11 | 901,120 |
 | 1.44 MiB | 80 x 2 x 18, high density | 1,474,560 |
 
-The extended track counts, 81, 82 and 83, are offered for every single- and
-double-sided shape. They are what a formatter such as FastCopy squeezes onto a
-disk beyond the drive's nominal eighty. TOS allocates five FAT sectors on a
+The extended track counts, 81, 82 and 83, are what a formatter such as FastCopy
+squeezes onto a disk beyond the drive's nominal eighty. Every one of them is
+recognised and opened, on one or two sides, at nine, ten or eleven sectors.
+Creation offers them for the three double-sided shapes: `ds-720k-81` through
+`ds-880k-83`. TOS allocates five FAT sectors on a
 double-sided disk even though three would index the clusters; the engine does
 the same, so an image it formats is byte-compatible with a disk formatted on
 the machine.
@@ -2243,13 +2253,19 @@ because a wrong repair is worse than none.
 ## CD images and archives
 
 A good deal of ST and Falcon material was published on CD, so a disc is opened
-and browsed like any other read-only container. The ISO 9660 reader handles the
-Joliet and Rock Ridge naming schemes and the Atari extension that carries a
-file's attributes. It reads from the file rather than into memory, because a CD
-image runs to hundreds of megabytes. Everything on a disc reads as read-only,
-with the recording date.
+and browsed like any other read-only container. Three naming schemes have to be
+reconciled and real discs use all of them: the base upper-case 8.3 name with
+its version suffix, which is what MetaDOS hands to a GEMDOS program, and the
+proper names Joliet and Rock Ridge publish alongside it. Joliet is preferred,
+then Rock Ridge, then the base tree. The reader works from the file rather than
+into memory, because a CD image runs to hundreds of megabytes and a directory
+listing should not cost half a gigabyte of resident memory. Everything on a
+disc reads as read-only, with the date its directory record carries.
 
-ZIP and LZH archives open as bounded folder hierarchies in the same pane. LZH
+ZIP and LZH archives are intended to open as bounded folder hierarchies in the
+same pane. The archive browser is one of the modules still being retargeted, so
+whether an archive pane opens in this build depends on how far that work has
+got; the LZH decoder itself is finished and tested. LZH
 was the usual archive on the ST alongside ZIP, and it is decoded in-tree rather
 than through an external decompressor: three header levels and the `-lh0-`
 stored, `-lh4-` through `-lh7-` sliding-window and `-lhd-` directory methods
