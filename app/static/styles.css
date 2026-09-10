@@ -682,27 +682,27 @@ dialog:has(.deployment-assistant) { width: min(1080px, calc(100vw - 28px)); }
 .code-hover-help dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; margin: 2px 0 0; }
 .code-hover-help dt { color: var(--muted); font: 800 8px/1.45 DM Mono, monospace; letter-spacing: .05em; text-transform: uppercase; }
 .code-hover-help dd { min-width: 0; margin: 0; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
-.code-intelligence-drawer { flex: 0 1 240px; min-height: 120px; max-height: min(36vh, 300px); overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
-.code-editor-drawer-workspace { display: contents; }
-.file-inspector.code-drawer-docked-right .code-editor-drawer-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8px minmax(280px, var(--code-drawer-width, 40%)); flex: 1 1 160px; min-width: 0; min-height: 110px; gap: 0; overflow: hidden; }
-.code-editor-drawer-splitter { position: relative; z-index: 2; display: none; width: 8px; min-width: 8px; height: 100%; min-height: 40px; padding: 0; border: 0; background: transparent; cursor: col-resize; touch-action: none; }
-.code-drawer-docked-right .code-editor-drawer-splitter { display: block; }
-.code-editor-drawer-splitter::before { content: ""; position: absolute; inset: 0 3px; border-radius: 99px; background: var(--line-strong, var(--line)); transition: inset .12s ease, background .12s ease; }
-.code-editor-drawer-splitter:hover::before,
-.code-editor-drawer-splitter:focus-visible::before,
-.code-editor-drawer-workspace.resizing .code-editor-drawer-splitter::before { inset-inline: 2px; background: var(--teal); }
-.code-editor-drawer-splitter:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -2px; }
-.code-editor-drawer-workspace.resizing { user-select: none; }
-.file-inspector.code-drawer-docked-right .code-editor-surface,
-.file-inspector.code-drawer-docked-right .disassembly-source { width: auto; height: auto; min-height: 0; max-height: none; }
-.code-intelligence-drawer.code-intelligence-drawer-docked { width: auto; min-width: 0; min-height: 0; max-height: none; }
-.code-intelligence-drawer-docked .code-drawer-body { box-sizing: border-box; }
-.code-intelligence-drawer > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--cream); }
-.code-intelligence-drawer > header small { display: block; color: var(--teal); font: 700 7px DM Mono, monospace; letter-spacing: .1em; }
-.code-intelligence-drawer > header h3 { margin: 1px 0 0; font-size: 14px; }
-.code-drawer-close { width: 29px; height: 28px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 20px; }
-.code-drawer-close:hover { background: var(--danger); color: var(--on-accent); }
-.code-drawer-body { height: calc(100% - 49px); overflow: auto; padding: 10px; }
+.code-intelligence-panel { flex: 0 1 240px; min-height: 120px; max-height: min(36vh, 300px); overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.code-editor-panel-workspace { display: contents; }
+.file-inspector.code-panel-docked-right .code-editor-panel-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8px minmax(280px, var(--code-panel-width, 40%)); flex: 1 1 160px; min-width: 0; min-height: 110px; gap: 0; overflow: hidden; }
+.code-editor-panel-splitter { position: relative; z-index: 2; display: none; width: 8px; min-width: 8px; height: 100%; min-height: 40px; padding: 0; border: 0; background: transparent; cursor: col-resize; touch-action: none; }
+.code-panel-docked-right .code-editor-panel-splitter { display: block; }
+.code-editor-panel-splitter::before { content: ""; position: absolute; inset: 0 3px; border-radius: 99px; background: var(--line-strong, var(--line)); transition: inset .12s ease, background .12s ease; }
+.code-editor-panel-splitter:hover::before,
+.code-editor-panel-splitter:focus-visible::before,
+.code-editor-panel-workspace.resizing .code-editor-panel-splitter::before { inset-inline: 2px; background: var(--teal); }
+.code-editor-panel-splitter:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -2px; }
+.code-editor-panel-workspace.resizing { user-select: none; }
+.file-inspector.code-panel-docked-right .code-editor-surface,
+.file-inspector.code-panel-docked-right .disassembly-source { width: auto; height: auto; min-height: 0; max-height: none; }
+.code-intelligence-panel.code-intelligence-panel-docked { width: auto; min-width: 0; min-height: 0; max-height: none; }
+.code-intelligence-panel-docked .code-panel-body { box-sizing: border-box; }
+.code-intelligence-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--cream); }
+.code-intelligence-panel > header small { display: block; color: var(--teal); font: 700 7px DM Mono, monospace; letter-spacing: .1em; }
+.code-intelligence-panel > header h3 { margin: 1px 0 0; font-size: 14px; }
+.code-panel-close { width: 29px; height: 28px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 20px; }
+.code-panel-close:hover { background: var(--danger); color: var(--on-accent); }
+.code-panel-body { height: calc(100% - 49px); overflow: auto; padding: 10px; }
 .code-overview p, .code-empty-message, .code-help-detail p { margin: 0 0 9px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .code-overview h4 { margin: 10px 0 6px; font-size: 11px; }
 .code-command-chips, .code-reference-list { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -711,7 +711,7 @@ dialog:has(.deployment-assistant) { width: min(1080px, calc(100vw - 28px)); }
 .code-completion-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); gap: 4px; }
 .code-completion-list button { overflow: hidden; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); text-align: left; text-overflow: ellipsis; cursor: pointer; font: 9px DM Mono, monospace; }
 .code-completion-list button:hover { border-color: var(--teal); color: var(--teal); }
-.code-drawer-section-title { margin: 12px 0 5px; font-size: 10px; }
+.code-panel-section-title { margin: 12px 0 5px; font-size: 10px; }
 .code-snippet-list { display: grid; gap: 4px; }
 .code-snippet-list button { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 7px; padding: 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); text-align: left; cursor: pointer; }
 .code-snippet-list button:hover { border-color: var(--teal); }
@@ -789,20 +789,20 @@ dialog:has(.collection-dialog) { width: min(1120px, calc(100vw - 30px)); }
 .cheat-analysis-filters label { display: grid; gap: 4px; color: var(--muted); font: 8px DM Mono, monospace; letter-spacing: .07em; text-transform: uppercase; }
 .cheat-analysis-filters select { min-width: 0; border: 1px solid var(--input-border); border-radius: 7px; padding: 8px; background: var(--input-background); color: var(--ink); }
 .cheat-candidate-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: min(42vh, 430px); overflow: auto; gap: 7px; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog { display: flex; flex-direction: column; min-height: 100%; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog > header { display: none; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog > .help-warning { margin: 0; padding: 7px 8px; font-size: 10px; line-height: 1.4; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog > .operation-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 0; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog > .operation-summary span { gap: 1px; padding: 5px 3px; border-radius: 5px; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog > .operation-summary b { font-size: 13px; }
-.code-intelligence-drawer-docked .cheat-analysis-dialog > .operation-summary small { font-size: 8px; }
-.code-intelligence-drawer-docked .cheat-analysis-filters { grid-template-columns: 1fr 1fr; }
-.code-intelligence-drawer-docked .cheat-analysis-filters select { padding: 6px; font-size: 10px; }
-.code-intelligence-drawer-docked .cheat-candidate-list { grid-template-columns: 1fr; flex: 1 1 auto; max-height: none; min-height: 140px; }
-.code-intelligence-drawer-docked .cheat-candidate { padding: 10px; }
-.code-intelligence-drawer-docked .cheat-candidate small,
-.code-intelligence-drawer-docked .cheat-candidate p,
-.code-intelligence-drawer-docked .cheat-candidate em { font-size: 10px; line-height: 1.45; }
+.code-intelligence-panel-docked .cheat-analysis-dialog { display: flex; flex-direction: column; min-height: 100%; }
+.code-intelligence-panel-docked .cheat-analysis-dialog > header { display: none; }
+.code-intelligence-panel-docked .cheat-analysis-dialog > .help-warning { margin: 0; padding: 7px 8px; font-size: 10px; line-height: 1.4; }
+.code-intelligence-panel-docked .cheat-analysis-dialog > .operation-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 0; }
+.code-intelligence-panel-docked .cheat-analysis-dialog > .operation-summary span { gap: 1px; padding: 5px 3px; border-radius: 5px; }
+.code-intelligence-panel-docked .cheat-analysis-dialog > .operation-summary b { font-size: 13px; }
+.code-intelligence-panel-docked .cheat-analysis-dialog > .operation-summary small { font-size: 8px; }
+.code-intelligence-panel-docked .cheat-analysis-filters { grid-template-columns: 1fr 1fr; }
+.code-intelligence-panel-docked .cheat-analysis-filters select { padding: 6px; font-size: 10px; }
+.code-intelligence-panel-docked .cheat-candidate-list { grid-template-columns: 1fr; flex: 1 1 auto; max-height: none; min-height: 140px; }
+.code-intelligence-panel-docked .cheat-candidate { padding: 10px; }
+.code-intelligence-panel-docked .cheat-candidate small,
+.code-intelligence-panel-docked .cheat-candidate p,
+.code-intelligence-panel-docked .cheat-candidate em { font-size: 10px; line-height: 1.45; }
 .cheat-candidate { display: grid; gap: 5px; min-width: 0; padding: 9px; border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 7px; background: var(--paper); }
 .cheat-candidate { width: 100%; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
 .cheat-candidate:hover { border-color: var(--teal); border-left-color: var(--teal); background: color-mix(in srgb, var(--teal) 6%, var(--paper)); }
@@ -821,13 +821,13 @@ dialog:has(.collection-dialog) { width: min(1120px, calc(100vw - 30px)); }
   .collection-index-controls { grid-template-columns: 1fr 1fr; }
   .collection-reports { grid-template-columns: 1fr; }
   .cheat-candidate-list { grid-template-columns: 1fr; }
-  .file-inspector.code-drawer-docked-right .code-editor-drawer-workspace { display: flex; flex-direction: column; overflow: visible; }
-  .code-intelligence-drawer.code-intelligence-drawer-docked { flex: 0 0 var(--code-drawer-height, 280px); min-height: 180px; max-height: min(42vh, 360px); }
-  .code-editor-drawer-splitter { width: 100%; min-width: 40px; height: 8px; min-height: 8px; cursor: row-resize; }
-  .code-editor-drawer-splitter::before { inset: 3px 0; }
-  .code-editor-drawer-splitter:hover::before,
-  .code-editor-drawer-splitter:focus-visible::before,
-  .code-editor-drawer-workspace.resizing .code-editor-drawer-splitter::before { inset-block: 2px; inset-inline: 0; }
+  .file-inspector.code-panel-docked-right .code-editor-panel-workspace { display: flex; flex-direction: column; overflow: visible; }
+  .code-intelligence-panel.code-intelligence-panel-docked { flex: 0 0 var(--code-panel-height, 280px); min-height: 180px; max-height: min(42vh, 360px); }
+  .code-editor-panel-splitter { width: 100%; min-width: 40px; height: 8px; min-height: 8px; cursor: row-resize; }
+  .code-editor-panel-splitter::before { inset: 3px 0; }
+  .code-editor-panel-splitter:hover::before,
+  .code-editor-panel-splitter:focus-visible::before,
+  .code-editor-panel-workspace.resizing .code-editor-panel-splitter::before { inset-block: 2px; inset-inline: 0; }
 }
 @media (max-width: 600px) {
   .collection-search,
