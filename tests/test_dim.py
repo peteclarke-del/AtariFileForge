@@ -192,3 +192,47 @@ class ProjectViewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReferenceHeaderTests(unittest.TestCase):
+    """The header we write is the header the reference converter writes.
+
+    The bytes below were taken from HxCFloppyEmulator's own output for a
+    double-sided 720 KiB volume. They are recorded here rather than generated
+    from a tool because the tool is not installed in continuous integration.
+
+    A caution worth keeping with them: that converter cannot read back the
+    file it writes. Handed its own image it reports a single-sided disk and
+    returns half the data, so it is a reference for the header layout and not
+    a reference for the decoding. Our own reader was checked against its
+    output separately and reproduces the source image exactly.
+    """
+
+    REFERENCE_HEADER = bytes.fromhex(
+        "4242000000000100090000004f00000000000000000000000000000000000000"
+    )
+
+    def test_the_header_matches_the_reference_converter(self) -> None:
+        image = patterned_image(DS_720K)
+        written = st_to_dim(image)
+        self.assertEqual(written[:HEADER_SIZE], self.REFERENCE_HEADER)
+        self.assertEqual(len(written), HEADER_SIZE + len(image))
+
+    def test_the_sector_size_word_is_written_as_zero(self) -> None:
+        """Zero is the documented way to say 512, and what the reference writes.
+
+        Writing a literal 512 there is the kind of mistake that reads back
+        correctly through our own code and confuses everything else.
+        """
+        written = st_to_dim(patterned_image(DS_720K))
+        self.assertEqual(written[0x0E:0x10], b"\x00\x00")
+
+    def test_the_reference_header_round_trips_through_our_reader(self) -> None:
+        image = patterned_image(DS_720K)
+        rebuilt = self.REFERENCE_HEADER + image
+        self.assertTrue(is_dim(rebuilt))
+        self.assertEqual(dim_to_st(rebuilt), image)
+        parsed = parse_dim(rebuilt)
+        self.assertEqual(parsed.sides, 2)
+        self.assertEqual(parsed.sectors_per_track, 9)
+        self.assertEqual(parsed.sector_size, 512)
