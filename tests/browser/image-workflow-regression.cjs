@@ -1,3 +1,7 @@
+// UNVERIFIED against a live server: this branch ports the frontend only,
+// so the vocabulary, media, kinds, dialogs and drive names below have been
+// brought over but not run. The "is oversized" bounds are kept verbatim,
+// because they are the guard on the look and feel.
 const { chromium } = require("playwright");
 
 const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
@@ -21,19 +25,22 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
         body: JSON.stringify(value),
       });
 
-      // A partitioned drive: one Rigid Disk Block chaining to one FFS
-      // International partition, which is what an Atari expects to find.
+      // A partitioned drive: one AHDI partition table naming one FAT16
+      // partition, which is what a TOS machine expects to find.
       const created = await json(
         "/api/images/create",
-        body({ format: "ffs-hard", title: "BROWSER", capacity: "20MB" }),
+        body({
+          format: "hd", title: "BROWSER", capacity: "32MB", bootable: false,
+          targetHardware: "hd", hardDisk: { partitions: 1, scheme: "ahdi" },
+        }),
       );
       const id = created.image.id;
 
       // The drive opens on its partition table, not inside a volume.
       const table = await json(`/api/images/${id}/tree`);
-      if (table.entries.length !== 1 || table.entries[0].name !== "DH0") {
+      if (table.entries.length !== 1 || table.entries[0].name !== "C:") {
         throw new Error(
-          `Expected one partition named DH0, got ${JSON.stringify(table.entries.map(row => row.name))}`,
+          `Expected one partition named C:, got ${JSON.stringify(table.entries.map(row => row.name))}`,
         );
       }
       if (table.entries[0].type !== "dir") {
@@ -42,10 +49,10 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
 
       // Writing goes into the volume the partition mounts.
       await json(`/api/images/${id}/empty-file`, body({
-        partition: 0, destination: "", name: "TESTFILE", protection: "----rwed",
+        partition: 0, destination: "", name: "TESTFILE.TXT", attributes: "-----a",
       }));
       const written = await json(`/api/images/${id}/tree?partition=0`);
-      if (!written.entries.some(row => row.name === "TESTFILE")) {
+      if (!written.entries.some(row => row.name === "TESTFILE.TXT")) {
         throw new Error("The new file was not written into the partition");
       }
 
@@ -56,13 +63,13 @@ const target = process.env.ATARI_FILE_FORGE_URL || "http://127.0.0.1:8666";
 
       await json(`/api/images/${id}/undo`, body({}));
       const undone = await json(`/api/images/${id}/tree?partition=0`);
-      if (undone.entries.some(row => row.name === "TESTFILE")) {
+      if (undone.entries.some(row => row.name === "TESTFILE.TXT")) {
         throw new Error("Undo did not remove the file from the partition");
       }
 
       // Exercise the same Web Crypto path used when the app is opened from a
-      // Pi's plain-HTTP LAN address, where randomUUID is not exposed but
-      // getRandomValues remains available.
+      // plain-HTTP address on the local network, where randomUUID is not
+      // exposed but getRandomValues remains available.
       const operationId = AtariIdentifiers.newUuid({
         getRandomValues: crypto.getRandomValues.bind(crypto),
       });

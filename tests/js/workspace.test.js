@@ -161,8 +161,6 @@ test("import planning fills TOS floppies by cluster and root entry count", () =>
   assert.throws(() => imports.allocateFilesToDisks([{ name: "BIG", length: 800 * 1024 }], "720k"), /too large/);
   const many = imports.allocateFilesToDisks(Array.from({ length: 113 }, (_unused, index) => ({ name: `F${index}`, length: 10 })), "720k");
   assert.equal(many.length, 2);
-  // The old name still works for the caller that has not moved yet.
-  assert.equal(imports.allocateFilesToOfsDisks, imports.allocateFilesToDisks);
 });
 
 test("attributes from a sidecar are accepted in either written form", () => {
@@ -176,7 +174,6 @@ test("attributes from a sidecar are accepted in either written form", () => {
   assert.equal(imports.normaliseAttributes("&H01"), "0x01");
   // Anything else is reported as absent rather than guessed at.
   assert.equal(imports.normaliseAttributes("read-only"), "");
-  assert.equal(imports.normaliseProtection, imports.normaliseAttributes);
 });
 
 test("the GEMDOS attribute byte round trips through six plain letters", () => {
@@ -195,9 +192,6 @@ test("the GEMDOS attribute byte round trips through six plain letters", () => {
   assert.equal(metadata.parseAttributes("32"), 0x20);
   assert.equal(metadata.parseAttributes("-----a"), 0x20);
   assert.equal(metadata.parseAttributes("nonsense"), null);
-  // The old names still resolve, so app.js keeps loading until it moves.
-  assert.equal(metadata.formatProtection(0x20), "-----a");
-  assert.equal(metadata.protectionHex(0x20), "0x20");
 });
 
 test("GEMDOS date and time stamps convert to and from ISO text at two-second resolution", () => {
@@ -290,7 +284,7 @@ test("workspace recovery is isolated behind an injected persistence controller",
   const controller = workspacePersistence.create({
     panes: [], storage: { getItem() { return null; }, setItem() {} },
     storageKey: "workspace", newPaneState() { return {}; },
-    restoredOfsPath() { return ""; }, api() {}, rebuildPaneHosts() {},
+    restoredGemdosPath() { return ""; }, api() {}, rebuildPaneHosts() {},
     renderPane() {}, acceptImage() {}, loadDirectory() {},
     editorWorkspace: { state: {} }, activateEditorDocument() {}, toast() {},
   });
