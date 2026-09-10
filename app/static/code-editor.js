@@ -1762,7 +1762,7 @@ window.AtariCodeEditor = (() => {
     textarea.before(surface);
     surface.append(gutter, guides, visual, textarea, hit, foldView);
     const panel = document.createElement("section");
-    panel.className = "code-intelligence-drawer";
+    panel.className = "code-intelligence-panel";
     panel.hidden = true;
     root.insertBefore(panel, root.querySelector(".editor-status"));
     let state = { tokens: [], issues: [], symbols: [], blocks: [] };
@@ -1930,8 +1930,8 @@ window.AtariCodeEditor = (() => {
     const closePanel = () => { panel.hidden = true; };
     const renderPanel = (title, body) => {
       panel.hidden = false;
-      panel.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-drawer-close" aria-label="Close code help">×</button></header><div class="code-drawer-body">${body}</div>`;
-      panel.querySelector(".code-drawer-close").onclick = closePanel;
+      panel.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-panel-close" aria-label="Close code help">×</button></header><div class="code-panel-body">${body}</div>`;
+      panel.querySelector(".code-panel-close").onclick = closePanel;
       panel.querySelectorAll("[data-code-offset]").forEach(button => button.onclick = () => goTo(Number(button.dataset.codeOffset)));
       panel.querySelectorAll("[data-code-help]").forEach(button => button.onclick = () => renderPanel(button.dataset.codeHelp, helpMarkup(lookup(language, button.dataset.codeHelp))));
       panel.querySelectorAll("[data-code-completion]").forEach(button => button.onclick = () => {
@@ -1990,7 +1990,7 @@ window.AtariCodeEditor = (() => {
         ["Run a program at boot", "exec c:\\mint\\program.prg"],
         ["Auto-start a desktop program", "#Z 01 C:\\GEM\\PROGRAM.PRG@"],
       ] : [];
-      renderPanel("Completion and snippets", `<p class="code-empty-message">${prefix ? `Candidates beginning with ${esc(prefix)}.` : "Choose a known command, identifier or template."}</p><div class="code-completion-list">${candidates.map(value => `<button type="button" data-code-completion="${esc(value)}">${esc(value)}</button>`).join("") || "<small>No matching candidates.</small>"}</div>${snippets.length ? `<h4 class="code-drawer-section-title">Templates</h4><div class="code-snippet-list">${snippets.map(([label, value]) => `<button type="button" data-code-snippet="${esc(value)}"><b>${esc(label)}</b><code>${esc(value)}</code></button>`).join("")}</div>` : ""}`);
+      renderPanel("Completion and snippets", `<p class="code-empty-message">${prefix ? `Candidates beginning with ${esc(prefix)}.` : "Choose a known command, identifier or template."}</p><div class="code-completion-list">${candidates.map(value => `<button type="button" data-code-completion="${esc(value)}">${esc(value)}</button>`).join("") || "<small>No matching candidates.</small>"}</div>${snippets.length ? `<h4 class="code-panel-section-title">Templates</h4><div class="code-snippet-list">${snippets.map(([label, value]) => `<button type="button" data-code-snippet="${esc(value)}"><b>${esc(label)}</b><code>${esc(value)}</code></button>`).join("")}</div>` : ""}`);
     };
     const formatCode = async () => {
       if (textarea.readOnly) return false;
@@ -2495,7 +2495,7 @@ window.AtariCodeEditor = (() => {
     if (!root) return null;
     const language = report.architecture || "68000";
     const panel = document.createElement("section");
-    panel.className = "code-intelligence-drawer";
+    panel.className = "code-intelligence-panel";
     panel.hidden = true;
     root.insertBefore(panel, root.querySelector(".editor-status"));
     const labelElements = [...root.querySelectorAll(".disassembly-label")];
@@ -2567,8 +2567,8 @@ window.AtariCodeEditor = (() => {
     renderFolds();
     const show = (title, body) => {
       panel.hidden = false;
-      panel.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-drawer-close" aria-label="Close code help">×</button></header><div class="code-drawer-body">${body}</div>`;
-      panel.querySelector(".code-drawer-close").onclick = () => { panel.hidden = true; };
+      panel.innerHTML = `<header><div><small>CODE-AWARE HELP</small><h3>${esc(title)}</h3></div><button type="button" class="code-panel-close" aria-label="Close code help">×</button></header><div class="code-panel-body">${body}</div>`;
+      panel.querySelector(".code-panel-close").onclick = () => { panel.hidden = true; };
       panel.querySelectorAll("[data-code-help]").forEach(button => button.onclick = () => show(button.dataset.codeHelp, helpMarkup(commandHelp.get(button.dataset.codeHelp) || lookup(language, button.dataset.codeHelp))));
       panel.querySelectorAll("[data-disassembly-offset]").forEach(button => button.onclick = () => root.querySelector(`.disassembly-source-line[data-offset="${button.dataset.disassemblyOffset}"]`)?.scrollIntoView({ block: "center" }));
     };
