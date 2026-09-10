@@ -133,7 +133,7 @@ function retainEditorDocument(index, pane, entry, path, view = "source") {
   const existing = editorDocuments.get(key) || {};
   editorDocuments.set(key, {
     ...existing, key, index, imageId: pane.image.id, imageName: pane.image.name,
-    path, directory: pane.path || "$", name: entry.name, partition: pane.partition, side: pane.side, view,
+    path, directory: pane.path, name: entry.name, partition: pane.partition, side: pane.side, view,
   });
   editorWorkspace.state.active = key;
   persistEditorDocuments();
@@ -153,7 +153,7 @@ async function activateEditorDocument(key, force = false) {
   }
   pane.partition = document.partition;
   pane.side = document.side;
-  pane.path = document.directory || "$";
+  pane.path = document.directory || "";
   await loadDirectory(document.index);
   await openFileEditor(document.index, document.name, null, document.path);
 }
@@ -191,8 +191,7 @@ function installEditorDocumentTabs(root, pane) {
     if (!result) return;
     if (result.partition != null) pane.partition = Number(result.partition);
     if (result.side != null) pane.side = Number(result.side);
-    const split = result.path.lastIndexOf(".");
-    pane.path = split > 0 ? result.path.slice(0, split) : "$";
+    pane.path = parentPath(result.path);
     await loadDirectory(panes.indexOf(pane));
     await openFileEditor(panes.indexOf(pane), result.name, null, result.path);
   });
@@ -550,11 +549,17 @@ async function showPhysicalFloppyDialog(index) {
       ? "Every written sector will be read back and verified automatically."
       : "This flux-level image cannot be verified with a sector read-back. Test the disk in suitable hardware afterwards.";
     const unavailable = status.available ? "" : `<div class="help-warning"><strong>Greaseweazle is not ready.</strong> ${esc(status.detail)}</div>`;
+    // The capture formats and the geometries are whatever the desktop
+    // endpoint reports, so a build that grows a format needs no change here.
+    const captureFormats = status.media.captureFormats || status.captureFormats || [];
+    const geometries = status.media.geometries || status.geometries || [];
     showModal(`<div class="analysis-dialog physical-floppy-dialog"><header><div><small>PHYSICAL MEDIA</small><h2>Write ${esc(status.media.name)}</h2></div></header>
       <p>This will write the current working image to a real floppy disk. Unsaved image changes are included.</p>
       <dl class="physical-floppy-summary"><div><dt>Image type</dt><dd>${esc(status.media.format)}</dd></div><div><dt>Verification</dt><dd>${status.media.automaticVerification ? "Automatic sector verification" : "Not available for flux images"}</dd></div></dl>
       ${unavailable}
       <label class="field"><span>Physical drive</span><select name="physicalDrive" ${status.available ? "" : "disabled"}>${status.drives.map(drive => `<option value="${esc(drive.id)}">${esc(drive.label)}</option>`).join("")}</select></label>
+      ${captureFormats.length ? `<label class="field"><span>Written as</span><select name="captureFormat" ${status.available ? "" : "disabled"}>${captureFormats.map(format => `<option value="${esc(format.id)}">${esc(format.label)}</option>`).join("")}</select></label>` : ""}
+      ${geometries.length ? `<label class="field" data-geometry-field><span>Geometry</span><select name="captureGeometry" ${status.available ? "" : "disabled"}>${geometries.map(geometry => `<option value="${esc(geometry.id)}">${esc(geometry.label)}</option>`).join("")}</select><small>A sector image carries no geometry of its own, so the tracks, sides and sectors have to be stated before the disk is cut.</small></label>` : ""}
       <div class="help-warning"><strong>This is destructive.</strong> All existing data on the disk in the selected drive will be overwritten. ${esc(verification)}</div>
       <label class="check-field physical-floppy-confirm"><input type="checkbox" name="physicalConfirmed" required ${status.available ? "" : "disabled"}> I understand that the physical disk will be overwritten.</label>
       <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button danger" value="write" ${status.available ? "" : "disabled"}>Write and ${status.media.automaticVerification ? "verify" : "finish unverified"}</button></div></div>`, async form => {
@@ -564,7 +569,12 @@ async function showPhysicalFloppyDialog(index) {
           operationId => api(`/api/desktop/images/${pane.image.id}/physical-floppy`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ drive: form.get("physicalDrive"), operationId }),
+            body: JSON.stringify({
+              drive: form.get("physicalDrive"),
+              format: form.get("captureFormat") || "",
+              geometry: form.get("captureGeometry") || "",
+              operationId,
+            }),
           }),
           { abortMode: "physical" },
         );
@@ -575,6 +585,17 @@ async function showPhysicalFloppyDialog(index) {
           <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div></div>`, null, { replace: true });
         return false;
       }, { replace: true });
+    // A geometry only has to be stated for a sector image; a track or flux
+    // capture already carries its own.
+    const formatSelect = modalContent.querySelector('[name="captureFormat"]');
+    const geometryField = modalContent.querySelector("[data-geometry-field]");
+    if (formatSelect && geometryField) {
+      const refreshGeometry = () => {
+        geometryField.hidden = !["st", "msa"].includes(formatSelect.value);
+      };
+      formatSelect.addEventListener("change", refreshGeometry);
+      refreshGeometry();
+    }
   } catch (error) {
     modal.close();
     toast(`Could not prepare the physical write: ${error.message}`, true);
@@ -1155,7 +1176,7 @@ function wireRow(row, index) {
     event.stopPropagation();
     selectForAction(false);
     editFileMetadata(index, selectedEntry(index)).catch(error => {
-      toast(`Could not change the catalogue addresses: ${error.message}`, true);
+      toast(`Could not change the attributes: ${error.message}`, true);
     });
   }));
   row.querySelector(".row-rename")?.addEventListener("click", event => {
@@ -4198,7 +4219,7 @@ async function saveImage(index) {
         title: pane.image.hasDescriptor ? "Preparing the drive image and its geometry sidecar" : "Preparing image download",
         message: "Starting hardware and filesystem checks…",
         details: [
-          { label: "Stages", value: "Validate, checksum, catalogue, then build the complete ZIP" },
+          { label: "Stages", value: "Validate, checksum, index, then build the complete ZIP" },
           { label: "Ready means ready", value: "The download starts only after the ZIP has finished building" },
         ],
       }, 0, 100);
@@ -4366,9 +4387,6 @@ function downloadFile(index, name, pathOverride = null) {
   if (pane.side !== null) query.set("side", pane.side);
   window.location.href = `/api/images/${pane.image.id}/file?${query}`;
 }
-
-// The GEMDOS command each stored action letter names.
-const LAUNCH_COMMANDS = Object.freeze({ "": "ST BASIC", R: "Run", E: "Execute", L: "LoadWB" });
 
 const ONLINE_MACHINES = [
   ["all", "All compatible machines"],
@@ -6526,10 +6544,8 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
       if (!result) return;
       if (result.partition != null) pane.partition = Number(result.partition);
       if (result.side != null) pane.side = Number(result.side);
-      const split = result.path.lastIndexOf(".");
-      const parent = split > 0 ? result.path.slice(0, split) : "$";
-      const leaf = split >= 0 ? result.path.slice(split + 1) : result.name;
-      pane.path = parent || "$";
+      pane.path = parentPath(result.path);
+      const leaf = result.path.split(/[\\/]/).at(-1) || result.name;
       await loadDirectory(index);
       await openFileEditor(index, leaf, null, result.path);
     }
@@ -7287,10 +7303,14 @@ function focusEditorCheatCandidate(root, navigation) {
   throw new Error("Candidate has no editor target");
 }
 
+//: The code-intelligence side panel and the class names it is styled by are
+//: owned by code-editor.js and styles.css, so the selector strings and the
+//: two custom properties below are quoted exactly as those files declare
+//: them; only the code in this file reads plainly.
 function dockEditorIntelligence(root) {
-  const drawer = root?.querySelector(".code-intelligence-drawer");
+  const panel = root?.querySelector(".code-intelligence-drawer");
   const editorSurface = root?.querySelector(".code-editor-surface, .disassembly-source");
-  if (!drawer || !editorSurface) return;
+  if (!panel || !editorSurface) return;
   let workspace = root.querySelector(":scope > .code-editor-drawer-workspace");
   if (!workspace) {
     workspace = document.createElement("div");
@@ -7304,19 +7324,19 @@ function dockEditorIntelligence(root) {
     splitter.setAttribute("aria-valuemax", "75");
     splitter.setAttribute("aria-valuenow", "40");
     editorSurface.before(workspace);
-    workspace.append(editorSurface, splitter, drawer);
-    installEditorDrawerSplitter(workspace, splitter);
+    workspace.append(editorSurface, splitter, panel);
+    installEditorPanelSplitter(workspace, splitter);
   }
   root.classList.add("code-drawer-docked-right");
-  drawer.classList.add("code-intelligence-drawer-docked");
-  const close = drawer.querySelector(".code-drawer-close");
+  panel.classList.add("code-intelligence-drawer-docked");
+  const close = panel.querySelector(".code-drawer-close");
   close?.addEventListener("click", () => {
     root.classList.remove("code-drawer-docked-right");
-    drawer.classList.remove("code-intelligence-drawer-docked");
+    panel.classList.remove("code-intelligence-drawer-docked");
   }, { once: true });
 }
 
-function installEditorDrawerSplitter(workspace, splitter) {
+function installEditorPanelSplitter(workspace, splitter) {
   const narrow = () => matchMedia("(max-width: 900px)").matches;
   const updateOrientation = () => splitter.setAttribute("aria-orientation", narrow() ? "horizontal" : "vertical");
   const resize = event => {
@@ -7352,14 +7372,14 @@ function installEditorDrawerSplitter(workspace, splitter) {
     if (!keys.includes(event.key)) return;
     event.preventDefault();
     const bounds = workspace.getBoundingClientRect();
-    const drawer = workspace.querySelector(".code-intelligence-drawer").getBoundingClientRect();
+    const panel = workspace.querySelector(".code-intelligence-drawer").getBoundingClientRect();
     const delta = (event.key === "ArrowLeft" || event.key === "ArrowUp") ? 24 : -24;
     if (narrow()) {
-      const height = Math.max(180, Math.min(bounds.height - 150, drawer.height + delta));
+      const height = Math.max(180, Math.min(bounds.height - 150, panel.height + delta));
       workspace.style.setProperty("--code-drawer-height", `${height}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(height / Math.max(1, bounds.height) * 100)));
     } else {
-      const width = Math.max(280, Math.min(bounds.width - 320, drawer.width + delta));
+      const width = Math.max(280, Math.min(bounds.width - 320, panel.width + delta));
       workspace.style.setProperty("--code-drawer-width", `${width}px`);
       splitter.setAttribute("aria-valuenow", String(Math.round(width / Math.max(1, bounds.width) * 100)));
     }
@@ -7369,7 +7389,7 @@ function installEditorDrawerSplitter(workspace, splitter) {
 
 async function showDuplicateReport(index) {
   const pane = panes[index];
-  analysisLoading("Finding duplicates and variants", "Hashing catalogues and comparing normalised titles…");
+  analysisLoading("Finding duplicates and variants", "Hashing directories and comparing normalised titles…");
   try {
     const report = await trackedPaneOperation(
       index,
@@ -7496,7 +7516,7 @@ async function showCollectionCatalogue(initialIndex = null) {
       <header><div><small>BROWSER-PRIVATE INDEXEDDB CATALOGUE</small><h2>My Atari collection</h2></div><div class="collection-totals"><b>${report.images}</b> images <b>${report.records.toLocaleString()}</b> records <b>${report.titles}</b> titles</div></header>
       <p>This catalogue belongs only to this browser profile. It stores manifests and user-supplied locations, never image bytes.</p>
       <label class="collection-search">Search saved names, paths, titles, publishers, machines or SHA-256<input type="search" name="collectionQuery" placeholder="Search the complete private catalogue"></label>
-      <section class="collection-index-controls"><label>Open image<select name="collectionPane" ${paneOptions ? "" : "disabled"}>${paneOptions || '<option>No open images</option>'}</select></label><label>Location or shelf<input name="collectionLocation" value="${esc(selectedEntry?.location || "")}" placeholder="SD card, NAS path, archive box…"></label><label>Machines<input name="collectionMachines" value="${esc((selectedEntry?.machines || []).join(", "))}" placeholder="Atari 500, Atari 1200…"></label><button class="button primary" type="button" data-index-pane ${paneOptions ? "" : "disabled"}>Add / update image</button><button class="button" type="button" data-refresh-open ${entries.length && paneOptions ? "" : "disabled"}>Refresh indexed open images</button></section>
+      <section class="collection-index-controls"><label>Open image<select name="collectionPane" ${paneOptions ? "" : "disabled"}>${paneOptions || '<option>No open images</option>'}</select></label><label>Location or shelf<input name="collectionLocation" value="${esc(selectedEntry?.location || "")}" placeholder="SD card, NAS path, archive box…"></label><label>Machines<input name="collectionMachines" value="${esc((selectedEntry?.machines || []).join(", "))}" placeholder="Atari STE, Atari Falcon030…"></label><button class="button primary" type="button" data-index-pane ${paneOptions ? "" : "disabled"}>Add / update image</button><button class="button" type="button" data-refresh-open ${entries.length && paneOptions ? "" : "disabled"}>Refresh indexed open images</button></section>
       <div class="collection-list"><table><thead><tr><th></th><th>Image and location</th><th>Format</th><th>Machines</th><th>Records</th><th>Status</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No images have been indexed yet.</td></tr>'}</tbody></table></div>
       <div class="collection-reports"><details><summary>Exact content duplicates (${report.exactDuplicates.length})</summary><ul>${duplicateSummary || "<li>No cross-image duplicate content found.</li>"}</ul></details><details><summary>Title variants (${report.titleVariants.length})</summary><ul>${variantSummary || "<li>No repeated titles found across images.</li>"}</ul></details><details><summary>Wanted and missing titles (${report.missingTitles.length})</summary><label>One wanted title per line<textarea name="wantedTitles" rows="4">${esc((preferences.wanted || []).join("\n"))}</textarea></label><ul>${report.missingTitles.map(title => `<li>${esc(title)}</li>`).join("") || "<li>Every listed title is present.</li>"}</ul><button class="button small" type="button" data-save-wanted>Save wanted list</button></details></div>
       <div class="collection-transfer"><button class="button" type="button" data-export-collection-report>Export report</button><button class="button" type="button" data-backup-collection>Back up database</button><label class="button">Import backup<input type="file" accept="application/json,.json" data-import-collection hidden></label><button class="button danger" type="button" data-remove-collection disabled>Remove selected</button><button class="button danger" type="button" data-clear-collection ${entries.length ? "" : "disabled"}>Clear catalogue</button></div>
@@ -7761,8 +7781,7 @@ async function openWorkspaceSearchResult(result) {
   pane.archiveMember = "";
   if (result.partition != null) pane.partition = Number(result.partition);
   if (result.side != null) pane.side = Number(result.side);
-  const split = result.path.lastIndexOf(".");
-  pane.path = split > 0 ? result.path.slice(0, split) : "$";
+  pane.path = parentPath(result.path);
   modal.close();
   await loadDirectory(result.paneIndex);
   if (result.virtual && !result.openable) return;
@@ -7781,7 +7800,7 @@ function showWorkspaceSearch() {
   showModal(`<div class="analysis-dialog wide-analysis workspace-search-dialog">
     <header><div><small>ALL OPEN IMAGES</small><h2>Search workspace</h2></div></header>
     <div class="workspace-search-controls"><input type="search" name="workspaceQuery" placeholder="Name, metadata, SHA-256 or readable text" required autocomplete="off" autofocus><button class="button primary" type="button" data-run-workspace-search>Search ${searchable.length} image${searchable.length === 1 ? "" : "s"}</button></div>
-    <p class="workspace-search-status" aria-live="polite">Searches catalogues and bounded file content in each distinct open filesystem, including every partition of an open hard drive. Enter an 8 to 64 digit SHA-256 prefix to identify exact content.</p>
+    <p class="workspace-search-status" aria-live="polite">Searches directories and bounded file content in each distinct open filesystem, including every partition of an open hard drive. Enter an 8 to 64 digit SHA-256 prefix to identify exact content.</p>
     <div class="editor-image-search-results workspace-search-results"></div>
     <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div>
   </div>`);
@@ -7796,12 +7815,12 @@ function showWorkspaceSearch() {
     status.textContent = `Searching ${searchable.length} open image${searchable.length === 1 ? "" : "s"}…`;
     results.replaceChildren();
     const reports = await Promise.all(searchable.map(async item => {
-      const parameters = new URLSearchParams({ query, root: "$" });
+      const parameters = new URLSearchParams({ query, root: "" });
       if (item.pane.image.kind === "hd") parameters.set("allPartitions", "true");
       try {
         const report = await trackedPaneOperation(
           item.index,
-          "Searching image catalogue and file content",
+          "Searching image directories and file content",
           operationId => {
             parameters.set("operationId", operationId);
             return api(`/api/images/${item.pane.image.id}/inspect/search?${parameters}`);
@@ -7911,7 +7930,7 @@ async function importProjectFile(file) {
     imageId: item?.imageId || null,
     partition: item?.partition ?? null,
     side: item?.side ?? null,
-    path: item?.path || "$",
+    path: typeof item?.path === "string" ? item.path : "",
     windowState: item?.windowState || null,
   }))));
   panes.splice(0, panes.length, ...Array.from({ length: Math.max(1, saved.length) }, () => newPaneState()));
