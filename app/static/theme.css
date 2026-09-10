@@ -51,8 +51,8 @@
 
   --body-background:
     radial-gradient(circle at 82% 4%, rgba(255, 255, 255, .22), transparent 28rem),
-    linear-gradient(180deg, #00e000 0, #00dc00 100%);
-  --html-background: #00e000;
+    linear-gradient(180deg, #00a800 0, #009400 100%);
+  --html-background: #00a800;
   --pane-background: rgba(255, 255, 255, .96);
   --toolbar-background: #e9e6de;
   --header-background: #d8d4c8;
@@ -303,7 +303,7 @@ html[data-theme="dark"] {
 
 html { background: var(--html-background); }
 body { background: var(--body-background); }
-.topbar { border-color: var(--topbar-border); }
+.topbar { background: var(--header-background); border-color: var(--topbar-border); }
 .brand-mark { filter: drop-shadow(2px 2px 0 var(--brand-shadow)); }
 .pane { background: var(--pane-background); }
 .pane-head { background: var(--header-background); }
