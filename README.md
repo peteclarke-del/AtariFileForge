@@ -69,7 +69,7 @@ docker compose up --build -d
 SSH cloning also works when your GitHub public key is configured, but it is not
 required to install or run the application.
 
-Open <http://localhost:8674>.
+Open <http://localhost:8684>.
 
 Linux users can instead install the GTK 4 desktop host. GTK and Libadwaita
 provide the window decorations, application menu, symbolic icons and local
@@ -121,7 +121,7 @@ implemented and tested for both web and desktop hosts.
 If your system still uses the standalone Compose command, replace
 `docker compose` with `docker-compose` in the examples below.
 
-The container listens on port `8666` and Compose publishes it on `8674`, so
+The container listens on port `8666` and Compose publishes it on `8684`, so
 it does not collide with anything already using the default. Its working
 images are stored in the
 `atari-file-forge-work` Docker volume. Files selected in the browser are uploaded into
@@ -2624,7 +2624,7 @@ node tests/run_js_tests.js
 
 Run the permanent browser regression against a service on port 8666, which
 is where the CI container publishes it. Set `ATARI_FILE_FORGE_URL` for any
-other address, including the Compose default of 8674:
+other address, including the Compose default of 8684:
 
 ```bash
 npm install
@@ -2637,7 +2637,7 @@ Set `ATARI_FILE_FORGE_URL` when the service is listening elsewhere.
 Check the running service:
 
 ```bash
-curl http://localhost:8674/api/health
+curl http://localhost:8684/api/health
 ```
 
 A healthy response looks like:
