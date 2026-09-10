@@ -107,7 +107,7 @@ jobs:
               stage=$(mktemp -d)
               dpkg-deb --extract "$package" "$stage"
               cd "$stage/opt/atari-file-forge"
-              PYTHONPATH="$stage/opt/atari-file-forge/vendor:$stage/opt/atari-file-forge" python3 -c "import flask; import atarinut.filesystem; import atarinut.kickfs; from capstone import CS_ARCH_M68K, CS_MODE_M68K_000, Cs; Cs(CS_ARCH_M68K, CS_MODE_M68K_000); from app.server import create_app; print(\"Package runtime gate passed\")"
+              PYTHONPATH="$stage/opt/atari-file-forge/vendor:$stage/opt/atari-file-forge" python3 -c "import flask; import atarinut.filesystem; import atarinut.tosrom; from capstone import CS_ARCH_M68K, CS_MODE_M68K_000, Cs; Cs(CS_ARCH_M68K, CS_MODE_M68K_000); from app.server import create_app; print(\"Package runtime gate passed\")"
               LD_LIBRARY_PATH="$stage/opt/atari-file-forge/native/lib" "$stage/opt/atari-file-forge/native/bin/hxcfe" -help >/dev/null
               rm -rf "$stage"
             '
