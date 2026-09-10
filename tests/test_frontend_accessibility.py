@@ -57,28 +57,82 @@ class FrontendAccessibilityTests(unittest.TestCase):
                     ("on-accent", "blue"),
                     ("on-accent", "danger"),
                     ("on-accent", "orange"),
+                    ("on-accent", "success"),
                     ("on-warning", "warning"),
                     ("on-yellow", "yellow"),
                     ("ink", "row-selected"),
+                    ("ink", "row-hover"),
+                    ("ink", "table-heading"),
+                    ("ink", "button-background"),
+                    ("ink", "toolbar-background"),
+                    ("ink", "header-background"),
+                    ("ink", "html-background"),
+                    ("muted", "surface"),
+                    ("muted", "html-background"),
+                    ("table-heading-text", "table-heading"),
+                    ("empty-text", "paper"),
                     ("format-icon-text", "yellow"),
-                    ("hdf-format-text", "orange"),
-                    ("ffs-format-text", "ffs-format"),
-                    ("dms-format-text", "dms-format"),
+                    ("hd-format-text", "orange"),
+                    ("gemdos-format-text", "gemdos-format"),
+                    ("st-format-text", "st-format"),
+                    ("stx-format-text", "stx-format"),
+                    ("msa-format-text", "msa-format"),
+                    ("rom-format-text", "blue"),
+                    ("hex-text", "hex-background"),
+                    ("hex-address", "hex-background"),
+                    ("hex-muted", "hex-background"),
+                    ("syntax-keyword", "hex-background"),
+                    ("syntax-string", "hex-background"),
+                    ("syntax-number", "hex-background"),
+                    ("syntax-comment", "hex-background"),
+                    ("syntax-symbol", "hex-background"),
+                    ("syntax-api", "hex-background"),
+                    ("diagnostic-error", "hex-background"),
+                    ("diagnostic-warning", "hex-background"),
+                    ("atari-title", "atari-bg"),
+                    ("atari-entry", "atari-bg"),
+                    ("atari-detail", "atari-bg"),
                 ):
                     self.assertGreaterEqual(
                         _contrast(palette[foreground], palette[background]),
                         4.5,
                         f"{mode} {foreground} on {background}",
                     )
+                for kind in ("file", "folder", "disk", "basic", "script", "text", "binary"):
+                    self.assertGreaterEqual(
+                        _contrast(palette[f"{kind}-icon-text"], palette[f"{kind}-icon-background"]),
+                        4.5,
+                        f"{mode} {kind} icon text",
+                    )
 
     def test_control_boundaries_meet_non_text_contrast(self):
         for mode, palette in self.palettes.items():
             with self.subTest(mode=mode):
-                self.assertGreaterEqual(_contrast(palette["line"], palette["paper"]), 3.0)
-                self.assertGreaterEqual(
-                    _contrast(palette["input-border"], palette["input-background"]),
-                    3.0,
-                )
+                for foreground, background in (
+                    ("line", "paper"),
+                    ("line", "surface"),
+                    ("input-border", "input-background"),
+                    ("focus-ring", "paper"),
+                    ("focus-ring", "surface"),
+                    ("pill-border", "paper"),
+                    ("hex-border", "hex-background"),
+                ):
+                    self.assertGreaterEqual(
+                        _contrast(palette[foreground], palette[background]),
+                        3.0,
+                        f"{mode} {foreground} on {background}",
+                    )
+
+    def test_both_palettes_define_the_same_tokens(self):
+        self.assertEqual(set(self.palettes["light"]), set(self.palettes["dark"]))
+        for token in (
+            "gemdos-format", "st-format", "stx-format", "msa-format",
+            "gemdos-format-text", "st-format-text", "stx-format-text", "msa-format-text",
+            "hd-format-text", "line-strong", "accent", "panel", "text", "text-muted",
+            "atari-bg", "atari-title", "atari-entry", "atari-detail",
+        ):
+            self.assertIn(token, self.palettes["light"], token)
+        self.assertIn("--mono:", self.theme)
 
     def test_core_accessibility_landmarks_are_present(self):
         self.assertIn('<html lang="en">', self.index)
