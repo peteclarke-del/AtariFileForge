@@ -10,15 +10,19 @@ import tarfile
 import zipfile
 from copy import copy
 
-from .atari_metadata import atari_zip_metadata, format_protection, parse_inf
-from .content_kind import LISTING_SNIFF_LIMIT, analyse_content, is_dms_container, metadata_kind
+from .atari_metadata import atari_zip_metadata, format_attributes
+from .content_kind import LISTING_SNIFF_LIMIT, analyse_content, metadata_kind
 from .errors import DiskError
-from .dms import DMSError, parse_dms, replace_dms_file, dms_editability
+from .lha import LHAArchive, LHAError, is_lha_bytes
 
 
+#: The containers Atari material is distributed in. LZH is the one the ST
+#: scene settled on, and is read here alongside the formats every other
+#: platform uses.
 ARCHIVE_EXTENSIONS = (
-    ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2",
-    ".tar.xz", ".txz", ".gz", ".gzip", ".bz2", ".xz", ".dms",
+    ".zip", ".lzh", ".lha", ".lzx", ".arc",
+    ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2",
+    ".tar.xz", ".txz", ".gz", ".gzip", ".bz2", ".xz",
 )
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_MEMBER_BYTES = 128 * 1024 * 1024
@@ -54,10 +58,6 @@ def _standalone_name(filename: str) -> str:
     return "contents"
 
 
-def _dms_member_kind(name: str, data: bytes) -> str:
-    return metadata_kind(name, None) or analyse_content(data, name)[0]
-
-
 def _bounded_member_kind(name: str, size: int, reader) -> str | None:
     """Classify a small archive member while its parent archive is already open."""
     hint = metadata_kind(name, None)
@@ -87,47 +87,11 @@ def _listing_member_kind(
     return _bounded_member_kind(name, size, reader), remaining - max(0, size)
 
 
-def _dms_payload(data: bytes) -> tuple[bytes, bool]:
-    """Return a DMS archive's raw bytes, unwrapping a gzip transport layer.
-
-    Archives are often served ``.dms.gz``. The container inside is what the
-    parser and the rebuilder work on, so the wrapper is stripped here and put
-    back afterwards rather than being handled at every call site.
-    """
-    if not data.startswith(b"\x1f\x8b"):
-        return data, False
-    try:
-        with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
-            return compressed.read(MAX_ARCHIVE_BYTES + 1), True
-    except (gzip.BadGzipFile, EOFError, OSError) as exc:
-        raise ArchiveError("That compressed DMS archive could not be expanded.") from exc
-
-
-def _sidecar_fields(metadata: dict) -> dict:
-    """Turn a parsed sidecar record into the fields a listing row carries.
-
-    A record written by an earlier release holds two address words instead of
-    a protection field; those are still surfaced so an old download still
-    shows what it recorded.
-    """
-    fields: dict = {}
-    if metadata.get("protection") is not None:
-        fields["access"] = int(metadata["protection"])
-    elif metadata.get("locked"):
-        fields["access"] = 0x04
-    if metadata.get("comment"):
-        fields["comment"] = str(metadata["comment"])
-    for legacy in ("load", "execute"):
-        if metadata.get(legacy) is not None:
-            fields[legacy] = int(metadata[legacy])
-    return fields
-
-
 def _archive_kind(data: bytes, filename: str) -> str:
     if len(data) > MAX_ARCHIVE_BYTES:
         raise ArchiveError("That archive is too large to browse safely in memory.")
-    if is_dms_container(data):
-        return "dms"
+    if is_lha_bytes(data):
+        return "lha"
     stream = io.BytesIO(data)
     if zipfile.is_zipfile(stream):
         return "zip"
@@ -144,7 +108,7 @@ def _archive_kind(data: bytes, filename: str) -> str:
         return "bz2"
     if data.startswith(b"\xfd7zXZ\x00") or lowered.endswith(".xz"):
         return "xz"
-    raise ArchiveError("That file is not a supported DMS, ZIP, TAR, GZIP, BZIP2 or XZ container.")
+    raise ArchiveError("That file is not a supported ZIP, LZH, TAR, GZIP, BZIP2 or XZ container.")
 
 
 def _validate_archive_inventory(items, size_of) -> None:
@@ -165,24 +129,36 @@ def _members(
 ) -> tuple[str, list[dict]]:
     kind = _archive_kind(data, filename)
     rows: list[dict] = []
-    if kind == "dms":
+    if kind == "lha":
         try:
-            dms = parse_dms(_dms_payload(data)[0])
-        except DMSError as exc:
-            raise ArchiveError(f"That DMS archive container is damaged: {exc}") from exc
-        used: dict[str, int] = {}
-        for index, item in enumerate(dms.files[:MAX_ENTRIES]):
-            base = _safe_name(item.name).replace("/", "_") or f"DMSFile{index + 1}"
-            used[base.casefold()] = used.get(base.casefold(), 0) + 1
-            occurrence = used[base.casefold()]
-            name = base if occurrence == 1 else f"{base}~{occurrence}"
-            rows.append({
-                "name": name, "size": len(item.data), "dir": False, "source": index,
-                "unpackedChecksum": item.unpacked_crc,
-                "packedChecksum": item.packed_crc,
-                "complete": item.complete,
-                "contentKind": _dms_member_kind(item.name, item.data),
-            })
+            archive = LHAArchive(data)
+        except LHAError as exc:
+            raise ArchiveError(f"That LZH archive could not be read: {exc}") from exc
+        _validate_archive_inventory(
+            archive.members, lambda item: 0 if item.is_directory else item.original_size
+        )
+        sniff_remaining = MAX_LISTING_SNIFF_BYTES if sniff_content else 0
+        for member in archive.members:
+            name = _safe_name(member.path)
+            if not name:
+                continue
+            row = {
+                "name": name,
+                "size": member.original_size,
+                "dir": member.is_directory,
+                "source": member.path,
+                "method": member.method,
+            }
+            if not member.is_directory:
+                content_kind, sniff_remaining = _listing_member_kind(
+                    name,
+                    member.original_size,
+                    lambda member=member: archive.read(member),
+                    sniff_remaining,
+                )
+                if content_kind:
+                    row["contentKind"] = content_kind
+            rows.append(row)
     elif kind == "zip":
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             inventory = archive.infolist()
@@ -197,7 +173,7 @@ def _members(
                     if not item.is_dir():
                         metadata = atari_zip_metadata(item)
                         if metadata:
-                            row.update(metadata)
+                            row["access"] = int(metadata["attributes"])
                         content_kind, sniff_remaining = _listing_member_kind(
                             name,
                             item.file_size,
@@ -207,15 +183,6 @@ def _members(
                         if content_kind:
                             row["contentKind"] = content_kind
                     rows.append(row)
-            sidecars = {
-                row["name"][:-4].casefold(): parse_inf(archive.read(row["source"])[:4096])
-                for row in rows
-                if not row["dir"] and row["name"].casefold().endswith(".inf") and row["size"] <= 4096
-            }
-            for row in rows:
-                metadata = sidecars.get(row["name"].casefold())
-                if metadata and not row["dir"]:
-                    row.update(_sidecar_fields(metadata))
     elif kind == "tar":
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
             inventory = archive.getmembers()
@@ -235,17 +202,6 @@ def _members(
                         if content_kind:
                             row["contentKind"] = content_kind
                     rows.append(row)
-            sidecars = {}
-            for row in rows:
-                if row["dir"] or not row["name"].casefold().endswith(".inf") or row["size"] > 4096:
-                    continue
-                extracted = archive.extractfile(row["source"])
-                if extracted:
-                    sidecars[row["name"][:-4].casefold()] = parse_inf(extracted.read(4096))
-            for row in rows:
-                metadata = sidecars.get(row["name"].casefold())
-                if metadata and not row["dir"]:
-                    row.update(_sidecar_fields(metadata))
     else:
         rows.append({"name": _safe_name(_standalone_name(filename)), "size": None, "dir": False, "source": ""})
     return kind, rows
@@ -275,29 +231,14 @@ def list_archive(data: bytes, filename: str, directory: str = "") -> dict:
                 child["contentKind"] = member["contentKind"]
             if member.get("access") is not None:
                 child["access"] = int(member["access"])
-                child["attr"] = format_protection(member["access"])
-            if member.get("comment"):
-                child["comment"] = str(member["comment"])
-            # An address pair only appears on a sidecar written by an earlier
-            # release, and is surfaced so an old download still shows it.
-            if member.get("load") is not None or member.get("execute") is not None:
-                child.update(
-                    load=int(member.get("load") or 0), exec=int(member.get("execute") or 0),
-                )
-            if kind == "dms":
-                # A DMS track has no load address; what it does carry is the
-                # pair of checksums DiskMasher stores for it.
-                child.update(
-                    attr="R/" if member["complete"] else "R/?",
-                    complete=member["complete"],
-                    contentKind=member["contentKind"],
-                    unpackedChecksum=member["unpackedChecksum"],
-                    packedChecksum=member["packedChecksum"],
-                )
+                child["attributes"] = format_attributes(member["access"])
+                child["attr"] = child["attributes"]
+            if member.get("method"):
+                child["method"] = str(member["method"])
     entries = sorted(children.values(), key=lambda row: (row["type"] != "dir", row["name"].casefold()))
     return {
         "entries": entries,
-        "description": f"{'Proof-gated DMS disk archive project' if kind == 'dms' else f'{kind.upper()} archive'} · {len(members):,} member(s)",
+        "description": f"{kind.upper()} archive · {len(members):,} member(s)",
         "archiveKind": kind,
         "member": current,
     }
@@ -311,8 +252,15 @@ def read_archive_member_details(data: bytes, filename: str, member_name: str) ->
         raise ArchiveError("That archive member does not exist or is not a regular file.")
     if match["size"] is not None and int(match["size"]) > MAX_MEMBER_BYTES:
         raise ArchiveError("That archive member is too large to open safely.")
-    if kind == "dms":
-        content = parse_dms(_dms_payload(data)[0]).files[int(match["source"])].data
+    if kind == "lha":
+        archive = LHAArchive(data)
+        member = archive.find(str(match["source"]))
+        if member is None:
+            raise ArchiveError("That LZH member could not be located.")
+        try:
+            content = archive.read(member)
+        except LHAError as exc:
+            raise ArchiveError(str(exc)) from exc
     elif kind == "zip":
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             with archive.open(match["source"]) as expanded:
@@ -339,61 +287,44 @@ def read_archive_member_details(data: bytes, filename: str, member_name: str) ->
         content_kind = analyse_content(content, wanted)[0]
     return content, {
         "length": len(content),
-        "load": int(match.get("load") or 0),
-        "execute": int(match.get("execute") or 0),
-        "attr": format_protection(match.get("access")),
+        "attributes": format_attributes(match.get("access")),
+        "attr": format_attributes(match.get("access")),
         "access": int(match.get("access") or 0),
-        "comment": str(match.get("comment") or ""),
         "archiveKind": kind,
         "contentKind": content_kind,
-        "metadataAvailable": any(
-            match.get(field) is not None for field in ("access", "comment", "load", "execute")
-        ),
+        "metadataAvailable": match.get("access") is not None,
     }
 
 
 def archive_member_editable(data: bytes, filename: str, member_name: str | None = None) -> bool:
-    """Return whether a container can be rebuilt without changing its semantics."""
+    """Return whether a container can be rebuilt without changing its semantics.
+
+    LZH is read but never written. This build has a decoder and no encoder,
+    so rebuilding one would mean re-storing every member uncompressed, which
+    is a different archive from the one that went in.
+    """
+    del member_name
     kind = _archive_kind(data, filename)
-    if kind != "dms":
-        return kind in {"zip", "tar", "gzip", "bz2", "xz"}
-    if not member_name:
-        return False
-    _kind, members = _members(data, filename, sniff_content=False)
-    wanted = _safe_name(member_name)
-    match = next((row for row in members if row["name"] == wanted and not row["dir"]), None)
-    if not match:
-        return False
-    try:
-        return bool(dms_editability(_dms_payload(data)[0], int(match["source"]))["editable"])
-    except DMSError:
-        return False
+    return kind in {"zip", "tar", "gzip", "bz2", "xz"}
 
 
 def preview_archive_member_replacement(
     data: bytes, filename: str, member_name: str, content: bytes,
 ) -> dict:
-    """Return the exact structural proof that would guard a DMS rebuild."""
+    """Describe the rebuild a member replacement would perform.
+
+    Every container this build writes stores its members independently, so
+    replacing one does not move the others and no structural proof is needed
+    before the write.
+    """
+    del content
     wanted = _safe_name(member_name)
-    kind, members = _members(data, filename, sniff_content=False)
-    if kind != "dms":
-        return {
-            "schema": "atari-file-forge/archive-rebuild-preview/v1",
-            "archiveKind": kind,
-            "member": wanted,
-            "structuralProofRequired": False,
-        }
-    match = next((row for row in members if row["name"] == wanted and not row["dir"]), None)
-    if not match:
-        raise ArchiveError("That DMS member no longer exists.")
-    try:
-        _rebuilt, report = replace_dms_file(_dms_payload(data)[0], int(match["source"]), content)
-    except DMSError as exc:
-        raise ArchiveError(str(exc)) from exc
-    return report | {
-        "archiveKind": "dms",
+    kind = _archive_kind(data, filename)
+    return {
+        "schema": "atari-file-forge/archive-rebuild-preview/v1",
+        "archiveKind": kind,
         "member": wanted,
-        "structuralProofRequired": True,
+        "structuralProofRequired": False,
     }
 
 
@@ -413,8 +344,9 @@ def replace_archive_member(data: bytes, filename: str, member_name: str, content
 
     The caller performs the outer image transaction. This function keeps ZIP
     metadata and TAR member metadata where the standard libraries permit it.
-    A DMS write is accepted only when the track map proves a same-length
-    replacement preserves every following offset.
+    LZH is not among them: this build reads that format and does not encode
+    it, so a rebuild is refused rather than silently storing the members
+    uncompressed.
     """
     wanted = _safe_name(member_name)
     kind, members = _members(data, filename, sniff_content=False)
@@ -472,18 +404,6 @@ def replace_archive_member(data: bytes, filename: str, member_name: str, content
         output.write(bz2.compress(content))
     elif kind == "xz":
         output.write(lzma.compress(content))
-    elif kind == "dms":
-        payload, compressed_source = _dms_payload(data)
-        try:
-            rebuilt, _report = replace_dms_file(payload, int(match["source"]), content)
-        except DMSError as exc:
-            raise ArchiveError(str(exc)) from exc
-        if compressed_source:
-            # A container that arrived compressed leaves the same way.
-            with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0) as repacked:
-                repacked.write(rebuilt)
-        else:
-            output.write(rebuilt)
     else:
         raise ArchiveError("That archive format cannot be rebuilt safely.")
     rebuilt = output.getvalue()

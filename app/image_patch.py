@@ -11,7 +11,7 @@ from .analysis_service import build_manifest
 from .checksum import sha256_copy, sha256_stream
 from .disk_service import DiskError
 from .image_diff import compare_manifests, manifest_fingerprint, record_key
-from .ffs_items import delete_ffs_items
+from .gemdos_items import delete_gemdos_items as delete_ffs_items
 from . import atari_paths
 from . import progress as progress_module
 
