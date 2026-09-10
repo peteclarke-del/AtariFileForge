@@ -28,7 +28,7 @@ from app.catalog_service import (
 from app.errors import DiskError
 from app.routes.catalog import (
     MEDIA_PRIORITY,
-    _available_ffs_directory_name,
+    _available_folder_name,
     _catalogue_identities,
     _preferred_disk_members,
 )
@@ -203,13 +203,20 @@ class CatalogueServiceTests(unittest.TestCase):
         self.assertEqual(continuation, {"internet-archive-st-games": 2})
         self.assertEqual(next_continuation, {"internet-archive-st-games": 4})
 
-    def test_online_ffs_directory_allocator_avoids_existing_truncated_names(self):
+    def test_the_folder_allocator_shortens_and_then_numbers(self):
+        """A title longer than a name can be is shortened, then numbered.
+
+        Eight characters is the whole of a GEMDOS name, so a numeric suffix
+        has to fit inside them rather than extend past them. Two titles that
+        shorten to the same eight characters must still land in two folders.
+        """
         service = Mock()
         service.list_directory.return_value = {
-            "entries": [{"name": "LONGTITLE"}, {"name": "LONGTITLE1"}],
+            "entries": [{"name": "LONGTITL"}, {"name": "LONGTIT1"}],
         }
-        name = _available_ffs_directory_name(service, Mock(), "$.Games", "LONGTITLE")
-        self.assertEqual(name, "LONGTITLE2")
+        name = _available_folder_name(service, Mock(), "GAMES", "LONGTITLE")
+        self.assertEqual(name, "LONGTIT2")
+        self.assertLessEqual(len(name), 8)
 
     def test_archive_members_rejects_traversal_and_keeps_images(self):
         buffer = io.BytesIO()
