@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ from atarinut.filesystem import (
 )
 from atarinut.filesystem.blocks import (
     NAMED_GEOMETRIES,
+    BlockReader,
     SECTOR_SIZE,
     Geometry,
     is_executable_sector,
@@ -714,3 +716,56 @@ class SampleFloppyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnreadableRootTests(unittest.TestCase):
+    """A disk that never held a filing system should say so.
+
+    A game whose loader reads its own tracks leaves whatever it likes where
+    the root directory would be. The parameter block in its boot sector can
+    still look entirely plausible, so the volume mounts and the first read
+    walks into a cluster number no formatter ever wrote. Reporting that as
+    arithmetic sends somebody looking for a fault in a disk that is exactly
+    as its author wrote it.
+    """
+
+    def _custom_format_disk(self) -> bytes:
+        geometry = named_geometry("ds-720k")
+        image = bytearray(geometry.size_bytes)
+        image[: SECTOR_SIZE] = build_boot_sector(geometry)
+        # A FAT that passes its markers, so identification gets that far.
+        fat = geometry.reserved * SECTOR_SIZE
+        image[fat : fat + 3] = bytes((geometry.media, 0xFF, 0xFF))
+        second = fat + geometry.sectors_per_fat * SECTOR_SIZE
+        image[second : second + 3] = bytes((geometry.media, 0xFF, 0xFF))
+        # Where the root directory belongs, the loader's own data. The first
+        # slot happens to read as a plausible entry whose cluster is far
+        # outside the volume, which is what the real disk this reproduces did.
+        root = geometry.root_start * SECTOR_SIZE
+        entry = bytearray(32)
+        entry[0:11] = b"LOADER     "
+        entry[0x0B] = 0x10
+        struct.pack_into("<H", entry, 0x1A, 6911)
+        struct.pack_into("<I", entry, 0x1C, 0)
+        image[root : root + 32] = bytes(entry)
+        pattern = bytes(range(0x40, 0x60))
+        for offset in range(32, geometry.root_entries * 32, len(pattern)):
+            image[root + offset : root + offset + len(pattern)] = pattern
+        return bytes(image)
+
+    def test_listing_names_the_cause_instead_of_a_cluster_number(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "loader.st"
+            path.write_bytes(self._custom_format_disk())
+            volume = GEMDOSVolume(BlockReader(path))
+            try:
+                # The root itself lists; it is the folder it claims to hold
+                # whose cluster was never written by a formatter.
+                with self.assertRaises(DataError) as caught:
+                    list(volume.iter_entries("LOADER"))
+            finally:
+                volume.close()
+        message = str(caught.exception)
+        self.assertIn("no readable filing system", message)
+        self.assertIn("its own loader", message)
+        self.assertNotIn("Cluster", message)
