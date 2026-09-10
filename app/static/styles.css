@@ -258,11 +258,16 @@ dialog.hex-editor-modal-host > .hex-editor-overlay { border-radius: 15px; }
 .pane-head .disk-transfer-handle { cursor: grab; }
 .pane-head .disk-transfer-handle:active { cursor: grabbing; }
 .format-icon { flex: 0 0 auto; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 9px; background: var(--yellow); border: 1px solid var(--format-icon-border); color: var(--format-icon-text); font: 700 10px DM Mono, monospace; box-shadow: 2px 2px 0 var(--format-icon-shadow); text-transform: uppercase; }
-.format-icon.hdf { background: var(--orange); color: var(--hdf-format-text); }
-.format-icon.ffs { background: var(--ffs-format); color: var(--ffs-format-text); }
-.format-icon.dms { background: var(--dms-format); color: var(--dms-format-text); }
+.format-icon.hdf { background: var(--orange); color: var(--hd-format-text); }
+.format-icon.ffs { background: var(--gemdos-format); color: var(--gemdos-format-text); }
+.format-icon.dms { background: var(--msa-format); color: var(--msa-format-text); }
 .format-icon.rom { background: var(--blue); color: var(--rom-format-text); }
-.format-icon.kickfs { background: var(--ffs-format); color: var(--ffs-format-text); }
+.format-icon.kickfs { background: var(--gemdos-format); color: var(--gemdos-format-text); }
+.format-icon.gemdos { background: var(--gemdos-format); color: var(--gemdos-format-text); }
+.format-icon.hd { background: var(--orange); color: var(--hd-format-text); }
+.format-icon.st { background: var(--st-format); color: var(--st-format-text); }
+.format-icon.stx { background: var(--stx-format); color: var(--stx-format-text); }
+.format-icon.msa { background: var(--msa-format); color: var(--msa-format-text); }
 .rom-decode-section { margin-top: 1rem; }
 .rom-decode-section h3 { margin-bottom: .55rem; }
 .rom-header-grid { display: grid; grid-template-columns: minmax(9rem,.45fr) 1fr; gap: .35rem .8rem; margin: 0; }

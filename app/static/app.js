@@ -8580,7 +8580,7 @@ function updateThemeButton() {
   const dark = document.documentElement.dataset.theme === "dark";
   themeToggle.querySelector("b").textContent = dark ? "Light" : "Dark";
   themeToggle.setAttribute("aria-label", `Switch to ${dark ? "light" : "dark"} mode`);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#0b0e0c" : "#c9ba9b");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#1e1e1e" : "#d8d4c8");
 }
 themeToggle.onclick = () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
