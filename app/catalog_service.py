@@ -1148,7 +1148,7 @@ class CatalogueService:
         )
 
 
-#: Every machine identifier, in the order the workbench lists them.
+#: Every machine identifier, in the order the application lists them.
 MACHINE_ORDER = ("st", "megast", "ste", "megaste", "tt030", "falcon030")
 
 #: How a catalogue's compatibility prose names a machine. A model name is the

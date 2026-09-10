@@ -60,8 +60,8 @@ class IsoReadingTests(_DiscTestCase):
         self.assertEqual(iso.volume, "FALCON")
         self.assertEqual([e.name for e in iso.list_directory()], ["EXTRAS", "README.TXT"])
 
-    def test_drawers_are_listed_before_files(self) -> None:
-        """A person browsing a disc wants its drawers first, as elsewhere."""
+    def test_folders_are_listed_before_files(self) -> None:
+        """A person browsing a disc wants its folders first, as elsewhere."""
         tree = directory("")
         tree.add(file("AAA.TXT", b"a"))
         tree.add(directory("ZZZ"))
@@ -95,7 +95,7 @@ class IsoReadingTests(_DiscTestCase):
 
         self.assertEqual(self._open(tree).read_file("EMPTY"), b"")
 
-    def test_nested_drawers_are_reachable_by_path(self) -> None:
+    def test_nested_folders_are_reachable_by_path(self) -> None:
         tree = directory("")
         games = tree.add(directory("GAMES"))
         games.add(directory("EXTRAS")).add(file("TOOL.PRG", b"tool"))
@@ -131,7 +131,7 @@ class GemdosAttributeTests(_DiscTestCase):
         self.assertEqual(entry.attributes, ATTR_READ_ONLY)
         self.assertEqual(entry.attribute_letters, "r-----")
 
-    def test_a_drawer_also_carries_the_directory_attribute(self) -> None:
+    def test_a_folder_also_carries_the_directory_attribute(self) -> None:
         tree = directory("")
         tree.add(directory("EXTRAS"))
 

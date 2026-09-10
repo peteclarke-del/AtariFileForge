@@ -374,9 +374,9 @@ def _lookup_atari_legend(query: str, timeout: float) -> list[dict]:
     seen: set[str] = set()
     for first, second in zip(anchors, anchors[1:]):
         # A result is a screenshot link immediately followed by a text link to
-        # the same game. The page furniture -- recent comments, related games
-        # -- links each game only once, so this is what separates the search's
-        # answers from the rest of the page.
+        # the same game. The page furniture -- the recent-activity panel and
+        # the related-games strip -- links each game only once, so this is what
+        # separates the search's answers from the rest of the page.
         if first[0] != second[0] or first[1] or not second[1] or second[0] in seen:
             continue
         seen.add(second[0])

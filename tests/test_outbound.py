@@ -128,5 +128,29 @@ class CatalogueIntegrationTests(unittest.TestCase):
                     service._fetch("http://localhost:8666/admin")
 
 
+class MetadataLookupIntegrationTests(unittest.TestCase):
+    """The metadata lookup routes its requests through the same policy.
+
+    It reaches three sites and their addresses are constants in the module, so
+    it is tempting to let it call urlopen directly. The check belongs here
+    anyway: a redirect is followed by urllib without asking anyone, and the
+    destination it lands on is not a constant.
+    """
+
+    def test_a_lookup_destination_is_checked_before_it_is_fetched(self) -> None:
+        from app.metadata_lookup import _read
+
+        with _resolves_to("169.254.169.254"):
+            with self.assertRaisesRegex(DiskError, "private network"):
+                _read("http://metadata.example/latest", 1.0)
+
+    def test_a_lookup_cannot_be_pointed_at_a_local_file(self) -> None:
+        from app.metadata_lookup import _read
+
+        with patch("app.outbound.socket.getaddrinfo", side_effect=AssertionError("resolved")):
+            with self.assertRaises(DiskError):
+                _read("file:///etc/passwd", 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

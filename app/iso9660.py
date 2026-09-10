@@ -25,7 +25,7 @@ directory record says, and both trees describe the same files.
 
 A file on a CD is read-only by construction, so every entry reports the
 GEMDOS attributes an Atari would see for it: read-only, plus the directory
-attribute for a drawer and the hidden attribute when the disc marks the entry
+attribute for a folder and the hidden attribute when the disc marks the entry
 hidden. The recording datestamp comes from the directory record.
 
 The reader is deliberately suspicious of its input. A CD image is a file from
@@ -113,7 +113,7 @@ class Iso9660Error(Exception):
 
 @dataclass
 class IsoEntry:
-    """One file or drawer on the disc, named the way a person expects."""
+    """One file or folder on the disc, named the way a person expects."""
 
     name: str
     path: str
@@ -376,7 +376,7 @@ class Iso9660Image:
         The first two records of every directory are the directory itself and
         its parent, identified by a single zero or one byte rather than by
         name. They are skipped rather than shown, because an operator browsing
-        a disc does not want two unnamed entries at the top of every drawer.
+        a disc does not want two unnamed entries at the top of every folder.
         """
         if length <= 0:
             return []
@@ -458,7 +458,7 @@ class Iso9660Image:
         return entry
 
     def list_directory(self, path: str = "") -> list[IsoEntry]:
-        """Everything directly inside one drawer, drawers first then by name."""
+        """Everything directly inside one folder, folders first then by name."""
         entry = self._resolve(path)
         if not entry.directory:
             raise Iso9660Error(f"{path} is a file, so it has no contents.")
@@ -466,7 +466,7 @@ class Iso9660Image:
         return sorted(entries, key=lambda item: (not item.directory, item.name.casefold()))
 
     def walk(self, path: str = "") -> list[IsoEntry]:
-        """Every entry at or below one drawer, parents before their contents."""
+        """Every entry at or below one folder, parents before their contents."""
         collected: list[IsoEntry] = []
         pending = [(path, 0)]
         while pending:
@@ -489,7 +489,7 @@ class Iso9660Image:
         """The bytes of one file on the disc."""
         entry = self._resolve(path)
         if entry.directory:
-            raise Iso9660Error(f"{path} is a drawer, not a file.")
+            raise Iso9660Error(f"{path} is a folder, not a file.")
         return self.read_entry(entry)
 
     def read_entry(self, entry: IsoEntry) -> bytes:
