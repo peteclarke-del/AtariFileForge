@@ -1091,8 +1091,6 @@ def update_file_properties(
     expected_sha256: str,
     *,
     protection: str = "",
-    comment: str = "",
-    filetype: str = "",
     writable: bool = True,
     datestamp: str | None = None,
 ) -> dict:
@@ -1103,7 +1101,6 @@ def update_file_properties(
     which is what makes this safe on a file whose contents the editor has
     not read in full.
     """
-    del comment, filetype
     content = service.read_file(session, path, side)
     if sha256_bytes(content) != expected_sha256:
         raise DiskError("The file changed after the editor opened it. Reopen the file before changing its properties.")

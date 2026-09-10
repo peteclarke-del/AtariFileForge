@@ -145,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--attributes",
         help="GEMDOS attributes, as the six letters rhsvda or as a hex byte.",
     )
+    import_file.add_argument(
+        "--create-directories",
+        action="store_true",
+        help="Create the destination folder, and any folder above it, if it is missing.",
+    )
     _output_arguments(import_file)
 
     convert = sub.add_parser(
@@ -158,7 +163,6 @@ def build_parser() -> argparse.ArgumentParser:
     compact = sub.add_parser("compact", help="Compact a writable filesystem")
     _image_arguments(compact)
     compact.add_argument("--partition", type=int)
-    compact.add_argument("--order")
     _output_arguments(compact)
 
 
@@ -194,6 +198,30 @@ def _select_partition(service, session, args) -> None:
     partition = getattr(args, "partition", None)
     if partition is not None and session.kind == "hd":
         service.select_partition(session, int(partition))
+
+
+def _ensure_parent(service, session, destination: str, requested) -> None:
+    """Create the folder an import is destined for, when the caller asked for it.
+
+    A folder has to exist before a file can be written into it, and the
+    command line has no separate command that makes one. Without this, an
+    automated import into a folder that is not already there fails on a disk
+    the operator has every right to write to.
+    """
+    if not requested:
+        return
+    from app.atari_paths import parent as _parent
+
+    folder = _parent(str(destination))
+    if not folder:
+        return
+    try:
+        service.make_directory(session, folder)
+    except DiskError as exc:
+        # An existing folder is the outcome the caller asked for, so saying it
+        # already exists is not a failure of this operation.
+        if "exist" not in str(exc).casefold():
+            raise
 
 
 def _open_kwargs(args) -> dict:
@@ -346,6 +374,7 @@ def _mutate(args, progress, action) -> dict:
             "destination": args.destination,
             "partition": args.partition,
             "attributes": args.attributes,
+            "createDirectories": bool(args.create_directories),
         }
         compatibility = preflight_report(service, session, {
             "operation": "import-file",
@@ -365,6 +394,7 @@ def _mutate(args, progress, action) -> dict:
         )
         if blocking:
             raise DiskError(f"Compatibility preflight failed: {blocking['message']}")
+        _ensure_parent(service, session, args.destination, args.create_directories)
         service.put(session, args.destination, args.source, args.attributes)
         if args.dry_run:
             return {"image": identity, "payload": payload_identity, "action": decision, "compatibility": compatibility, "output": str(args.output), "validated": True}
@@ -393,8 +423,8 @@ def _compact(args, progress) -> dict:
     with open_image(args.image, **_open_kwargs(args)) as (service, session):
         identity = source_identity(args.image, service=service, session=session)
         _select_partition(service, session, args)
-        action = {"action": "compact", "partition": args.partition, "order": args.order, **_recorded_open_context(args)}
-        service.compact(session, args.order)
+        action = {"action": "compact", "partition": args.partition, **_recorded_open_context(args)}
+        service.compact(session)
         if args.dry_run:
             return {"image": identity, "action": action, "output": str(args.output), "validated": True}
         outputs = save_image(service, session, args.output, force=args.force, progress=progress)
@@ -540,6 +570,12 @@ def _recipe_run(args, progress) -> dict:
         for action in actions:
             kind = action.get("action")
             if kind == "import-file":
+                _ensure_parent(
+                    service,
+                    session,
+                    action["destination"],
+                    action.get("createDirectories"),
+                )
                 service.put(
                     session,
                     action["destination"],
@@ -547,7 +583,7 @@ def _recipe_run(args, progress) -> dict:
                     action.get("attributes"),
                 )
             elif kind == "compact":
-                service.compact(session, action.get("order"))
+                service.compact(session)
             elif kind == "save":
                 continue
             elif kind == "convert-container":
