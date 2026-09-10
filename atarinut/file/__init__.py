@@ -1,320 +1,303 @@
 """Per-file Atari catalogue metadata.
 
-An GEMDOS catalogue entry carries three things a workbench needs to
-preserve when a file moves between volumes: its protection bits, its free-text
-comment and its datestamp. This module owns all three, plus the file-type
-recognition used for icons and content classification.
+A GEMDOS directory entry carries two things a workbench needs to preserve
+when a file moves between volumes: its attribute byte and its datestamp.
+There is no comment field, no load address and no owner. This module owns
+the attribute bits, the FAT date and time words, and the ``AtariMeta`` value
+that carries both across a copy.
 
-Protection bits are stored in the file header block as one big-endian long.
-The low eight bits are, from bit 7 down: H S P A R W E D. The R, W, E and D
-bits are *inverted* on disk -- a clear bit means the permission is granted --
-which is the single most common source of mistakes when reading Atari
-metadata by hand, so it is handled here once.
+Attributes are one byte in the directory entry. From bit 0 upwards: read-only,
+hidden, system, volume label, directory, archive. The archive bit is set on
+every file GEMDOS writes and cleared by backup tools, so a freshly created
+file carries ``-----a``.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from enum import IntFlag
-from datetime import datetime, timedelta, timezone
 
 from ..errors import DataError
 from . import filetypes as filetypes  # re-exported for callers
 
-# Bit positions inside the protection long.
-FIBF_DELETE = 1 << 0     # inverted: clear = deletable
-FIBF_EXECUTE = 1 << 1    # inverted: clear = executable
-FIBF_WRITE = 1 << 2      # inverted: clear = writable
-FIBF_READ = 1 << 3       # inverted: clear = readable
-FIBF_ARCHIVE = 1 << 4
-FIBF_PURE = 1 << 5
-FIBF_SCRIPT = 1 << 6
-FIBF_HOLD = 1 << 7
+FA_READONLY = 0x01
+FA_HIDDEN = 0x02
+FA_SYSTEM = 0x04
+FA_VOLUME = 0x08
+FA_DIRECTORY = 0x10
+FA_ARCHIVE = 0x20
 
-INVERTED_BITS = FIBF_DELETE | FIBF_EXECUTE | FIBF_WRITE | FIBF_READ
+#: Every bit a directory entry can carry.
+ATTRIBUTE_MASK = 0x3F
 
-#: Canonical display order, matching ``List`` on a real machine.
+#: Bits a caller may change on an existing entry. The volume-label and
+#: directory bits describe what the entry *is* and are managed by the volume.
+EDITABLE_ATTRIBUTES = FA_READONLY | FA_HIDDEN | FA_SYSTEM | FA_ARCHIVE
+
+#: A newly written file carries only the archive bit, as GEMDOS writes it.
+DEFAULT_ATTRIBUTES = FA_ARCHIVE
+
+#: Canonical display order: ``rhsvda``.
 FLAG_ORDER = (
-    ("h", FIBF_HOLD, False),
-    ("s", FIBF_SCRIPT, False),
-    ("p", FIBF_PURE, False),
-    ("a", FIBF_ARCHIVE, False),
-    ("r", FIBF_READ, True),
-    ("w", FIBF_WRITE, True),
-    ("e", FIBF_EXECUTE, True),
-    ("d", FIBF_DELETE, True),
+    ("r", FA_READONLY),
+    ("h", FA_HIDDEN),
+    ("s", FA_SYSTEM),
+    ("v", FA_VOLUME),
+    ("d", FA_DIRECTORY),
+    ("a", FA_ARCHIVE),
 )
 
-#: A newly created file is readable, writable, executable and deletable.
-DEFAULT_PROTECTION = 0
-
-# The GEMDOS epoch. Datestamps count days, minutes and 1/50th-second ticks
-# from midnight on 1 January 1978.
-ATARI_EPOCH = datetime(1978, 1, 1, tzinfo=timezone.utc)
+#: FAT dates count from 1 January 1980 and run out at the end of 2107.
+FAT_EPOCH_YEAR = 1980
+FAT_LAST_YEAR = 2107
 
 
 class Access(IntFlag):
-    """Decoded protection bits for one catalogue entry.
+    """Decoded attribute bits for one catalogue entry.
 
-    The four permission bits are stored inverted on disk: a *set* bit removes
-    the permission. That inversion is preserved here rather than hidden,
-    because the raw long is what a real machine reads and what the workbench
-    writes back. The readable helpers below do the interpretation.
+    ``readable`` is always true because GEMDOS has no bit that denies a
+    read. ``locked`` is the read-only bit under the name the workbench's lock
+    control uses.
     """
 
-    D = FIBF_DELETE
-    E = FIBF_EXECUTE
-    W = FIBF_WRITE
-    R = FIBF_READ
-    A = FIBF_ARCHIVE
-    P = FIBF_PURE
-    S = FIBF_SCRIPT
-    H = FIBF_HOLD
-
-    #: Locked: neither writable nor deletable. The workbench's lock control.
-    L = FIBF_DELETE | FIBF_WRITE
-    #: The execute bit, under the name the workbench's run-only control uses.
-    X = FIBF_EXECUTE
+    READ_ONLY = FA_READONLY
+    HIDDEN = FA_HIDDEN
+    SYSTEM = FA_SYSTEM
+    VOLUME = FA_VOLUME
+    DIRECTORY = FA_DIRECTORY
+    ARCHIVE = FA_ARCHIVE
 
     @property
     def readable(self) -> bool:
-        return not self & Access.R
+        return True
 
     @property
     def writable(self) -> bool:
-        return not self & Access.W
+        return not self & Access.READ_ONLY
 
     @property
-    def executable(self) -> bool:
-        return not self & Access.E
+    def hidden(self) -> bool:
+        return bool(self & Access.HIDDEN)
 
     @property
-    def deletable(self) -> bool:
-        return not self & Access.D
+    def system(self) -> bool:
+        return bool(self & Access.SYSTEM)
+
+    @property
+    def is_volume_label(self) -> bool:
+        return bool(self & Access.VOLUME)
+
+    @property
+    def is_directory(self) -> bool:
+        return bool(self & Access.DIRECTORY)
 
     @property
     def archived(self) -> bool:
-        return bool(self & Access.A)
-
-    @property
-    def pure(self) -> bool:
-        return bool(self & Access.P)
-
-    @property
-    def script(self) -> bool:
-        return bool(self & Access.S)
-
-    @property
-    def hold(self) -> bool:
-        return bool(self & Access.H)
+        return bool(self & Access.ARCHIVE)
 
     @property
     def locked(self) -> bool:
-        """True when the entry cannot be deleted or written."""
-        return not self.deletable or not self.writable
+        """True when the entry is read-only and so cannot be deleted or written."""
+        return bool(self & Access.READ_ONLY)
 
     def with_locked(self, locked: bool) -> "Access":
-        return (self | Access.L) if locked else Access(self.value & ~Access.L.value)
+        if locked:
+            return Access(self.value | FA_READONLY)
+        return Access(self.value & ~FA_READONLY)
 
     def __str__(self) -> str:  # pragma: no cover - convenience
         return format_access_text(self)
 
 
 def format_access_text(access: Access | int | None) -> str:
-    """Render protection bits the way ``List`` does, for example ``----rwed``."""
+    """Render attributes in the fixed six-letter ``rhsvda`` form."""
     if access is None:
         return ""
     value = access.value if isinstance(access, Access) else int(access)
-    letters = []
-    for letter, mask, inverted in FLAG_ORDER:
-        present = (not value & mask) if inverted else bool(value & mask)
-        letters.append(letter if present else "-")
-    return "".join(letters)
+    return "".join(letter if value & mask else "-" for letter, mask in FLAG_ORDER)
 
 
-def parse_access_text(text: str) -> Access:
-    """Parse ``hsparwed`` style protection text into protection bits."""
-    text = str(text or "").strip().lower()
-    if not text:
-        return Access(DEFAULT_PROTECTION)
-    if not re.fullmatch(r"[hsparwed-]{1,8}", text):
-        raise DataError(
-            "Protection flags may only contain h, s, p, a, r, w, e, d or -."
-        )
-    if len(text) == 8:
-        selected = {
-            letter for letter, character in zip("hsparwed", text) if character != "-"
-        }
-    else:
-        selected = {character for character in text if character != "-"}
-    value = 0
-    for letter, mask, inverted in FLAG_ORDER:
-        granted = letter in selected
-        if inverted:
-            if not granted:
-                value |= mask
-        elif granted:
-            value |= mask
-    return Access(value)
+_NUMBER = re.compile(r"(?:0[xX]|\$|&)([0-9A-Fa-f]{1,2})|([0-9]{1,3})")
 
 
-def parse_protection_value(text: str | int | None) -> int:
-    """Parse a 32-bit protection value written as decimal or hexadecimal.
-
-    ``0x``, ``$`` and ``&`` prefixes are all accepted because Atari
-    documentation, GEMDOS scripts and assembler sources each use a
-    different one.
-    """
+def parse_attribute_value(text: str | int | None) -> int:
+    """Parse an attribute byte written as decimal or ``0x``, ``$`` or ``&`` hex."""
     if text is None or text == "":
-        return 0
+        return DEFAULT_ATTRIBUTES
     if isinstance(text, int):
         value = text
     else:
         cleaned = str(text).strip().replace("_", "")
         if not cleaned:
-            return 0
-        match = re.fullmatch(r"(?:0[xX]|\$|&)?([0-9A-Fa-f]{1,8})", cleaned)
-        if match and (
-            cleaned[0] in "$&"
-            or cleaned[:2].lower() == "0x"
-            or re.search(r"[A-Fa-f]", cleaned)
-        ):
-            value = int(match.group(1), 16)
-        else:
-            try:
-                value = int(cleaned, 10)
-            except ValueError:
-                if match:
-                    value = int(match.group(1), 16)
-                else:
-                    raise DataError(f"{text!r} is not a 32-bit value.") from None
-    if not 0 <= value <= 0xFFFFFFFF:
-        raise DataError("A 32-bit value must be between 0 and &FFFFFFFF.")
+            return DEFAULT_ATTRIBUTES
+        match = _NUMBER.fullmatch(cleaned)
+        if match is None:
+            raise DataError(f"{text!r} is not an attribute value.")
+        value = int(match.group(1), 16) if match.group(1) is not None else int(match.group(2), 10)
+    if not 0 <= value <= ATTRIBUTE_MASK:
+        raise DataError("An attribute byte must be between 0 and 0x3F.")
     return value
 
 
-def format_address(value: int | None) -> str:
-    """Render a 32-bit value in the ``&`` hexadecimal form the workbench uses."""
-    return f"&{int(value or 0) & 0xFFFFFFFF:08X}"
+def parse_access_text(text: str | int | None) -> Access:
+    """Parse ``rhsvda`` style text, or a number, into attribute bits.
+
+    The six-letter form is positional and ``-`` clears a bit. A shorter
+    string is a set of letters to turn on, so ``r`` alone means read-only
+    plus the archive bit GEMDOS gives every file.
+    """
+    if isinstance(text, int):
+        return Access(parse_attribute_value(text))
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return Access(DEFAULT_ATTRIBUTES)
+    if _NUMBER.fullmatch(cleaned) and not re.fullmatch(r"[rhsvdaRHSVDA-]+", cleaned):
+        return Access(parse_attribute_value(cleaned))
+    lowered = cleaned.lower()
+    if not re.fullmatch(r"[rhsvda-]{1,6}", lowered):
+        raise DataError("Attribute flags may only contain r, h, s, v, d, a or -.")
+    value = 0
+    if len(lowered) == 6:
+        for (letter, mask), character in zip(FLAG_ORDER, lowered):
+            if character == "-":
+                continue
+            if character != letter:
+                raise DataError(
+                    "Six-letter attribute text must follow the rhsvda order, "
+                    "with - for a clear bit."
+                )
+            value |= mask
+        return Access(value)
+    for letter, mask in FLAG_ORDER:
+        if letter in lowered:
+            value |= mask
+    return Access(value | FA_ARCHIVE)
 
 
-def datestamp_to_datetime(days: int, mins: int, ticks: int) -> datetime:
-    """Convert an GEMDOS days/minutes/ticks triple into a datetime."""
-    return ATARI_EPOCH + timedelta(
-        days=int(days), minutes=int(mins), seconds=int(ticks) / 50.0
-    )
+# ---------------------------------------------------------------------------
+# Datestamps
+# ---------------------------------------------------------------------------
+def fat_to_datetime(date_word: int, time_word: int) -> datetime | None:
+    """Convert FAT date and time words into an aware UTC datetime.
+
+    A zero date word means the entry was never stamped; the result is None
+    rather than the meaningless 0 January 1980. Out-of-range fields, which
+    some formatters write, are clamped instead of raising so a listing never
+    fails on one bad entry.
+    """
+    date_word = int(date_word) & 0xFFFF
+    time_word = int(time_word) & 0xFFFF
+    if date_word == 0:
+        return None
+    year = FAT_EPOCH_YEAR + (date_word >> 9)
+    month = min(max((date_word >> 5) & 0x0F, 1), 12)
+    day = max(date_word & 0x1F, 1)
+    hour = min(time_word >> 11, 23)
+    minute = min((time_word >> 5) & 0x3F, 59)
+    second = min((time_word & 0x1F) * 2, 58)
+    while day > 28:
+        try:
+            return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+        except ValueError:
+            day -= 1
+    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
 
 
-def datetime_to_datestamp(moment: datetime) -> tuple[int, int, int]:
-    """Convert a datetime into an GEMDOS days/minutes/ticks triple."""
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    delta = moment.astimezone(timezone.utc) - ATARI_EPOCH
-    if delta.total_seconds() < 0:
-        raise DataError("Atari datestamps cannot precede 1 January 1978.")
-    days = delta.days
-    remainder = delta.seconds + delta.microseconds / 1_000_000
-    mins = int(remainder // 60)
-    ticks = int(round((remainder - mins * 60) * 50))
-    if ticks >= 3000:  # pragma: no cover - rounding guard
-        ticks = 2999
-    return days, mins, ticks
+def datetime_to_fat(moment: datetime | None) -> tuple[int, int]:
+    """Convert a datetime into FAT date and time words.
+
+    Naive datetimes are taken as UTC. The result is clamped to the 1980 to
+    2107 range the words can express and rounded down to the two-second
+    resolution of the time word.
+    """
+    if moment is None:
+        moment = datetime.now(timezone.utc)
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc)
+    year = moment.year
+    if year < FAT_EPOCH_YEAR:
+        return (1 << 5) | 1, 0
+    if year > FAT_LAST_YEAR:
+        return (127 << 9) | (12 << 5) | 31, (23 << 11) | (59 << 5) | 29
+    date_word = ((year - FAT_EPOCH_YEAR) << 9) | (moment.month << 5) | moment.day
+    time_word = (moment.hour << 11) | (moment.minute << 5) | (moment.second // 2)
+    return date_word, time_word
+
+
+def clamp_datestamp(moment: datetime | None) -> datetime | None:
+    """Round a datetime to what a directory entry can store."""
+    if moment is None:
+        return None
+    return fat_to_datetime(*datetime_to_fat(moment))
 
 
 class AtariMeta:
     """The catalogue metadata Atari File Forge preserves across a copy.
 
-    An GEMDOS entry carries three things worth keeping when a file moves
-    between volumes: its protection bits, its free-text comment and its
-    datestamp. A Workbench icon type is carried alongside them, because it
-    lives in the entry's companion ``.info`` file rather than in the header.
-
-    There is deliberately no load or execution address here. GEMDOS does not
-    record one: a load file carries its own hunk header, and the loader reads
-    that. Anything claiming otherwise is describing a different machine.
+    A GEMDOS entry carries an attribute byte and one datestamp. There is
+    deliberately no comment and no load address: GEMDOS records neither, and
+    a program's load information lives in its own executable header.
     """
 
-    __slots__ = ("protection", "comment", "datestamp", "filetype", "extra")
+    __slots__ = ("attributes", "datestamp", "extra")
 
     def __init__(
         self,
-        protection: int = DEFAULT_PROTECTION,
-        comment: str = "",
+        attributes: int = DEFAULT_ATTRIBUTES,
         datestamp: datetime | None = None,
-        filetype: int | None = None,
         extra: dict | None = None,
         *,
         access: "Access | int | None" = None,
     ):
         if access is not None:
-            protection = access.value if isinstance(access, Access) else int(access)
-        self.protection = int(protection) & 0xFFFFFFFF
-        self.comment = str(comment or "")
+            attributes = access.value if isinstance(access, Access) else int(access)
+        self.attributes = int(attributes) & ATTRIBUTE_MASK
         self.datestamp = datestamp
-        self.filetype = filetype
         self.extra = dict(extra or {})
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return (
-            f"AtariMeta(protection=&{self.protection:08X}, comment={self.comment!r}, "
-            f"datestamp={self.datestamp!r}, filetype={self.filetype!r})"
+            f"AtariMeta(attributes=0x{self.attributes:02X}, datestamp={self.datestamp!r})"
         )
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, AtariMeta):
             return NotImplemented
-        return (
-            self.protection == other.protection
-            and self.comment == other.comment
-            and self.datestamp == other.datestamp
-            and self.filetype == other.filetype
-        )
+        return self.attributes == other.attributes and self.datestamp == other.datestamp
 
     @property
     def access(self) -> Access:
-        return Access(self.protection)
+        return Access(self.attributes)
 
-    def with_protection(self, value: int) -> "AtariMeta":
-        return AtariMeta(
-            protection=int(value) & 0xFFFFFFFF,
-            comment=self.comment,
-            datestamp=self.datestamp,
-            filetype=self.filetype,
-            extra=dict(self.extra),
-        )
+    def with_attributes(self, value: int | Access) -> "AtariMeta":
+        raw = value.value if isinstance(value, Access) else int(value)
+        return AtariMeta(attributes=raw, datestamp=self.datestamp, extra=dict(self.extra))
 
-    def with_comment(self, value: str) -> "AtariMeta":
-        text = str(value or "")
-        if len(text) > 79:
-            raise DataError("An Atari file comment can hold at most 79 characters.")
-        return AtariMeta(
-            protection=self.protection,
-            comment=text,
-            datestamp=self.datestamp,
-            filetype=self.filetype,
-            extra=dict(self.extra),
-        )
+    def with_datestamp(self, moment: datetime | None) -> "AtariMeta":
+        return AtariMeta(attributes=self.attributes, datestamp=moment, extra=dict(self.extra))
 
 
 __all__ = [
-    "ATARI_EPOCH",
+    "ATTRIBUTE_MASK",
     "Access",
     "AtariMeta",
-    "DEFAULT_PROTECTION",
-    "FIBF_ARCHIVE",
-    "FIBF_DELETE",
-    "FIBF_EXECUTE",
-    "FIBF_HOLD",
-    "FIBF_PURE",
-    "FIBF_READ",
-    "FIBF_SCRIPT",
-    "FIBF_WRITE",
+    "DEFAULT_ATTRIBUTES",
+    "EDITABLE_ATTRIBUTES",
+    "FA_ARCHIVE",
+    "FA_DIRECTORY",
+    "FA_HIDDEN",
+    "FA_READONLY",
+    "FA_SYSTEM",
+    "FA_VOLUME",
+    "FAT_EPOCH_YEAR",
+    "FAT_LAST_YEAR",
     "FLAG_ORDER",
-    "datestamp_to_datetime",
-    "datetime_to_datestamp",
+    "clamp_datestamp",
+    "datetime_to_fat",
+    "fat_to_datetime",
     "filetypes",
     "format_access_text",
-    "format_address",
     "parse_access_text",
-    "parse_protection_value",
+    "parse_attribute_value",
 ]

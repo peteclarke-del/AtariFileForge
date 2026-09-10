@@ -4,8 +4,8 @@ Atari File Forge only ever asks this package three things: give me a reader
 for this image, tell me what is on it, and mount it. Everything else is
 reached through the mount object those calls return.
 
-The protocol classes at the bottom are deliberately structural. A mount
-advertises that it carries protection bits by subclassing ``AtariMetadata``,
+The protocol classes at the top are deliberately structural. A mount
+advertises that it carries attribute bits by subclassing ``AtariMetadata``,
 so listing code can ask ``isinstance(mount, AtariMetadata)`` without knowing
 which filing system produced it.
 """
@@ -13,39 +13,45 @@ which filing system produced it.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..errors import ConfigurationError, DataError
 from ..file import Access, AtariMeta
-from .gemdos import (
-    GEMDOSVolume,
-    Entry,
-    Stat,
-    format_volume,
-    join_path,
-    split_path,
-    validate_name,
+from .ahdi import (
+    AhdiDisk,
+    Partition,
+    create_partitioned_image,
+    partition_reader,
+    read_partition_table,
+    write_partition_table,
 )
 from .blocks import (
     BLOCK_SIZE,
-    DD_BLOCKS,
-    DOS_TYPES,
-    HD_BLOCKS,
+    DD_SECTORS,
+    HD_SECTORS,
     NAMED_GEOMETRIES,
-    RESERVED_BLOCKS,
+    SECTOR_SIZE,
     BlockReader,
     Geometry,
+    named_geometry,
+    partition_geometry,
+    volume_geometry,
 )
-from .rdb import (
-    Partition,
-    RigidDisk,
-    find_rdb_block,
-    partition_reader,
-    read_rigid_disk,
-    write_rigid_disk,
+from .gemdos import (
+    Entry,
+    GEMDOSVolume,
+    Stat,
+    bpb_problems,
+    format_volume,
+    geometry_from_bpb,
+    join_path,
+    parse_boot_sector,
+    probe_volume,
+    split_path,
+    validate_label,
+    validate_name,
 )
 
 
@@ -53,7 +59,7 @@ from .rdb import (
 # Mount protocols
 # ---------------------------------------------------------------------------
 class AtariMetadata:
-    """A mount whose entries carry protection bits and a comment."""
+    """A mount whose entries carry GEMDOS attribute bits."""
 
     def atari_meta(self, path: str) -> AtariMeta:  # pragma: no cover - protocol
         raise NotImplementedError
@@ -66,118 +72,19 @@ class Datestamped:
         raise NotImplementedError
 
 
-class Filetyped:
-    """A mount that can report a Workbench object type for an entry."""
-
-    def filetype(self, path: str) -> int | None:  # pragma: no cover
-        raise NotImplementedError
-
-
 # ---------------------------------------------------------------------------
 # Readers
 # ---------------------------------------------------------------------------
-def reader_for(path: Path | str, *, writable: bool = False, block_size: int = BLOCK_SIZE) -> BlockReader:
-    """Open an image file for block access."""
+def reader_for(path: Path | str, *, writable: bool = False, block_size: int = SECTOR_SIZE) -> BlockReader:
+    """Open an image file for sector access."""
     return BlockReader(path, writable=writable, block_size=block_size)
-
-
-# ---------------------------------------------------------------------------
-# Geometry sidecars
-# ---------------------------------------------------------------------------
-GEOMETRY_KEYS = {
-    "surfaces": "surfaces",
-    "heads": "surfaces",
-    "blockspertrack": "blocks_per_track",
-    "sectorspertrack": "blocks_per_track",
-    "sectors": "blocks_per_track",
-    "reserved": "reserved",
-    "blocksize": "block_size",
-    "sectorsize": "block_size",
-    "lowcyl": "low_cylinder",
-    "highcyl": "high_cylinder",
-    "cylinders": "cylinders",
-    "bootpri": "boot_priority",
-    "dostype": "dos_type",
-}
-
-
-def geometry_from_geo(data: bytes | str) -> Geometry:
-    """Parse a WinUAE ``.geo`` sidecar for an RDB-less hardfile.
-
-    A hardfile carries no partition table, so the host has to be told its
-    surfaces, sectors and reserved-block count. WinUAE stores that beside the
-    image as ``name.hdf.geo``: plain ``key=value`` lines, optionally with
-    comments. Atari File Forge accepts the same file so an image prepared for
-    an emulator opens here without being described twice.
-    """
-    if isinstance(data, bytes):
-        text = data.decode("latin-1", "replace")
-    else:
-        text = str(data)
-    values: dict[str, int | bytes] = {}
-    for line in text.splitlines():
-        line = line.split("#", 1)[0].split(";", 1)[0].strip()
-        if not line or "=" not in line:
-            continue
-        key, _, raw = line.partition("=")
-        key = key.strip().lower().replace("_", "").replace(" ", "")
-        field = GEOMETRY_KEYS.get(key)
-        if field is None:
-            continue
-        raw = raw.strip()
-        if field == "dos_type":
-            cleaned = raw.strip("'\"")
-            if re.fullmatch(r"(?:0x)?[0-9A-Fa-f]{8}", cleaned):
-                values[field] = int(cleaned.removeprefix("0x"), 16).to_bytes(4, "big")
-            else:
-                values[field] = cleaned.encode("latin-1")[:4].ljust(4, b"\0")
-            continue
-        try:
-            values[field] = int(raw, 0)
-        except ValueError:
-            continue
-    if not values:
-        raise DataError("The geometry sidecar does not declare any usable fields.")
-    geometry = Geometry(
-        surfaces=int(values.get("surfaces", 1)),
-        blocks_per_track=int(values.get("blocks_per_track", 32)),
-        reserved=int(values.get("reserved", RESERVED_BLOCKS)),
-        block_size=int(values.get("block_size", BLOCK_SIZE)),
-        low_cylinder=int(values.get("low_cylinder", 0)),
-        boot_priority=int(values.get("boot_priority", 0)),
-        dos_type=values.get("dos_type", b"DOS\x03"),
-    )
-    if "cylinders" in values:
-        geometry.high_cylinder = geometry.low_cylinder + int(values["cylinders"]) - 1
-    elif "high_cylinder" in values:
-        geometry.high_cylinder = int(values["high_cylinder"])
-    return geometry
-
-
-#: Legacy alias. Atari File Forge opens a hardfile and its geometry sidecar
-#: together in the same way earlier releases opened a descriptor pair.
-geometry_from_dsc = geometry_from_geo
-
-
-def write_geometry(geometry: Geometry) -> str:
-    """Render a ``.geo`` sidecar for a hardfile this build created."""
-    return (
-        f"surfaces={geometry.surfaces}\n"
-        f"blockspertrack={geometry.blocks_per_track}\n"
-        f"reserved={geometry.reserved}\n"
-        f"blocksize={geometry.block_size}\n"
-        f"lowcyl={geometry.low_cylinder}\n"
-        f"highcyl={geometry.high_cylinder}\n"
-        f"bootpri={geometry.boot_priority}\n"
-        f"dostype={geometry.dos_type.hex().upper()}\n"
-    )
 
 
 # ---------------------------------------------------------------------------
 # Mounts
 # ---------------------------------------------------------------------------
-class GEMDOSMount(AtariMetadata, Datestamped, Filetyped):
-    """The workbench-facing view of one mounted OFS or FFS volume."""
+class GEMDOSMount(AtariMetadata, Datestamped):
+    """The workbench-facing view of one mounted FAT12 or FAT16 volume."""
 
     def __init__(self, volume: GEMDOSVolume, name: str = "gemdos"):
         self.volume = volume
@@ -189,11 +96,22 @@ class GEMDOSMount(AtariMetadata, Datestamped, Filetyped):
         return self.volume.format
 
     @property
+    def fat_bits(self) -> int:
+        return self.volume.fat_bits
+
+    @property
+    def geometry(self) -> Geometry:
+        return self.volume.geometry
+
+    @property
     def title(self) -> str:
         return self.volume.title
 
     def set_title(self, value: str) -> None:
         self.volume.set_title(value)
+
+    def volume_datestamp(self) -> datetime | None:
+        return self.volume.volume_datestamp()
 
     # ---- traversal ----------------------------------------------------
     def exists(self, path: str | None) -> bool:
@@ -241,12 +159,22 @@ class GEMDOSMount(AtariMetadata, Datestamped, Filetyped):
         return PathNode(self, path or "")
 
     def remove(self, path: str, *, recursive: bool = False, force: bool = False) -> None:
-        """Delete an entry. ``force`` clears protection bits that would block it."""
+        """Delete an entry. ``force`` clears read-only bits that would block it.
+
+        A forced removal is recursive, and every read-only entry beneath
+        the target is unlocked first, because GEMDOS refuses to delete a
+        read-only file wherever it sits in the tree.
+        """
         if force:
-            stat = self.volume.stat(path)
-            if not stat.is_dir and self.volume.access(path).locked:
-                self.volume.set_access(path, 0)
             recursive = True
+            pending = [path]
+            while pending:
+                current = pending.pop()
+                access = self.volume.access(current)
+                if access.locked:
+                    self.volume.set_access(current, access.with_locked(False))
+                if self.volume.stat(current).is_dir:
+                    pending.extend(entry.path for entry in self.volume.iter_entries(current))
         self.volume.remove(path, recursive=recursive)
 
     def rename(self, source: str, destination: str) -> None:
@@ -271,40 +199,13 @@ class GEMDOSMount(AtariMetadata, Datestamped, Filetyped):
     def set_datestamp(self, path: str, moment: datetime) -> None:
         self.volume.set_datestamp(path, moment)
 
-    def filetype(self, path: str) -> int | None:
-        """Report the Workbench type from the entry's ``.info`` icon."""
-        from ..file.filetypes import icon_name, icon_type
+    def filetype(self, path: str) -> str | None:
+        """Classify an entry by its name, without reading it."""
+        from ..file.filetypes import classify_name
 
-        icon = icon_name(path)
-        if not self.volume.exists(icon):
+        if self.volume.stat(path).is_dir:
             return None
-        try:
-            return icon_type(self.volume.read_bytes(icon))
-        except DataError:
-            return None
-
-    def set_filetype(self, path: str, value: int | str | None) -> None:
-        """Record a Workbench object type by writing or updating its icon.
-
-        GEMDOS keeps no type field in the catalogue, so the type lives in
-        the ``.info`` file Workbench reads. Writing one here means a type set
-        on an import is the same type Workbench shows on a real machine.
-        """
-        from ..file.filetypes import icon_name, minimal_icon, parse_filetype
-
-        code = parse_filetype(value)
-        icon = icon_name(path)
-        if code is None:
-            if self.volume.exists(icon):
-                self.volume.remove(icon)
-            return
-        if self.volume.exists(icon):
-            existing = bytearray(self.volume.read_bytes(icon))
-            if len(existing) >= 50:
-                existing[48:50] = int(code).to_bytes(2, "big")
-                self.volume.write_bytes(icon, bytes(existing))
-                return
-        self.volume.write_bytes(icon, minimal_icon(code))
+        return classify_name(split_path(path)[-1] if split_path(path) else "")
 
     # ---- volume-level -------------------------------------------------
     def size_bytes(self) -> int:
@@ -312,6 +213,9 @@ class GEMDOSMount(AtariMetadata, Datestamped, Filetyped):
 
     def free_bytes(self) -> int:
         return self.volume.free_bytes()
+
+    def used_bytes(self) -> int:
+        return self.volume.used_bytes()
 
     def boot_option(self) -> int:
         return self.volume.boot_option()
@@ -338,11 +242,10 @@ class GEMDOSMount(AtariMetadata, Datestamped, Filetyped):
 class PathNode:
     """One place inside a mounted volume, whether or not it exists yet.
 
-    The workbench addresses a destination before creating it, so this node is
-    deliberately lazy: it resolves nothing until asked. ``title`` reads and
-    writes the entry's free-text comment, which is the nearest GEMDOS
-    equivalent of a directory title and is what a real machine shows in
-    ``List``.
+    The workbench addresses a destination before creating it, so this node
+    is deliberately lazy: it resolves nothing until asked. Only the volume
+    root has a title, which is the volume label; GEMDOS keeps no title or
+    comment on a directory, so a node inside the volume reports its name.
     """
 
     def __init__(self, mount: "GEMDOSMount", path: str):
@@ -369,17 +272,15 @@ class PathNode:
 
     @property
     def supports_title(self) -> bool:
-        """Comments are available on every GEMDOS entry, including drawers."""
-        return True
+        """Only the volume root carries a title: its label."""
+        return self.is_root
 
-    # ---- title, which is the entry comment ----------------------------
+    # ---- title --------------------------------------------------------
     @property
     def title(self) -> str:
         if self.is_root:
             return self.mount.title
-        if not self.exists:
-            return ""
-        return self.mount.atari_meta(self.path).comment
+        return self.name
 
     @title.setter
     def title(self, value: str) -> None:
@@ -389,8 +290,10 @@ class PathNode:
         if self.is_root:
             self.mount.set_title(value)
             return
-        meta = self.mount.atari_meta(self.path)
-        self.mount.set_atari_meta(self.path, meta.with_comment(str(value or "")[:79]))
+        raise DataError(
+            "GEMDOS keeps no title on a file or directory; only the volume label "
+            "can be set. Rename the entry instead."
+        )
 
     # ---- content ------------------------------------------------------
     def read_bytes(self) -> bytes:
@@ -401,17 +304,11 @@ class PathNode:
         data: bytes,
         *,
         access: Access | int | None = None,
-        comment: str | None = None,
         datestamp: datetime | None = None,
     ) -> None:
-        """Write content and its catalogue metadata as one update."""
-        protection = 0
-        if access is not None:
-            protection = access.value if isinstance(access, Access) else int(access)
-        meta = AtariMeta(
-            protection=protection,
-            comment=str(comment or ""),
-            datestamp=datestamp,
+        """Write content and its directory metadata as one update."""
+        meta = AtariMeta(access=access, datestamp=datestamp) if access is not None else AtariMeta(
+            datestamp=datestamp
         )
         self.mount.write_bytes(self.path, data, meta)
 
@@ -427,6 +324,45 @@ class PathNode:
 
 #: Earlier releases addressed only directories through this node.
 DirectoryNode = PathNode
+
+
+class AhdiMount:
+    """A partitioned drive presented as a list of mountable volumes."""
+
+    def __init__(self, reader: BlockReader):
+        self.reader = reader
+        self.disk: AhdiDisk = read_partition_table(reader)
+        self.filesystem = "ahdi"
+
+    @property
+    def partitions(self) -> list[Partition]:
+        return self.disk.partitions
+
+    def partition(self, index: int) -> Partition:
+        return self.disk.partition(index)
+
+    def open_partition(self, index: int, *, writable: bool | None = None) -> GEMDOSMount:
+        partition = self.partition(index)
+        if not partition.is_gemdos:
+            raise DataError(
+                f"Partition {partition.name} is a {partition.id} partition, not a GEMDOS volume."
+            )
+        window = partition_reader(self.reader, partition)
+        if writable is not None:
+            window.writable = bool(writable) and self.reader.writable
+        try:
+            # A partition reached through a table is FAT16 whatever its
+            # cluster count: the driver's BPB flags it so and TOS obeys.
+            return GEMDOSMount(GEMDOSVolume(window, fat_bits=16))
+        except Exception:
+            window.close()
+            raise
+
+    def to_dict(self) -> dict:
+        return self.disk.to_dict()
+
+    def close(self) -> None:
+        self.reader.close()
 
 
 # ---------------------------------------------------------------------------
@@ -449,150 +385,123 @@ class Candidate:
 
 
 class GEMDOSFilesystem:
-    """Registry entry for OFS and FFS volumes."""
+    """Registry entry for FAT12 and FAT16 volumes."""
 
     name = "gemdos"
-    label = "GEMDOS OFS/FFS"
+    label = "GEMDOS FAT12/FAT16"
+    fat_bits: int | None = None
 
     def open(self, reader: BlockReader, geometry: Geometry | None = None) -> GEMDOSMount:
-        return GEMDOSMount(GEMDOSVolume(reader, geometry), self.name)
+        return GEMDOSMount(GEMDOSVolume(reader, geometry, fat_bits=self.fat_bits), self.name)
+
+    def identify(self, reader: BlockReader) -> Candidate | None:
+        found = probe_volume(reader, fat_bits=self.fat_bits)
+        if found is None:
+            return None
+        confidence, detail = found
+        return Candidate(self.name, confidence, detail)
+
+
+class FAT12Filesystem(GEMDOSFilesystem):
+    name = "fat12"
+    label = "GEMDOS FAT12 (floppies and small partitions)"
+    fat_bits = 12
+
+
+class FAT16Filesystem(GEMDOSFilesystem):
+    name = "fat16"
+    label = "GEMDOS FAT16 (hard-disk partitions)"
+    fat_bits = 16
+
+
+def _whole_image_bpb_matches(reader: BlockReader) -> bool:
+    """True when sector 0 is a BPB that describes exactly this image.
+
+    A root sector never carries one, so a matching BPB means the image is a
+    bare volume even if the bytes at 0x1C6 happen to look like a table.
+    """
+    boot = parse_boot_sector(reader.read_block(0))
+    if bpb_problems(boot, reader.total_blocks):
+        return False
+    return boot.geometry().physical_sectors == reader.total_blocks
+
+
+class AhdiFilesystem:
+    """Registry entry for a partitioned hard-disk image."""
+
+    name = "ahdi"
+    label = "AHDI or MBR partitioned hard disk"
+
+    def open(self, reader: BlockReader, geometry: Geometry | None = None) -> AhdiMount:
+        return AhdiMount(reader)
 
     def identify(self, reader: BlockReader) -> Candidate | None:
         if not reader.total_blocks:
             return None
-        signature = reader.read_block(0)[:4]
-        if signature[:3] not in (b"DOS", b"PFS", b"SFS"):
-            return None
-        label = DOS_TYPES.get(signature)
-        if label is None:
-            return None
         try:
-            volume = GEMDOSVolume(reader)
+            disk = read_partition_table(reader)
         except DataError:
-            return Candidate(self.name, 0.5, f"{label} boot block without a readable root")
-        return Candidate(self.name, 1.0, f"{volume.format} volume named {volume.title!r}")
-
-
-class OFSFilesystem(GEMDOSFilesystem):
-    name = "ofs"
-    label = "GEMDOS Old File System"
-
-    def identify(self, reader: BlockReader) -> Candidate | None:
-        found = super().identify(reader)
-        if found is None:
             return None
-        signature = reader.read_block(0)[:4]
-        if signature[3] & 1:
+        if _whole_image_bpb_matches(reader):
             return None
-        return Candidate(self.name, found.confidence, found.detail)
-
-
-class FFSFilesystem(GEMDOSFilesystem):
-    name = "ffs"
-    label = "GEMDOS Fast File System"
-
-    def identify(self, reader: BlockReader) -> Candidate | None:
-        found = super().identify(reader)
-        if found is None:
-            return None
-        signature = reader.read_block(0)[:4]
-        if not signature[3] & 1:
-            return None
-        return Candidate(self.name, found.confidence, found.detail)
-
-
-class RigidDiskFilesystem:
-    """Registry entry for a partitioned hard-drive file."""
-
-    name = "rdb"
-    label = "Rigid Disk Block hard drive"
-
-    def open(self, reader: BlockReader, geometry: Geometry | None = None) -> "RigidDiskMount":
-        return RigidDiskMount(reader)
-
-    def identify(self, reader: BlockReader) -> Candidate | None:
-        block = find_rdb_block(reader)
-        if block is None:
-            return None
-        try:
-            disk = read_rigid_disk(reader)
-        except DataError as error:
-            return Candidate(self.name, 0.5, str(error))
-        return Candidate(
-            self.name,
-            1.0,
-            f"{len(disk.partitions)} partition(s) on {disk.cylinders} cylinders",
+        confidence = 1.0
+        if disk.hd_size > reader.total_blocks or disk.notes:
+            confidence = 0.6
+        gemdos = sum(1 for partition in disk.partitions if partition.is_gemdos)
+        detail = (
+            f"{len(disk.partitions)} partition(s), {gemdos} GEMDOS, "
+            f"{disk.scheme.upper()} table, {disk.hd_size} sectors"
         )
+        if disk.byte_swapped:
+            detail += ", byte-swapped image"
+        return Candidate(self.name, confidence, detail)
 
 
-class KickstartFilesystem:
-    """Registry entry for a Kickstart ROM's resident-module list."""
+class TOSFilesystem:
+    """Registry entry for a TOS ROM image, decoded into its components.
 
-    name = "kickfs"
-    label = "Kickstart ROM modules"
+    The decoder lives in ``atarinut.tosrom``. It is imported lazily so the
+    rest of the engine works, and this entry simply reports nothing, when
+    that package is not installed.
+    """
+
+    name = "tosrom"
+    label = "TOS ROM image"
 
     def open(self, reader: BlockReader, geometry: Geometry | None = None):
-        from ..kickfs.kickfs import KickstartMount
-
-        return KickstartMount(reader)
+        try:
+            from ..tosrom import TOSMount
+        except ImportError as error:
+            raise ConfigurationError("TOS ROM support is not available in this build.") from error
+        return TOSMount(reader)
 
     def identify(self, reader: BlockReader) -> Candidate | None:
-        from ..kickfs.kickfs import KICKFS
-
         try:
-            image = KICKFS.from_bytes(_whole_image(reader))
-        except DataError:
+            from ..tosrom import TOSRom, is_tos_rom
+        except ImportError:
             return None
-        return Candidate(
-            self.name,
-            1.0,
-            f"Kickstart {image.version} with {len(image.data_files)} module(s)",
-        )
-
-
-class RigidDiskMount:
-    """A partitioned drive presented as a list of mountable volumes."""
-
-    def __init__(self, reader: BlockReader):
-        self.reader = reader
-        self.disk: RigidDisk = read_rigid_disk(reader)
-        self.filesystem = "rdb"
-
-    @property
-    def partitions(self) -> list[Partition]:
-        return self.disk.partitions
-
-    def partition(self, index: int) -> Partition:
-        for candidate in self.disk.partitions:
-            if candidate.index == index:
-                return candidate
-        raise DataError(f"Partition {index} does not exist on this drive.")
-
-    def open_partition(self, index: int, *, writable: bool | None = None) -> GEMDOSMount:
-        partition = self.partition(index)
-        window = self.reader.window(partition.start_block, partition.total_blocks)
-        if writable is not None:
-            window.writable = bool(writable) and self.reader.writable
-        return GEMDOSMount(GEMDOSVolume(window, partition.geometry()))
-
-    def to_dict(self) -> dict:
-        return self.disk.to_dict()
-
-    def close(self) -> None:
-        self.reader.close()
+        data = _whole_image(reader)
+        if not is_tos_rom(data):
+            return None
+        try:
+            rom = TOSRom(data)
+        except DataError:
+            return Candidate(self.name, 0.5, "TOS ROM header without a readable image")
+        detail = getattr(rom, "description", None) or f"TOS ROM, {len(data) // 1024} KiB"
+        return Candidate(self.name, 1.0, str(detail))
 
 
 FILESYSTEMS = {
     "gemdos": GEMDOSFilesystem,
-    "ofs": OFSFilesystem,
-    "ffs": FFSFilesystem,
-    "rdb": RigidDiskFilesystem,
-    "kickfs": KickstartFilesystem,
+    "fat12": FAT12Filesystem,
+    "fat16": FAT16Filesystem,
+    "ahdi": AhdiFilesystem,
+    "tosrom": TOSFilesystem,
 }
 
-#: Identification order. The partition table is checked first because it wraps
-#: volumes that would otherwise be found at an offset.
-IDENTIFY_ORDER = ("rdb", "ffs", "ofs", "kickfs")
+#: Identification order. The partition table is checked first because it
+#: wraps volumes that would otherwise be found at an offset.
+IDENTIFY_ORDER = ("ahdi", "gemdos", "tosrom")
 
 
 def create_filesystem(name: str):
@@ -604,11 +513,11 @@ def create_filesystem(name: str):
 
 
 def list_filesystems() -> list[dict]:
-    seen: dict[str, dict] = {}
-    for key, factory in FILESYSTEMS.items():
+    rows: list[dict] = []
+    for factory in FILESYSTEMS.values():
         driver = factory()
-        seen[key] = {"name": driver.name, "label": driver.label}
-    return list(seen.values())
+        rows.append({"name": driver.name, "label": driver.label})
+    return rows
 
 
 def _whole_image(reader: BlockReader) -> bytes:
@@ -616,17 +525,18 @@ def _whole_image(reader: BlockReader) -> bytes:
 
 
 SUFFIX_HINTS = {
-    ".adf": ("ofs", "ffs"),
-    ".adz": ("ofs", "ffs"),
-    ".dsk": ("ofs", "ffs"),
-    ".hdf": ("rdb", "ffs", "ofs"),
-    ".hda": ("ffs", "ofs", "rdb"),
-    ".hdz": ("rdb", "ffs", "ofs"),
-    ".rdsk": ("rdb",),
-    ".img": ("rdb", "ffs", "ofs"),
-    ".raw": ("rdb", "ffs", "ofs"),
-    ".rom": ("kickfs",),
-    ".kick": ("kickfs",),
+    ".st": ("gemdos", "fat12"),
+    ".msa": ("gemdos", "fat12"),
+    ".dim": ("gemdos", "fat12"),
+    ".img": ("ahdi", "gemdos"),
+    ".hd": ("ahdi", "gemdos", "fat16"),
+    ".ahd": ("ahdi", "gemdos", "fat16"),
+    ".acsi": ("ahdi", "gemdos", "fat16"),
+    ".ide": ("ahdi", "gemdos", "fat16"),
+    ".raw": ("ahdi", "gemdos"),
+    ".bin": ("tosrom", "ahdi", "gemdos"),
+    ".tos": ("tosrom",),
+    ".rom": ("tosrom",),
 }
 
 
@@ -639,9 +549,9 @@ def identify(
     """Identify an image by content, best guess first.
 
     ``suffix_hint`` only reorders the cascade; it never lets a filing system
-    claim bytes it cannot actually read. ``filesystems`` restricts the cascade
-    to a known set, which is how the workbench avoids scanning a whole hard
-    drive for a Kickstart ROM it already knows is not there.
+    claim bytes it cannot actually read. ``filesystems`` restricts the
+    cascade to a known set, which is how the workbench avoids scanning a
+    whole hard disk for a ROM it already knows is not there.
     """
     path = Path(path)
     drivers = filesystems if filesystems is not None else {
@@ -675,42 +585,49 @@ def identify_json(path: Path | str, *, suffix_hint: str | None = None) -> str:
 
 
 __all__ = [
+    "AhdiDisk",
+    "AhdiFilesystem",
+    "AhdiMount",
+    "AtariMetadata",
+    "BLOCK_SIZE",
+    "BlockReader",
+    "Candidate",
+    "DD_SECTORS",
+    "Datestamped",
+    "DirectoryNode",
+    "Entry",
+    "FAT12Filesystem",
+    "FAT16Filesystem",
+    "FILESYSTEMS",
     "GEMDOSFilesystem",
     "GEMDOSMount",
-    "AtariMetadata",
-    "DirectoryNode",
-    "PathNode",
-    "BLOCK_SIZE",
-    "Candidate",
-    "DD_BLOCKS",
-    "Datestamped",
-    "Entry",
-    "FFSFilesystem",
-    "FILESYSTEMS",
-    "Filetyped",
+    "GEMDOSVolume",
     "Geometry",
-    "HD_BLOCKS",
-    "KickstartFilesystem",
+    "HD_SECTORS",
+    "IDENTIFY_ORDER",
     "NAMED_GEOMETRIES",
-    "OFSFilesystem",
     "Partition",
-    "RigidDisk",
-    "RigidDiskFilesystem",
-    "RigidDiskMount",
+    "PathNode",
+    "SECTOR_SIZE",
+    "SUFFIX_HINTS",
     "Stat",
+    "TOSFilesystem",
     "create_filesystem",
+    "create_partitioned_image",
     "format_volume",
-    "geometry_from_dsc",
-    "geometry_from_geo",
+    "geometry_from_bpb",
     "identify",
     "identify_json",
     "join_path",
     "list_filesystems",
+    "named_geometry",
+    "partition_geometry",
     "partition_reader",
-    "read_rigid_disk",
+    "read_partition_table",
     "reader_for",
     "split_path",
+    "validate_label",
     "validate_name",
-    "write_geometry",
-    "write_rigid_disk",
+    "volume_geometry",
+    "write_partition_table",
 ]
