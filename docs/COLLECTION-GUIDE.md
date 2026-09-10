@@ -7,13 +7,13 @@ desktop edition the same data is stored in
 `$XDG_CONFIG_HOME/atari-file-forge/client-state.json`, or the corresponding
 directory under `~/.config`. Desktop updates are validated, written atomically
 and protected with mode `0600`. Both stores contain manifests and descriptive
-metadata, not disk, dms or ROM image bytes.
+metadata, not disk or ROM image bytes.
 
 Open **Collection** in the application header, or choose **Library → Private
 collection** in a pane. The catalogue remains available when its indexed images
 are closed.
 
-![Private collection catalogue showing an indexed OFS image](images/private-collection.png)
+![Private collection catalogue showing an indexed GEMDOS image](images/private-collection.png)
 
 ## What is indexed
 
@@ -21,8 +21,8 @@ Each entry records:
 
 - image name, media family, byte size and exact logical fingerprint;
 - the server-generated working-image revision used for stale detection;
-- every manifest record, including paths, partitions, ROM banks, sizes, access,
-  protection bits, comments and SHA-256 content hashes where available;
+- every manifest record, including paths, partitions, ROM banks, sizes,
+  GEMDOS attributes and SHA-256 content hashes where available;
 - recognised volume titles and publishers;
 - the applicable machines supplied by the user or hardware profile;
 - an optional location such as an SD-card label, NAS path or archive box;
@@ -38,8 +38,8 @@ attached.
 2. Open **Collection**.
 3. Select the pane, enter its location and comma-separated target machines.
 4. Choose **Add / update image**.
-5. Keep the progress dialog open for large HDF or hard-drive images. Every
-   partition, drawer and file must be read and hashed.
+5. Keep the progress dialog open for large hard-drive images. Every
+   partition, folder and file must be read and hashed.
 
 Re-indexing replaces only the matching catalogue entry. Other collection
 images remain untouched. **Refresh indexed open images** updates every open
@@ -58,15 +58,45 @@ open:
 
 - **Exact content duplicates** groups files, volumes and ROM banks with the
   same SHA-256 content in more than one indexed image.
-- **Title variants** groups normalised volume, drawer and ROM titles found in more
-  than one image. Punctuation and case are ignored for this comparison.
+- **Title variants** groups normalised volume, folder and ROM titles found in
+  more than one image. Punctuation and case are ignored for this comparison.
 - **Wanted and missing titles** compares a locally retained one-title-per-line
-  wanted list against indexed volume, drawer and ROM titles.
+  wanted list against indexed volume, folder and ROM titles.
 
 Online Library results are also compared with the private title index. A title
 known only from a closed indexed image can therefore appear as already present.
 This is a title-level warning rather than proof that two downloads have the
 same bytes.
+
+## Online Library sources
+
+The Online Library ships five Atari ST sources, each verified against the live
+site before being enabled:
+
+| Source | Offers | Machines |
+| --- | --- | --- |
+| Internet Archive Atari ST games | `.st`, `.msa`, `.stx`, `.dim` and `.zip` downloads from the `softwarelibrary_atari_st_games` collection | ST, Mega ST, STE, Mega STE, TT, Falcon |
+| Demozoo | demoscene productions for platform 9 (ST and STE), 58 (TT) and 17 (Falcon), with their download links | ST, Mega ST, STE, Mega STE, TT, Falcon |
+| Pigwa Atari ST game packs | the game-pack folders on `ftp.pigwa.net`, one level deep | ST, Mega ST, STE, Mega STE |
+| Atarimania | title, publisher, country and year; no downloads | all |
+| Atari Legend | title and developer; no downloads | all |
+
+Atarimania and Atari Legend are reference databases rather than archives. Their
+results identify a release and link to its page; they cannot be installed, and
+the Online Library says so rather than offering a download that would fail.
+
+Edit, disable or add to this list under **Online Library → Sources**. A source
+that a site has made unreachable ships disabled with the reason recorded, so it
+is clear that the source is blocked rather than broken.
+
+### The TOSEC Atari ST set is not offered
+
+The TOSEC Atari ST collection on the Internet Archive is published as a single
+ZIP file of about 15 GB. There is no per-title index and no way to fetch one
+disk image out of it, so the Online Library cannot search it or install from
+it, and it is deliberately not shipped as a source. Download and unpack it by
+hand if you want it, then index the extracted images through **Collection**
+like any other local material.
 
 ## Export, backup and restore
 
@@ -99,5 +129,5 @@ profile settings, is limited to 64 MiB.
 
 Catalogue backups are limited to 2,000 images, 1,000,000 manifest records and
 a 128 MiB selected file. These are safety bounds, not recommended working
-sizes. Browser storage quotas vary, and a large HDF or hard-drive collection
-should be backed up periodically regardless of which edition is used.
+sizes. Browser storage quotas vary, and a large hard-drive collection should be
+backed up periodically regardless of which edition is used.

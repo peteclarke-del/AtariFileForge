@@ -1,26 +1,26 @@
 [
   {
-    "id": "eab-cheats",
-    "name": "English Atari Board",
+    "id": "atarimania-cheats",
+    "name": "Atarimania",
     "enabled": true,
-    "queryTemplate": "https://www.google.com/search?q=site%3Aeab.abime.net+{query}+trainer"
+    "queryTemplate": "https://www.google.com/search?q=site%3Aatarimania.com+{query}+cheat"
   },
   {
-    "id": "hol-cheats",
-    "name": "Hall of Light",
+    "id": "atari-forum-trainers",
+    "name": "Atari Forum",
     "enabled": true,
-    "queryTemplate": "https://www.google.com/search?q=site%3Ahol.abime.net+{query}"
+    "queryTemplate": "https://www.google.com/search?q=site%3Aatari-forum.com+{query}+trainer"
   },
   {
-    "id": "lemon-cheats",
-    "name": "Lemon Atari",
+    "id": "atari-legend-cheats",
+    "name": "Atari Legend",
     "enabled": true,
-    "queryTemplate": "https://www.google.com/search?q=site%3Alemonatari.com+{query}+cheat"
+    "queryTemplate": "https://www.google.com/search?q=site%3Aatarilegend.com+{query}"
   },
   {
-    "id": "whdload-cheats",
-    "name": "WHDLoad installer notes",
+    "id": "stonish-menu-trainers",
+    "name": "Stonish menu disks (Automation and D-Bug trainers)",
     "enabled": true,
-    "queryTemplate": "https://www.google.com/search?q=site%3Awhdload.de+{query}"
+    "queryTemplate": "https://www.google.com/search?q=site%3Astonish.com+{query}+trainer"
   }
 ]

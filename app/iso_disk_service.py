@@ -1,15 +1,15 @@
 """Browsing a CD image as an ordinary pane, and copying things off it.
 
 A CD is read-only by nature, so this mixin offers listing and reading and
-nothing else. That puts it beside the DMS component rather than beside the
-filing systems: both are containers an operator opens to take things out of,
-and neither can be written back.
+nothing else. That puts it beside the other read-only containers rather than
+beside the filing systems: all of them are things an operator opens to take
+files out of, and none of them can be written back.
 
-The Atari metadata a disc records is carried through into the same fields an
-GEMDOS volume reports, so a file dragged off a CD arrives with the
-protection bits and comment the disc gave it. Getting that right is the whole
-reason for reading the Atari extension at all, and it is what makes copying
-from a CD equivalent to copying from a floppy rather than a lossy import.
+Every entry reports the GEMDOS attributes an Atari would see for it. A disc
+cannot be written, so each one is read-only, a folder also carries the
+directory attribute, and an entry the disc marks hidden carries the hidden
+attribute. That is the same field a GEMDOS volume reports, so a file dragged
+off a CD arrives described the way a file dragged off a floppy is.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from . import atari_paths
-from .atari_metadata import format_protection
 from .errors import DiskError
 from .image_session import ImageSession
 from .iso9660 import Iso9660Error, Iso9660Image
@@ -47,7 +46,7 @@ class IsoDiskMixin:
             image.close()
 
     def iso_listing(self, session: ImageSession, inner: str) -> dict:
-        """One drawer of the disc, in the shape every pane expects."""
+        """One folder of the disc, in the shape every pane expects."""
         directory = "" if inner in {"", "$", ":"} else atari_paths.normalise(inner)
         with self.iso_image(session) as image:
             entries = image.list_directory(directory)
@@ -57,29 +56,25 @@ class IsoDiskMixin:
                 "name": entry.name,
                 "path": entry.path,
                 "type": "dir" if entry.directory else "file",
-                # A drawer's extent size is not a count of what is in it, and
-                # the pane renders a directory's length as one. An GEMDOS
+                # A folder's extent size is not a count of what is in it, and
+                # the pane renders a directory's length as one. A GEMDOS
                 # volume reports zero here, so a disc does too.
                 "length": 0 if entry.directory else entry.length,
-                # A disc that records no protection reports none, rather than
-                # an invented ``----rwed`` that would look like a real value.
-                "protection": (
-                    format_protection(entry.protection)
-                    if entry.protection is not None else ""
-                ),
-                "comment": entry.comment,
+                # Nothing on a disc can be written, so every entry is at least
+                # read-only. This is a fact about the medium, not a guess.
+                "attributes": entry.attribute_letters,
                 "filetype": "",
                 "datestamp": entry.datestamp,
             }
             for entry in entries
         ]
         files = sum(1 for row in rows if row["type"] == "file")
-        drawers = len(rows) - files
+        folders = len(rows) - files
         return {
             "entries": rows,
             "title": volume,
             "description": (
-                f"CD image · {volume} · {drawers} drawer{'s' if drawers != 1 else ''}, "
+                f"CD image · {volume} · {folders} folder{'s' if folders != 1 else ''}, "
                 f"{files} file{'s' if files != 1 else ''} here"
             ),
             "path": directory or "$",
@@ -91,7 +86,7 @@ class IsoDiskMixin:
             return image.read_file(atari_paths.normalise(inner))
 
     def iso_file_metadata(self, session: ImageSession, inner: str) -> dict:
-        """The Atari metadata the disc records for one file."""
+        """What the disc records about one file, in GEMDOS terms."""
         path = atari_paths.normalise(inner)
         parent = atari_paths.parent(path)
         leaf = atari_paths.leaf(path).casefold()
@@ -104,62 +99,9 @@ class IsoDiskMixin:
             raise DiskError(f"{inner} is not on this disc.")
         return {
             "path": path,
-            "protection": (
-                format_protection(entry.protection) if entry.protection is not None else ""
-            ),
-            "comment": entry.comment,
+            "attributes": entry.attribute_letters,
             "length": entry.length,
             "datestamp": entry.datestamp,
-        }
-
-    def tos_release_on(self, session: ImageSession) -> dict:
-        """Whether this disc is an TOS release, and what it would need.
-
-        Identified by the volume name Commodore wrote, then confirmed by
-        looking for that release's own payload drawer. A contribution CD or a
-        coverdisk carrying a similar name is not accepted on the name alone,
-        because launching an emulator against the wrong disc wastes an
-        operator's afternoon rather than failing quickly.
-        """
-        from .tos_cd import release_for_volume
-
-        if session.kind != "iso":
-            return {"recognised": False, "reason": "This is not a CD image."}
-        with self.iso_image(session) as image:
-            volume = image.volume
-            release = release_for_volume(volume)
-            payload_present = False
-            if release is not None:
-                payload_present = any(
-                    entry.directory and entry.name.casefold() == release.payload.casefold()
-                    for entry in image.list_directory()
-                )
-        if release is None:
-            return {
-                "recognised": False,
-                "volume": volume,
-                "reason": (
-                    f"{volume or session.name} is not an TOS release CD. "
-                    "The 3.5 and 3.9 discs name themselves TOS3.5 and TOS3.9."
-                ),
-            }
-        if not payload_present:
-            return {
-                "recognised": False,
-                "volume": volume,
-                "reason": (
-                    f"{volume} names itself {release.label} but carries no "
-                    f"{release.payload} drawer, so it is not the installation disc."
-                ),
-            }
-        return {
-            "recognised": True,
-            "volume": volume,
-            "release": release.key,
-            "label": release.label,
-            "payload": release.payload,
-            "requires": release.requires,
-            "diskSpaceMb": release.disk_space_mb,
         }
 
     def iso_summary(self, session: ImageSession) -> dict:
