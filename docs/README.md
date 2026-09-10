@@ -16,15 +16,17 @@ that match the running frontend.
 | Build for Windows, macOS or an RPM-based Linux | [Windows, macOS and RPM builds](CROSS-PLATFORM.md) |
 | Read or write real disks with Greaseweazle or a floppy controller | [Physical floppy guide](PHYSICAL-FLOPPY-GUIDE.md) |
 | Open, create, edit, verify or troubleshoot HFE or SCP flux images, or export an image to another compatible format | [HFE, SCP and export guide](HFE-HXC-GUIDE.md) |
-| Build a checked Gotek, FastFileSystem, Hardfile, PiStorm or TOS media tree | [Hardware deployment assistant](HARDWARE-DEPLOYMENT-GUIDE.md) |
+| Hand an image to the emulator, and choose between your own TOS and the bundled EmuTOS | [Emulator guide](EMULATOR-GUIDE.md) |
+| Build a checked Gotek, SD card, CF card, host folder or ACSI drive | [Hardware deployment assistant](HARDWARE-DEPLOYMENT-GUIDE.md) |
 | Review the mandatory web and desktop parity rules | [Web and desktop platform contract](PLATFORM-CONTRACT.md) |
 | Understand every supported media family and normal workflow | [Main project handbook](../README.md) |
-| Edit BASIC, command files, machine code, archives or binary data | [File editor and code analysis](FILE-EDITOR-GUIDE.md) |
-| Inspect, preserve or edit protection bits, comments and datestamps | [Atari file catalogue metadata](FILE-METADATA-GUIDE.md) |
-| Prepare a drive with TOS from your own Workbench floppies, or install a floppy onto it with staging, WHDLoad or its own installer | [Preparing a drive and installing floppies](INSTALL-GUIDE.md) |
-| Inspect, compare, build, patch or program ROM and Kickstart ROMs | [ROM image handbook](ROM-GUIDE.md) |
+| Edit BASIC, configuration files, machine code, archives or binary data | [File editor and code analysis](FILE-EDITOR-GUIDE.md) |
+| Inspect, preserve or edit GEMDOS attributes and datestamps | [Atari file catalogue metadata](FILE-METADATA-GUIDE.md) |
+| Prepare a drive, and install a floppy onto it by staging or with its own installer | [Preparing a drive and installing floppies](INSTALL-GUIDE.md) |
+| Inspect, compare, build, patch or program TOS and cartridge ROMs | [ROM image handbook](ROM-GUIDE.md) |
+| Read a preservation capture that records the physical disk | [IPF and preservation captures](IPF-GUIDE.md) |
 | Build and validate a release | [Release checklist](RELEASE-CHECKLIST.md) |
-| Review the stable 0.0.0 release | [Atari File Forge 0.0.0 notes](releases/0.0.0.md) |
+| Review the 0.0.0 development baseline | [Atari File Forge 0.0.0 notes](releases/0.0.0.md) |
 | Contribute code or documentation | [Contribution guide](../CONTRIBUTING.md) |
 | Understand maintainership and project decisions | [Project governance](../GOVERNANCE.md) |
 | Report a vulnerability | [Security policy](../SECURITY.md) |
@@ -32,8 +34,8 @@ that match the running frontend.
 | Ask for support or report conduct concerns | [Support](../SUPPORT.md) and [code of conduct](../CODE_OF_CONDUCT.md) |
 | Review validation evidence | The CI run on the released commit; see the [release checklist](RELEASE-CHECKLIST.md) |
 | Review completed and outstanding product improvements | [Product backlog](BACKLOG.md) |
-| Audit the emulator firmware shipped in the image | [Firmware notes](../firmware/README.md) |
-| Review the Atarinut GEMDOS integration and format limits | [Atarinut GEMDOS support](ATARINUT-GEMDOS-SUPPORT.md) |
+| Audit the firmware shipped with the application | [Firmware notes](../firmware/README.md) |
+| Review the engine's GEMDOS integration and format limits | [Atarinut GEMDOS support](ATARINUT-GEMDOS-SUPPORT.md) |
 | Automate creation, validation, imports, comparison and patching | [Headless CLI and deterministic recipes](CLI-GUIDE.md) |
 | Catalogue owned images and find cross-image duplicates or missing titles | [Private collection catalogue](COLLECTION-GUIDE.md) |
 | Find possible lives, energy, timer or collision modifications in game code | [Cheat-candidate analysis](CHEAT-ANALYSIS-GUIDE.md) |
@@ -43,17 +45,20 @@ that match the running frontend.
 
 | Media or feature | Browse | Edit | Create | Transfer | Analyse and repair | Export as | Save package |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| OFS ADF and ADZ | Yes | Yes, including protection bits, comment and datestamp | Yes | Files and complete images | Directory, protection and capacity checks | Sector image, HFE and SCP | Image, metadata and README |
-| Partitioned hard drives, HDF with a Rigid Disk Block | Yes, every partition it chains to | Yes, inside any mounted partition | Yes, with one FFS International partition | Files, drawers and complete images | Rigid Disk Block, partition bounds, launcher, STACK and access checks | One partition as a sector image | Complete drive and README |
-| SPS preservation captures, IPF | Yes, when the SPS decoder library is installed | No, the format records a physical read | No | Recovered sectors into writable media | Per-sector recovery report | Sector image | Working image and README |
-| FFS images in every DOS type, plain, international and directory cache | Yes, including drawers | Where the detected layout is writable, including protection bits, comment and datestamp | Yes, for supported layouts | Files, directories and images | Filesystem, bitmap, launcher and compatibility checks | Sector image; HFE and SCP for the 3.5-inch densities | Image, metadata and README |
-| Hardfile HDA and GEO | Yes, including deep trees | Yes, including protection bits, comment and datestamp | Yes | Files, trees and extracted disks | Geometry, map, directory and installed-software checks | No, the HDA and GEO geometry has no single-file equivalent | HDA, GEO and README |
-| HDF, HDD, IMG, RAW and BIN GEMDOS media | Yes | Where the detected layout is writable | Selected layouts | Files and directories | Geometry, map and target-profile checks | No | Image and README |
-| DMS archives | Yes, as a decoded hierarchy | Same-length proven members | No | Extracted files into writable media | Physical chunks, reconstruction proof and structural comparison | No | Rebuilt source or converted media |
-| HFE floppy images | Yes | Clean sector HFE v1 only | Yes | Files and images | Track and sector capability checks | Sector image, HFE and SCP | HFE and README |
-| SCP flux captures | Yes, when HxCFE decodes an OFS or FFS filesystem | Where the capture re-encodes byte-for-byte | No | Files and images | Round-trip re-encode verification | Sector image, HFE and SCP | SCP and README |
-| ROM images | Banks, headers, commands and regions | Bytes, project data and supported structures | Yes | Banks and programmer files | Commands, help, code, data, checksums and compatibility | No | ROM, project JSON and README |
-| Kickstart ROM data ROMs | Files and directories | Yes | Yes | Files and directories | Structure and capacity checks | No | ROM, project JSON and README |
+| ST sector images, 360K to 1.44M | Yes | Yes, including attributes and datestamp | Yes, every standard geometry | Files and complete images | Directory, chain, capacity and TOS-limit checks | ST, MSA, DIM, HFE and SCP | Image, metadata and README |
+| MSA containers | Yes, decoded to sectors | Yes, once decoded | Yes, by conversion | Files and complete images | Per-track packing report and round-trip proof | ST, MSA, DIM, HFE and SCP | Image and README |
+| DIM containers | Yes, decoded to sectors | Yes, once decoded | Yes, by conversion | Files and complete images | Track and used-sector report | ST, MSA, DIM, HFE and SCP | Image and README |
+| Pasti STX captures | Yes, as recovered sectors | No, the format records a physical read | No | Recovered sectors into writable media | Per-track protection report | ST | Working image and README |
+| HFE floppy images | Yes | Clean sector HFE v1 only | Yes | Files and images | Track and sector capability checks | ST, MSA, HFE and SCP | HFE and README |
+| SCP flux captures | Yes, when the converter decodes a GEMDOS volume | Where the capture re-encodes byte for byte | No | Files and images | Round-trip re-encode verification | ST, MSA, HFE and SCP | SCP and README |
+| Preservation captures, IPF | Yes, when the decoder library is installed | No, the format records a physical read | No | Recovered sectors into writable media | Per-sector recovery report | ST | Working image and README |
+| Partitioned hard disks, AHDI, extended and ICD tables | Yes, every partition it chains to | Yes, inside any mounted partition | Yes, with a partition plan | Files, folders and complete images | Table, partition bounds, boot sector and TOS-limit checks | One partition as a sector image | Complete drive and README |
+| Hard disks with a PC partition table | Yes, every FAT partition | Yes, inside any mounted partition | Yes | Files, folders and complete images | The same checks, plus logical sector size | One partition as a sector image | Complete drive and README |
+| Byte-swapped drive images | Yes, un-swapped transparently | Yes | No, written in the normal order | Files and folders | The swap is reported so a target cannot be fed the wrong order | Un-swapped sector image | Image and README |
+| Bare GEMDOS volumes | Yes | Yes, including attributes and datestamp | Yes, at any size FAT16 allows | Files and folders | Filesystem, capacity and TOS-limit checks | Sector image | Image and README |
+| TOS ROM images | Header, segments, entry points and fonts | No, a ROM is read-only | No | Banks and programmer files | Header, checksum, date and vector-install checks | No | ROM, project JSON and README |
+| Cartridge and custom ROM images | Banks, headers and regions | Bytes, project data and supported structures | Yes | Banks and programmer files | Header, code, data and checksum checks | No | ROM, project JSON and README |
+| CD images | Yes, read-only | No | No | Files into writable media | Name-scheme and structure checks | No | Exported file or destination image |
 | ZIP and other supported archives | Yes, as a hierarchy | Extract, inspect and edit supported members | No | Members into writable media | Type and metadata inspection | No | Exported member or destination image |
 
 The table is a navigation aid, not a replacement for format restrictions.
