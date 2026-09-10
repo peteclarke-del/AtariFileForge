@@ -160,13 +160,17 @@ established; the Atari filing system, the media formats, the ROM tools and the
 emulator integration are working; the workflows built on top of them are not
 all finished. The first version that can be called usable is `0.1.0`.
 
-The port is being done in layers, from the formats upward. As this handbook is
-written the disk service, the file editor and the archive browser are still
-being retargeted, and some modules in `app/` do not yet import cleanly from
-this tree, so a checkout of this baseline may not start. The engines listed
-below sit under those services, are complete, and are covered by their own
-tests. Run them directly through `python -m atarinut` while the services are
-being finished.
+The port is being done in layers, from the formats upward. The engines listed
+below are the finished layer: the filing system, the container decoders, the
+ROM decoder, the hardware catalogue, the emulator command builder, the
+deployment planner and the analysis reports all import, run and are covered by
+their own tests. The service layer above them is not finished. As this handbook
+is written the disk, session, comparison, archive, hex and editor services and
+the headless CLI are still being retargeted, and several modules in `app/` do
+not yet import from this tree, so a checkout of this baseline may not start.
+Anything this handbook describes as a pane, a dialog or a menu should be read
+as the workflow being built rather than a control you can use today. Run
+`python -m atarinut` directly meanwhile.
 
 What works now:
 
