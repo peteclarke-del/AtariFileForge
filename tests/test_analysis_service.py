@@ -182,8 +182,8 @@ class ProgramHeaderTests(unittest.TestCase):
     def test_tt_ram_flags_are_reported_against_a_68000_profile(self) -> None:
         program = describe_program(program_header(flags=0x0006), file_size=0x400)
 
-        on_st = program_findings([("AUTO/FAST.PRG", program)], "st")
-        on_tt = program_findings([("AUTO/FAST.PRG", program)], "tt030")
+        on_st = program_findings([("AUTO\\FAST.PRG", program)], "st")
+        on_tt = program_findings([("AUTO\\FAST.PRG", program)], "tt030")
 
         self.assertTrue(any(item["code"] == PROGRAM_TT_RAM_ON_ST for item in on_st))
         self.assertFalse(any(item["code"] == PROGRAM_TT_RAM_ON_ST for item in on_tt))
@@ -314,7 +314,7 @@ class NameAndAttributeTests(unittest.TestCase):
         self.assertIn("README.TXT", lower["detail"])
 
     def test_a_clean_8_3_catalogue_reports_nothing(self) -> None:
-        self.assertEqual(name_findings([("AUTO/START.PRG", row("START.PRG"))]), [])
+        self.assertEqual(name_findings([("AUTO\\START.PRG", row("START.PRG"))]), [])
 
     def test_a_datestamp_outside_the_fat_range_is_reported(self) -> None:
         entries = [
@@ -436,7 +436,7 @@ class ManifestTests(unittest.TestCase):
                 "": [row("AUTO", type="dir", length=1), row("GAME.PRG", datestamp="1992-06-01T09:00:00")],
                 "AUTO": [row("START.PRG")],
             },
-            contents={"GAME.PRG": b"game", "AUTO/START.PRG": b"start"},
+            contents={"GAME.PRG": b"game", "AUTO\\START.PRG": b"start"},
         )
         try:
             manifest = build_manifest(service, make_session())
@@ -444,7 +444,7 @@ class ManifestTests(unittest.TestCase):
             service.cleanup()
 
         paths = [record["path"] for record in manifest["records"]]
-        self.assertEqual(paths, ["AUTO", "GAME.PRG", "AUTO/START.PRG"])
+        self.assertEqual(paths, ["AUTO", "GAME.PRG", "AUTO\\START.PRG"])
         game = manifest["records"][1]
         self.assertEqual(game["attributes"], "-----a")
         self.assertEqual(game["datestamp"], "1992-06-01T09:00:00")
@@ -523,7 +523,7 @@ class HealthReportTests(unittest.TestCase):
                 "AUTO": [row("START.PRG"), row("NOTES.TXT")],
             },
             contents={
-                "AUTO/START.PRG": program_header(flags=0x0006),
+                "AUTO\\START.PRG": program_header(flags=0x0006),
                 "NEWDESK.INF": b"#M 00 01 00 FF C HARD DISK@ @ \r\n#G 03 04 *.APP@ @ \r\n",
                 "$boot": boot_sector(),
             },
