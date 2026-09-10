@@ -18,25 +18,24 @@ WORKFLOW_PATCH_NAME = "changes.affpatch.zip"
 
 def _checkpoint_source(
     service: DiskService, session: ImageSession
-) -> tuple[Path, Path | None, dict]:
+) -> tuple[Path, dict]:
     """Return the oldest retained pre-change snapshot and its recorded state."""
     snapshot = service.oldest_checkpoint_snapshot(session)
     if snapshot is not None:
-        image, descriptor, metadata = snapshot
+        image, _companion, metadata = snapshot
         state = dict(metadata.get("state") or {})
         state["workflowCheckpointReason"] = str(
             metadata.get("reason") or metadata.get("name") or "retained checkpoint"
         )
-        return image, descriptor, state
+        return image, state
     if session.dirty:
         raise DiskError(
             "This edited session has no retained pre-change checkpoint, so an exact workflow "
             "recipe cannot be proved. Save the image, make a named checkpoint, then record "
             "subsequent changes for a deterministic export."
         )
-    return session.path, session.descriptor_path, {
+    return session.path, {
         "name": session.name,
-        "descriptorName": session.descriptor_name,
         "targetHardware": session.target_hardware,
         "romBankSize": session.rom_bank_size,
         "romEraseByte": session.rom_erase_byte,
@@ -48,24 +47,13 @@ def _checkpoint_source(
 def _open_snapshot(
     service: DiskService,
     image: Path,
-    descriptor: Path | None,
     state: dict,
 ) -> ImageSession:
     name = str(state.get("name") or image.name)
-    descriptor_name = str(state.get("descriptorName") or "image.geo")
     with image.open("rb") as source:
-        if descriptor is None:
-            session = service.create_from_stream(
-                name, source, target_hardware=str(state.get("targetHardware") or "auto")
-            )
-        else:
-            with descriptor.open("rb") as companion:
-                session = service.create_from_stream(
-                    name,
-                    source,
-                    (descriptor_name, companion),
-                    target_hardware=str(state.get("targetHardware") or "auto"),
-                )
+        session = service.create_from_stream(
+            name, source, target_hardware=str(state.get("targetHardware") or "auto")
+        )
     if session.kind == "rom":
         session.rom_bank_size = int(state.get("romBankSize") or session.rom_bank_size)
         session.rom_erase_byte = int(state.get("romEraseByte", session.rom_erase_byte)) & 0xFF
@@ -100,16 +88,19 @@ def build_workflow_recipe_bundle(
     progress=None,
 ) -> dict:
     """Package an exact retained base, guarded change set and expected output identity."""
-    if session.kind == "dms":
-        raise DiskError("Writable DMS workflow recipes are not available yet.")
+    if session.kind in {"msa", "dim", "stx"}:
+        raise DiskError(
+            "An MSA, DIM or Pasti container is read-only here. Convert one to a "
+            ".st image before recording a workflow recipe from it."
+        )
     if session.hfe_original_path:
         raise DiskError(
             "HFE workflow recipes are not yet safe because replay would need to preserve the "
             "original track container as well as the decoded filesystem."
         )
     report = progress_module.reporter(progress)
-    base_path, base_descriptor, state = _checkpoint_source(service, session)
-    base = _open_snapshot(service, base_path, base_descriptor, state)
+    base_path, state = _checkpoint_source(service, session)
+    base = _open_snapshot(service, base_path, state)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -118,7 +109,7 @@ def build_workflow_recipe_bundle(
             patch_path = work_path / WORKFLOW_PATCH_NAME
             report("Building the guarded workflow change set", 0, None)
             patch = write_patch_archive(service, base, session, patch_path, report)
-            replay = _open_snapshot(service, base.path, base.descriptor_path, state)
+            replay = _open_snapshot(service, base.path, state)
             try:
                 report("Proving the guarded replay on a disposable image", 0, None)
                 apply_patch_archive(service, replay, patch_path, report)
@@ -131,7 +122,6 @@ def build_workflow_recipe_bundle(
             sources = {
                 "image": source_identity(
                     base.path,
-                    descriptor=base.descriptor_path,
                     service=service,
                     session=base,
                     progress=report,
@@ -139,10 +129,6 @@ def build_workflow_recipe_bundle(
                 "changes": source_identity(patch_path, progress=report),
             }
             sources["image"]["name"] = str(state.get("name") or session.name)
-            if base_descriptor and sources["image"].get("descriptor"):
-                sources["image"]["descriptor"]["name"] = str(
-                    state.get("descriptorName") or session.descriptor_name or "image.geo"
-                )
             recipe = create_recipe(
                 f"Rebuild {session.name}",
                 sources,
@@ -192,16 +178,11 @@ def build_workflow_recipe_bundle(
 
 
 def _workflow_readme(session: ImageSession, recipe: dict, patch: dict) -> str:
-    descriptor = recipe["sources"]["image"].get("descriptor")
     image_argument = shlex.quote(
         f"image=/path/to/{recipe['sources']['image']['name']}"
     )
     patch_argument = shlex.quote(f"changes={WORKFLOW_PATCH_NAME}")
     output_argument = shlex.quote(session.name)
-    descriptor_option = (
-        " \\\n  --descriptor " + shlex.quote(f"image=/path/to/{descriptor['name']}")
-        if descriptor else ""
-    )
     return f"""# Deterministic rebuild for {session.name}
 
 This bundle records the earliest retained pre-change checkpoint, an exact guarded
@@ -213,7 +194,6 @@ original image bytes. Supply the base image whose identity is listed below.
 - Filename: `{recipe['sources']['image']['name']}`
 - Size: `{recipe['sources']['image']['size']}` bytes
 - SHA-256: `{recipe['sources']['image']['sha256']}`
-{f"- GEO filename: `{descriptor['name']}`\n- GEO size: `{descriptor['size']}` bytes\n- GEO SHA-256: `{descriptor['sha256']}`" if descriptor else ""}
 
 ## Rebuild
 
@@ -222,7 +202,7 @@ Extract this ZIP, then run from an Atari File Forge checkout:
 ```sh
 python -m app.cli recipe-run {WORKFLOW_RECIPE_NAME} \\
   --source {image_argument} \\
-  --source {patch_argument}{descriptor_option} \\
+  --source {patch_argument} \\
   --output {output_argument}
 ```
 

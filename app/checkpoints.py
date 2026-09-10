@@ -45,7 +45,7 @@ class CheckpointStore:
             "descriptorName": session.descriptor_name,
             "dirty": session.dirty,
             "partition": session.partition,
-            "ffsSourceNames": dict(session.ffs_source_names),
+            "sourceNames": dict(session.source_names),
             "distributionName": session.distribution_name,
             "targetHardware": session.target_hardware,
             "hardwareProfile": dict(session.hardware_profile),
@@ -142,7 +142,7 @@ class CheckpointStore:
         )
         if descriptor is not None and not descriptor.is_file():
             raise CheckpointError(
-                "The earliest workflow checkpoint has lost its GEO companion."
+                "The earliest workflow checkpoint has lost its companion file."
             )
         return folder / "image.bin", descriptor, metadata
 
@@ -239,9 +239,9 @@ class CheckpointStore:
         session.partition = (
             int(state["partition"]) if state.get("partition") is not None else None
         )
-        session.ffs_source_names = {
+        session.source_names = {
             str(path): str(name)
-            for path, name in (state.get("ffsSourceNames") or {}).items()
+            for path, name in (state.get("sourceNames") or {}).items()
         }
         session.distribution_name = state.get("distributionName")
         session.target_hardware = str(state.get("targetHardware") or "auto")

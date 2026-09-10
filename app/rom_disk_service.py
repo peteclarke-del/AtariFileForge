@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import atari_paths
 from .editor_project import editor_project_key, normalise_editor_project
 from .errors import DiskError
 from .image_session import ImageSession
@@ -252,7 +253,10 @@ class RomDiskMixin:
         """Follow file and directory moves without orphaning editor annotations."""
         replacements = sorted(
             (
-                (str(item.get("source") or "").rstrip("."), str(item.get("destination") or "").rstrip("."))
+                (
+                    atari_paths.normalise(item.get("source")),
+                    atari_paths.normalise(item.get("destination")),
+                )
                 for item in moves
                 if item.get("source") and item.get("destination")
             ),
@@ -268,12 +272,17 @@ class RomDiskMixin:
             key_side, separator, path = key.partition("|")
             if not separator or key_side != side_key:
                 continue
-            folded = path.casefold()
+            # An annotation key was stored exactly as the client spelled the
+            # path, which may have used either separator. Both are folded to
+            # the canonical form before the subtree comparison.
+            canonical = atari_paths.normalise(path)
+            folded = canonical.casefold()
             for source, destination in replacements:
                 source_folded = source.casefold()
-                if folded != source_folded and not folded.startswith(source_folded + "/"):
+                branch = f"{source_folded}{atari_paths.SEPARATOR}"
+                if folded != source_folded and not folded.startswith(branch):
                     continue
-                suffix = path[len(source):]
+                suffix = canonical[len(source):]
                 changed[editor_project_key(destination + suffix, side)] = project
                 removed.append(key)
                 break
@@ -293,15 +302,19 @@ class RomDiskMixin:
         side: int | None,
     ) -> int:
         """Remove annotations belonging to deleted files or directory trees."""
-        prefixes = [str(path or "").rstrip(".").casefold() for path in paths if path]
+        prefixes = [atari_paths.normalise(path).casefold() for path in paths if path]
         side_key = str(side) if side is not None else "-"
         removed = []
         for key in session.editor_projects:
             key_side, separator, path = key.partition("|")
             if not separator or key_side != side_key:
                 continue
-            folded = path.casefold()
-            if any(folded == prefix or folded.startswith(prefix + "/") for prefix in prefixes):
+            folded = atari_paths.normalise(path).casefold()
+            if any(
+                folded == prefix
+                or folded.startswith(f"{prefix}{atari_paths.SEPARATOR}")
+                for prefix in prefixes
+            ):
                 removed.append(key)
         if not removed:
             return 0

@@ -18,7 +18,7 @@ from . import webview_host
 from .runtime import DesktopServer
 
 
-NATIVE_OPEN_EXTENSIONS = IMAGE_EXTENSIONS | {".geo", ".zip"}
+NATIVE_OPEN_EXTENSIONS = IMAGE_EXTENSIONS | {".zip"}
 MAX_NATIVE_OPEN_PLANS = 256
 #: How many files a chosen folder may hand back to the page. A collection
 #: folder can hold tens of thousands, and every one of them becomes a File the
@@ -90,17 +90,15 @@ def _desktop_libraries():
     return Adw, Gdk, Gio, GLib, Gtk, WebKit
 
 
-def _paired_selection(paths: list[Path]) -> list[Path]:
-    resolved = [path.expanduser().resolve() for path in paths]
-    dat_stems = {
-        (path.parent, path.stem.casefold())
-        for path in resolved if path.suffix.casefold() == ".hda"
-    }
-    return [
-        path for path in resolved
-        if path.suffix.casefold() != ".geo"
-        or (path.parent, path.stem.casefold()) not in dat_stems
-    ]
+def _resolved_selection(paths: list[Path]) -> list[Path]:
+    """Resolve a chosen selection to absolute paths.
+
+    Every Atari image is one file. There is no sidecar to pair a hard-disk
+    image with: a partitioned drive carries its own table in its root sector
+    and a bare volume its own parameter block in its boot sector, so nothing
+    has to be opened alongside anything else.
+    """
+    return [path.expanduser().resolve() for path in paths]
 
 
 def _review_open_plans(message: str) -> list[dict]:
@@ -380,7 +378,7 @@ def run(argv: list[str] | None = None) -> int:
             return True
 
         def do_open(self, files, _count, _hint) -> None:
-            paths = _paired_selection(
+            paths = _resolved_selection(
                 [Path(item.get_path()) for item in files if item.get_path()]
             )
             if paths:
@@ -453,7 +451,7 @@ def run(argv: list[str] | None = None) -> int:
                         "Choose a file stored on a mounted local or network filesystem."
                     )
                 preferred = self.chooser_targets.get(chooser)
-                self.pending_paths.append((_paired_selection(paths), preferred))
+                self.pending_paths.append((_resolved_selection(paths), preferred))
                 self._drain_paths()
             except Exception as exc:
                 GLib.idle_add(
@@ -479,7 +477,7 @@ def run(argv: list[str] | None = None) -> int:
                         # folder import behaviour for non-image drops.
                         return False
                     paths.append(path)
-                paths = _paired_selection(paths)
+                paths = _resolved_selection(paths)
                 if not paths:
                     return False
             except Exception as exc:

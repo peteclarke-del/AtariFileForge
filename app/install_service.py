@@ -131,7 +131,7 @@ class InstallMixin:
 
     def _read_staged_manifest(self, target: ImageSession, staging: str, leaf: str) -> dict:
         drawer = self._housekeeping_drawer(staging, leaf)
-        if not volume_copy.drawer_exists(self, target, drawer):
+        if not volume_copy.directory_exists(self, target, drawer):
             return {}
         try:
             return json.loads(
@@ -211,7 +211,7 @@ class InstallMixin:
         staging, leaf, drawer = self._staging_paths(target, readable, parent)
 
         manifest = self._read_staged_manifest(target, staging, leaf)
-        discs = list(manifest.get("discs") or [])
+        discs = list(manifest.get("disks") or [])
         label = self._next_disc_label(discs, disc_label)
         alternates = atari_paths.join(
             self._housekeeping_drawer(staging, leaf), self.validate_leaf_name(target, label)
@@ -220,7 +220,7 @@ class InstallMixin:
         # correction, so its files replace what the earlier attempt wrote and
         # anything filed aside for that disc stops being true.
         replacing = any(disc["label"] == label for disc in discs)
-        if replacing and volume_copy.drawer_exists(self, target, alternates):
+        if replacing and volume_copy.directory_exists(self, target, alternates):
             volume_copy.delete_tree(self, target, alternates)
 
         report(f"Reading {source.name}", 0, None)
@@ -289,7 +289,7 @@ class InstallMixin:
             "parent": staging,
             "created": manifest.get("created") or _now(),
             "updated": _now(),
-            "discs": discs,
+            "disks": discs,
             "conflicts": carried + conflicts,
         })
         self._write_staged_manifest(target, staging, leaf, manifest)
@@ -307,7 +307,7 @@ class InstallMixin:
             else self._read_staged_manifest(target, staging, leaf)
         )
         drawer = atari_paths.join(staging, leaf)
-        discs = list(manifest.get("discs") or [])
+        discs = list(manifest.get("disks") or [])
         if discs:
             file_count = sum(int(disc.get("files") or 0) for disc in discs)
             total_bytes = sum(int(disc.get("bytes") or 0) for disc in discs)
@@ -326,11 +326,11 @@ class InstallMixin:
             "title": str(manifest.get("title") or leaf),
             "path": drawer,
             "parent": staging,
-            "discs": [
+            "disks": [
                 {key: value for key, value in disc.items() if key != "paths"}
                 for disc in discs
             ],
-            "discCount": len(discs),
+            "diskCount": len(discs),
             "fileCount": file_count,
             "bytes": total_bytes,
             "conflicts": list(manifest.get("conflicts") or []),
@@ -348,7 +348,7 @@ class InstallMixin:
         """
         self.require_mounted_volume(target)
         staging = self.staging_parent(parent)
-        if not volume_copy.drawer_exists(self, target, staging):
+        if not volume_copy.directory_exists(self, target, staging):
             return []
         listing = self.list_directory(target, staging)
         titles = [
@@ -363,11 +363,11 @@ class InstallMixin:
         """Remove a staged title from the drive, payload and record together."""
         self.require_mounted_volume(target)
         staging, leaf, drawer = self._staging_paths(target, name, parent)
-        if not volume_copy.drawer_exists(self, target, drawer):
+        if not volume_copy.directory_exists(self, target, drawer):
             raise DiskError(f"There is no staged title called {leaf} in {staging}.")
         volume_copy.delete_tree(self, target, drawer)
         housekeeping = self._housekeeping_drawer(staging, leaf)
-        if volume_copy.drawer_exists(self, target, housekeeping):
+        if volume_copy.directory_exists(self, target, housekeeping):
             volume_copy.delete_tree(self, target, housekeeping)
         self._persist_session(target)
 
@@ -394,7 +394,7 @@ class InstallMixin:
         self.require_mounted_volume(target)
         self.require_writable_geometry(target)
         staging_parent, leaf, source = self._staging_paths(target, name, staging)
-        if not volume_copy.drawer_exists(self, target, source):
+        if not volume_copy.directory_exists(self, target, source):
             raise DiskError(f"There is no staged title called {leaf} in {staging_parent}.")
 
         manifest = self._read_staged_manifest(target, staging_parent, leaf)
@@ -403,7 +403,7 @@ class InstallMixin:
         destination = atari_paths.join(parent, target_leaf)
         if destination.casefold() == source.casefold():
             raise DiskError(f"{readable} is already installed at {destination}.")
-        if volume_copy.drawer_exists(self, target, destination):
+        if volume_copy.directory_exists(self, target, destination):
             raise DiskError(f"{destination} already exists. Choose another drawer name.")
 
         report = progress_module.reporter(progress)
@@ -417,12 +417,12 @@ class InstallMixin:
         if parent:
             for part in atari_paths.split(parent):
                 self.validate_leaf_name(target, part)
-            if not volume_copy.drawer_exists(self, target, parent):
+            if not volume_copy.directory_exists(self, target, parent):
                 self.make_directory(target, parent)
         move_ffs_items(self, target, [{"source": source, "destination": destination}])
         repairs, warnings = self._repair_copied_ffs_loaders(target, destination)
         housekeeping = self._housekeeping_drawer(staging_parent, leaf)
-        if volume_copy.drawer_exists(self, target, housekeeping):
+        if volume_copy.directory_exists(self, target, housekeeping):
             volume_copy.delete_tree(self, target, housekeeping)
         self._persist_session(target)
         report("Installed", len(staged_files), len(staged_files))
@@ -448,7 +448,7 @@ class InstallMixin:
         self.require_mounted_volume(target)
         if not self.mountable(target):
             raise DiskError("WHDLoad can only be installed into an GEMDOS volume.")
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             found = whdload.detect(mount)
         return {
             **found,
@@ -477,7 +477,7 @@ class InstallMixin:
         release = whdload.read_release(data, source, url)
         report = progress_module.reporter(progress)
 
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             existing = whdload.detect(mount)
         keep = keep_preferences and existing["installed"]
         plan = whdload.installation_plan(release.archive, keep_preferences=keep)
@@ -493,7 +493,7 @@ class InstallMixin:
                 raise DiskError(f"The WHDLoad archive could not be read: {exc}") from exc
 
         written: list[str] = []
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             for index, (destination, payload) in enumerate(contents):
                 report(f"Writing {destination}", index, len(contents))
                 parent = atari_paths.parent(destination)
@@ -554,7 +554,7 @@ class InstallMixin:
         if not whdload.is_slave_name(leaf):
             raise DiskError(f"{leaf} is not a WHDLoad slave; a slave's name ends in .slave.")
         path = atari_paths.join(destination, self.validate_leaf_name(target, leaf))
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             if destination and not mount.exists(destination):
                 mount.make_directory(destination, parents=True, exist_ok=True)
             mount.write_bytes(path, payload)

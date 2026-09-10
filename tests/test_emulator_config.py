@@ -506,7 +506,7 @@ class EmulatorRouteTests(unittest.TestCase):
         """A hard drive is handed to the emulator entire, not partition by partition."""
         with tempfile.TemporaryDirectory() as temporary:
             service = DiskService(temporary)
-            drive = service.create_blank("ffs-hard", "Collection", capacity="4MB")
+            drive = service.create_blank("hd", "Collection", capacity="4MB")
             app = Flask(__name__)
             app.register_blueprint(create_tools_blueprint(service, OperationRegistry()))
             with patch("app.routes.tools.run_emulator_process") as run, _hatari(), _firmware():

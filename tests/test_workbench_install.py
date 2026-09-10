@@ -161,7 +161,7 @@ class WorkbenchInstallTests(unittest.TestCase):
         self.root = Path(self._temporary.name)
         self.service = DiskService(self.root / "work")
         self.addCleanup(self._temporary.cleanup)
-        self.drive = self.service.create_blank("ffs-hard", "SYSTEM", "40MB")
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
         self.service.select_partition(self.drive, 0)
 
     def _write(self, session, path: str, data: bytes, *, protection: str = "") -> None:
@@ -176,7 +176,7 @@ class WorkbenchInstallTests(unittest.TestCase):
         self.service.put(session, path, host, protection=protection or None)
 
     def _disc(self, volume: str, files: dict[str, bytes]):
-        disc = self.service.create_blank("adf", volume)
+        disc = self.service.create_blank("ds-720k", volume)
         for path, data in files.items():
             self._write(disc, path, data)
         return disc
@@ -260,7 +260,7 @@ class WorkbenchInstallTests(unittest.TestCase):
 
     def test_protection_bits_travel_with_the_files(self) -> None:
         """A command that loses its ``e`` bit cannot be run."""
-        disc = self.service.create_blank("adf", "Workbench3.1")
+        disc = self.service.create_blank("ds-720k", "Workbench3.1")
         self._write(disc, "s/Startup-Sequence", b"C:SetPatch\n")
         self._write(disc, "c/Dir", b"dir", protection="----rwed")
         self._write(disc, "libs/icon.library", b"lib", protection="----rw-d")
@@ -323,7 +323,7 @@ class WorkbenchInstallTests(unittest.TestCase):
         self.assertEqual([row["key"] for row in survey["missing"]], ["workbench"])
 
     def test_a_partition_table_is_not_a_place_to_install_onto(self) -> None:
-        drive = self.service.create_blank("ffs-hard", "TARGET", "40MB")
+        drive = self.service.create_blank("hd", "TARGET", "40MB")
         with self.assertRaises(DiskError):
             self.service.install_workbench(drive, {"workbench": self._workbench()})
 

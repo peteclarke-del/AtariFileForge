@@ -137,8 +137,8 @@ def open_single_upload_image(
             suffix = "…" if len(members) > 8 else ""
             raise DiskError(
                 f"{upload.filename} contains {len(members)} supported images "
-                f"({names}{suffix}). Insert it into an HDF to import all ADF/ADZ "
-                "members, or use a ZIP containing one image here."
+                f"({names}{suffix}). Extract them into a hard-disk image to import "
+                "them all, or use a ZIP containing one image here."
             )
         member = members[0]
         with _open_archive_image(archive, member, upload.filename) as image:
@@ -149,58 +149,22 @@ def open_single_upload_image(
 def open_disk_image_upload(
     upload,
     image_extensions: set[str],
-) -> Iterator[tuple[ArchiveImage, ArchiveImage | None]]:
-    """Open one disk image and an optional matching GEO from a ZIP upload."""
+) -> Iterator[ArchiveImage]:
+    """Open the one disk image inside a ZIP upload, or the upload itself.
+
+    An Atari image is always a single file: a partitioned drive keeps its
+    table in its own root sector and a bare volume its parameter block in its
+    own boot sector, so there is nothing that has to arrive alongside it.
+    """
     if not is_zip_name(upload.filename):
-        yield ArchiveImage(upload.filename, upload.stream, [upload.filename]), None
+        yield ArchiveImage(upload.filename, upload.stream, [upload.filename])
         return
     with _open_zip(upload) as archive:
-        members = _supported_members(archive, image_extensions | {".geo"})
-        images = [
-            member
-            for member in members
-            if Path(member.filename).suffix.lower() != ".geo"
-        ]
-        if len(images) != 1:
+        members = _supported_members(archive, image_extensions)
+        if len(members) != 1:
             raise DiskError(
-                f"{upload.filename} must contain exactly one supported disk or "
-                f"DMS archive; {len(images)} were found."
+                f"{upload.filename} must contain exactly one supported disk "
+                f"image; {len(members)} were found."
             )
-        image_info = images[0]
-        image_stem = Path(image_info.filename).stem.casefold()
-        descriptor_info = next(
-            (
-                member
-                for member in members
-                if Path(member.filename).suffix.lower() == ".geo"
-                and Path(member.filename).stem.casefold() == image_stem
-            ),
-            None,
-        )
-        with contextlib.ExitStack() as stack:
-            try:
-                image_stream = stack.enter_context(archive.open(image_info))
-                descriptor_stream = (
-                    stack.enter_context(archive.open(descriptor_info))
-                    if descriptor_info is not None
-                    else None
-                )
-                image = ArchiveImage(
-                    Path(image_info.filename).name,
-                    image_stream,
-                    [image_info.filename, upload.filename],
-                )
-                descriptor = (
-                    ArchiveImage(
-                        Path(descriptor_info.filename).name,
-                        descriptor_stream,
-                        [descriptor_info.filename, upload.filename],
-                    )
-                    if descriptor_info is not None
-                    else None
-                )
-                yield image, descriptor
-            except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                raise DiskError(
-                    f"The image in {upload.filename} could not be read."
-                ) from exc
+        with _open_archive_image(archive, members[0], upload.filename) as image:
+            yield image

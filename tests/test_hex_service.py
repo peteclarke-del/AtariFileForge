@@ -9,14 +9,19 @@ from app.disk_service import DiskError, DiskService, ImageSession
 from app.hex_service import compare_data, compare_paths, raw_image_range, search_raw_image, write_raw_image
 
 
+#: A run of bytes the image would not otherwise contain, so a search for it
+#: has exactly one answer and its offset is known.
+LABEL = b"ATARI FORGE"
+
+
 class HexServiceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.service = DiskService(self.root / "work")
-        self.path = self.root / "image.adf"
-        self.path.write_bytes(bytes(range(256)) + b"Disc catalogue" + bytes(range(256)))
-        self.session = ImageSession("a" * 32, self.path.name, "ofs", self.path)
+        self.path = self.root / "image.st"
+        self.path.write_bytes(bytes(range(256)) + LABEL + bytes(range(256)))
+        self.session = ImageSession("a" * 32, self.path.name, "gemdos", self.path)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -30,18 +35,18 @@ class HexServiceTests(unittest.TestCase):
         self.assertEqual(result["size"], self.path.stat().st_size)
 
     def test_searches_hex_and_text_in_both_directions(self):
-        text = search_raw_image(self.session, "Disc", "text", 0, "forward", False)
+        text = search_raw_image(self.session, "ATARI", "text", 0, "forward", False)
         backward = search_raw_image(
-            self.session, "44 69 73 63", "hex", self.path.stat().st_size - 1, "backward", False
+            self.session, "41 54 41 52 49", "hex", self.path.stat().st_size - 1, "backward", False
         )
 
         self.assertEqual(text["offset"], 256)
         self.assertEqual(backward["offset"], 256)
 
-        wrapped = search_raw_image(self.session, "Disc", "text", -1, "backward", True)
+        wrapped = search_raw_image(self.session, "ATARI", "text", -1, "backward", True)
         self.assertEqual(wrapped["offset"], 256)
         self.assertTrue(wrapped["wrapped"])
-        wrapped_forward = search_raw_image(self.session, "Disc catalogue", "text", 300, "forward", True)
+        wrapped_forward = search_raw_image(self.session, "ATARI FORGE", "text", 300, "forward", True)
         self.assertEqual(wrapped_forward["offset"], 256)
         self.assertTrue(wrapped_forward["wrapped"])
 
@@ -59,7 +64,7 @@ class HexServiceTests(unittest.TestCase):
 
     def test_raw_write_is_fixed_size_and_invalidates_derived_state(self):
         version = raw_image_range(self.session, 0, 16)["version"]
-        self.session.content_kind_cache[("-", "Game", 4, 0, 0, "")] = "basic"
+        self.session.content_kind_cache[("-", "GAME.BAS", 4, 0, 0, "")] = "basic"
         self.session.partition = 1
 
         result = write_raw_image(
@@ -72,7 +77,7 @@ class HexServiceTests(unittest.TestCase):
 
         self.assertEqual(result["written"], 3)
         self.assertEqual(self.path.read_bytes()[4:6], b"\xAA\xBB")
-        self.assertEqual(self.path.stat().st_size, 256 + len(b"Disc catalogue") + 256)
+        self.assertEqual(self.path.stat().st_size, 256 + len(LABEL) + 256)
         self.assertEqual(self.session.content_kind_cache, {})
         self.assertTrue(self.session.dirty)
 
@@ -108,7 +113,7 @@ class HexServiceTests(unittest.TestCase):
         self.assertEqual(report["candidateSize"], len(candidate))
 
     def test_path_comparison_streams_progress_and_skips_equal_chunks(self):
-        candidate = self.root / "candidate.adf"
+        candidate = self.root / "candidate.st"
         source = b"A" * (1024 * 1024) + b"B"
         candidate.write_bytes(source[:-1] + b"C")
         self.path.write_bytes(source)

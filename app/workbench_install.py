@@ -283,7 +283,7 @@ class WorkbenchInstallMixin:
         for match in matches:
             match["chosen"] = chosen.get(match["role"], {}).get("imageId") == match["imageId"]
         return {
-            "discs": matches,
+            "disks": matches,
             "chosen": {key: match["imageId"] for key, match in chosen.items()},
             "version": release,
             "versions": available_versions(matches),
@@ -362,7 +362,7 @@ class WorkbenchInstallMixin:
         report("Installed", len(ordered), len(ordered))
         return {
             "version": version,
-            "discs": installed,
+            "disks": installed,
             "copied": total_copied,
             "skipped": total_skipped,
             "drawers": drawers,
@@ -401,7 +401,7 @@ class WorkbenchInstallMixin:
         """
         created: list[str] = []
         for drawer in CREATED_DRAWERS:
-            if volume_copy.drawer_exists(self, target, drawer):
+            if volume_copy.directory_exists(self, target, drawer):
                 continue
             try:
                 self.make_directory(target, drawer)

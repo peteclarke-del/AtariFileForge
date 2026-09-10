@@ -8,8 +8,15 @@ from . import atari_paths
 from . import progress as progress_module
 
 
-class FFSInstallMixin:
-    """Audit and repair software trees installed into FFS hard disks."""
+class GemdosInstallMixin:
+    """Carry a disk's bootability with its files, and audit installed trees.
+
+    This mixin is a placeholder pending its own port: the auditing below
+    still describes the previous platform's loader conventions and is
+    replaced separately. What is already correct for the Atari is
+    ``carry_boot_option``, which copies the source volume's boot sector
+    executable flag onto the destination.
+    """
 
     def carry_boot_option(
         self, source: ImageSession, target: ImageSession, destination: str
@@ -32,7 +39,7 @@ class FFSInstallMixin:
         carry. A failure to set it is reported as a warning rather than raised:
         the files are already installed and are still usable by hand.
         """
-        if target.kind not in {"ffs", "ofs"}:
+        if target.kind != "gemdos":
             return None
         if atari_paths.normalise(destination):
             return None
@@ -59,6 +66,25 @@ class FFSInstallMixin:
         return option
 
     @staticmethod
+    def _repair_ffs_loader_items(items: list[dict]) -> tuple[list[str], list[str]]:
+        """Report the changes an installed program needs. There are none.
+
+        The previous platform named its files through a device, so a program
+        copied from a floppy to a hard disk referred to a drive that was no
+        longer where it lived and had to be rewritten. TOS resolves a path at
+        run time against the drive the program was started from, and a
+        relative path spelled with a leading backslash means the current
+        drive either way, so a program installed onto a partition finds its
+        files without anything being patched.
+
+        The signature is kept because the audit below reports repairs and
+        warnings per directory, and an empty pair is the honest answer for
+        every one of them.
+        """
+        del items
+        return [], []
+
+    @staticmethod
     def _ffs_directory_items(mount, directory: str, file_item) -> list[dict]:
         pending = [directory]
         items: list[dict] = []
@@ -81,7 +107,7 @@ class FFSInstallMixin:
     def _repair_copied_ffs_loaders(
         self, target: ImageSession, directory: str
     ) -> tuple[list[str], list[str]]:
-        with self.ffs_mount(target) as mount:
+        with self.gemdos_mount(target) as mount:
             items = self._ffs_directory_items(mount, directory, file_copy_item)
             repairs, warnings = self._repair_ffs_loader_items(items)
             for item in items:
@@ -112,13 +138,13 @@ class FFSInstallMixin:
     def audit_ffs_installations(
         self,
         session: ImageSession,
-        root: str = "$",
+        root: str = "",
         progress: progress_module.Progress | None = None,
     ) -> dict:
-        if session.kind not in {"ffs", "ofs"} or not self.summary(session)["hardDisk"]:
+        if session.kind != "gemdos" or not self.summary(session)["hardDisk"]:
             raise DiskError("Installed disk auditing is available only for FFS HDD images.")
         report = progress_module.reporter(progress)
-        with self.ffs_mount(session) as mount:
+        with self.gemdos_mount(session) as mount:
             if not mount.exists(root):
                 raise DiskError(f"Path not found: {root}")
             directory_files: dict[str, list[str]] = {}
@@ -129,7 +155,7 @@ class FFSInstallMixin:
                 directory_files[directory] = [str(entry.name) for entry in entries if not entry.is_dir]
                 pending.extend(str(entry.path) for entry in entries if entry.is_dir)
             source_names = {
-                path: name for path, name in session.ffs_source_names.items()
+                path: name for path, name in session.source_names.items()
                 if path == root or path.startswith(f"{root}{atari_paths.SEPARATOR}")
             }
             roots = self._ffs_installation_roots(directory_files, source_names)
@@ -162,7 +188,7 @@ class FFSInstallMixin:
         directories: list[str],
         progress: progress_module.Progress | None = None,
     ) -> dict:
-        if session.kind not in {"ffs", "ofs"} or not self.summary(session)["hardDisk"]:
+        if session.kind != "gemdos" or not self.summary(session)["hardDisk"]:
             raise DiskError("Installed disk repair is available only for FFS HDD images.")
         unique = list(dict.fromkeys(str(path) for path in directories if str(path)))
         if not unique:
@@ -176,7 +202,7 @@ class FFSInstallMixin:
             )
         report = progress_module.reporter(progress)
         repaired = []
-        with self.ffs_mount(session) as mount:
+        with self.gemdos_mount(session) as mount:
             for offset, directory in enumerate(unique):
                 report(f"Repairing installed software in {directory}", offset, len(unique))
                 items = self._ffs_directory_items(mount, directory, file_copy_item)
@@ -193,3 +219,7 @@ class FFSInstallMixin:
         self._persist_session(session)
         report("Installed software repair complete", len(unique), len(unique))
         return {"repaired": repaired, "count": len(repaired)}
+
+
+#: Retained under its previous name while the install layer is ported.
+FFSInstallMixin = GemdosInstallMixin
