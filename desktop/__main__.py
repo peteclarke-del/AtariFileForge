@@ -136,6 +136,24 @@ def _review_open_plans(message: str) -> list[dict]:
     return reviewed
 
 
+def _close_chooser_later(glib, chooser) -> None:
+    """Tear a native dialog down after its own response has been delivered.
+
+    ``GtkNativeDialog`` is a portal-backed object, and destroying one from
+    inside its own ``response`` handler frees it while GTK is still unwinding
+    that emission. The result is a segmentation fault deep inside GTK,
+    dispatched from the main loop, with nothing in the application's own
+    traceback to show for it. It is intermittent, because whether the freed
+    memory has been reused by the time GTK reads it again is a matter of
+    timing.
+
+    Handing the teardown to an idle callback lets the emission finish first.
+    The bound method also holds the reference that has to survive until then,
+    so the dialog cannot be collected early either.
+    """
+    glib.idle_add(chooser.destroy)
+
+
 def _run_portable_shell(args) -> int:
     """Run the system-webview shell used on Windows and macOS."""
     try:
@@ -361,7 +379,7 @@ def run(argv: list[str] | None = None) -> int:
                     str(exc) or type(exc).__name__,
                 )
             finally:
-                chooser.destroy()
+                _close_chooser_later(GLib, chooser)
 
         def _navigation_policy(self, _view, decision, decision_type) -> bool:
             if decision_type not in (
@@ -461,7 +479,7 @@ def run(argv: list[str] | None = None) -> int:
                 )
             finally:
                 self.chooser_targets.pop(chooser, None)
-                chooser.destroy()
+                _close_chooser_later(GLib, chooser)
 
         def _native_files_dropped(self, _target, file_list, x, y) -> bool:
             """Open host files through the local-path adapter, never an upload."""
