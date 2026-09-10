@@ -191,7 +191,13 @@ class RomServiceTests(unittest.TestCase):
 
     def test_a_192k_tos_image_is_listed_as_three_64k_banks(self):
         session = self.service.create_from_stream(
-            "etos192uk.rom", io.BytesIO(emutos()), rom_options={"platform": "tos"},
+            "etos192uk.rom",
+            io.BytesIO(emutos()),
+            rom_options={"platform": "tos"},
+            # A linked TOS image mounts as its segments unless the banked
+            # view is asked for outright, which is what inspects it chip by
+            # chip.
+            force_kind="rom",
         )
         rows = self.service.list_rom_banks(session)
         self.assertEqual(len(rows), 3)
