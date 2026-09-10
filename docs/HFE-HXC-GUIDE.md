@@ -2,10 +2,10 @@
 
 Atari File Forge uses the official HxCFloppyEmulator command-line converter,
 normally invoked as `hxcfe`, to open, create and save HFE floppy images. HFE is
-a track and bit-cell container. OFS and FFS are the filing systems stored in
-the sectors represented by those tracks.
+a track and bit-cell container. GEMDOS, the FAT12 filesystem TOS uses, is
+what is stored in the sectors represented by those tracks.
 
-![Creating an HFE-wrapped Atari floppy](images/hfe-create.png)
+![Creating an HFE-wrapped ST floppy](images/hfe-create.png)
 
 ## What is included
 
@@ -42,25 +42,43 @@ The Docker image installs the same executable and libraries under
    count before invoking HxCFE.
 3. HxCFE reports the track structure and decodes the sector stream to a private
    working image.
-4. Atari File Forge identifies the decoded filesystem as OFS or FFS and opens
-   it with the applicable catalogue and filename rules.
+4. Atari File Forge identifies the decoded GEMDOS volume and opens it with the
+   FAT12 catalogue and filename rules.
 5. Read the warning at the top of the pane. It states the HFE version, track
    count, side count, bitrate and whether the image is editable.
 
-An HFE is not considered successfully opened until its decoded OFS or FFS
-catalogue can be listed in the pane. HFE recognition without a browseable Atari
-filesystem is reported as a conversion or filesystem error, not as a blank
-disk.
+An HFE is not considered successfully opened until its decoded GEMDOS
+catalogue can be listed in the pane. HFE recognition without a browseable
+volume is reported as a conversion or filesystem error, not as a blank disk.
 
 The original HFE is retained unchanged throughout the session. Filesystem edits
 are made to decoded working sectors, not directly to the selected host file.
 
+## Geometry and the sector image
+
+The decoded sectors are kept as a `.st`, whatever the side count or sector
+count of the disk. The shape is read from the boot sector's BIOS parameter
+block, with the file size as the fallback when that names exactly one shape;
+the table of shapes lives in one place, `app/floppy_geometry.py`, and covers
+the ST family of 80 to 83 tracks, one or two sides and 9 to 11 sectors, plus
+the 40-track PC disks and the 1440 KiB high-density disk.
+
+HxCFE settles the geometry the same way. Its ST loader reads the BIOS
+parameter block first, then its own size table, then tries every plausible
+shape until one fits. Because every sector image the workbench hands it
+carries a valid boot sector, no `-uselayout` is ever passed: a layout name
+would have to be kept in step with the geometry table by hand, and one HxCFE
+does not know makes it refuse the input outright. What the encode does
+insist on is that the sector file is named `.st`, because HxCFE chooses its
+loader by suffix and a `.img` would be read by the generic raw loader with
+PC assumptions. This is enforced and unit tested in `app/flux_containers.py`.
+
 ## Editable and read-only images
 
 An ordinary HFE v1 image is editable when HxCFE decodes a clean sector image
-and the contained OFS or FFS geometry is supported. File editing, access
-changes, compaction and cross-image transfers then follow the rules of the
-decoded filesystem.
+and the contained GEMDOS geometry is supported. File editing, attribute
+changes and cross-image transfers then follow the rules of the decoded
+filesystem.
 
 Atari File Forge opens these images read-only:
 
@@ -75,16 +93,13 @@ destroying non-sector data.
 
 ## Create a new HFE image
 
-Choose **File → New → New Image**, then select one of these formats:
+Choose **File → New → New Image**, then select an HFE format. Each is a
+GEMDOS floppy of one of the geometries above, wrapped as HFE: the everyday
+double-sided 720 KiB disk, the single-sided 360 KiB one, the 800 and 880 KiB
+ten- and eleven-sector layouts, and the 1440 KiB high-density disk.
 
-- HFE OFS DS/DD, equivalent to an 880 KiB ADF
-- HFE FFS DS/DD, equivalent to an 880 KiB ADF
-- HFE FFS International DS/DD
-- HFE OFS high density, 1760 KiB
-- HFE FFS high density, 1760 KiB
-
-Atari File Forge first creates the corresponding formatted sector image, then
-asks HxCFE to encode it as HFE. The new pane behaves as OFS or FFS while its
+Atari File Forge first creates the corresponding formatted `.st`, then asks
+HxCFE to encode it as HFE. The new pane behaves as a GEMDOS volume while its
 format badge remains HFE.
 
 ## Save an edited HFE image
@@ -104,13 +119,13 @@ close the application until it reports that the package is ready.
 
 ## Transfers and physical disks
 
-An HFE can be extracted into a drawer on any writable volume. A sector image
-stores only sectors,
-not track timing, so weak-bit and protection information cannot be carried into
-the destination. Atari File Forge reports that loss before copying.
+An HFE can be extracted into a folder on any writable volume. A sector image
+stores only sectors, not track timing, so weak-bit and protection information
+cannot be carried into the destination. Atari File Forge reports that loss
+before copying.
 
-An HFE containing OFS or FFS can be copied into another writable filesystem by
-extracting its files. Protection bits and comments are retained where the
+An HFE containing a GEMDOS volume can be copied into another writable
+filesystem by extracting its files. Attributes are retained where the
 destination format supports them.
 
 Greaseweazle can write HFE track data to a physical floppy. Its normal sector
@@ -127,10 +142,10 @@ Forge opens `.scp` files exactly the way it opens `.hfe` files:
 
 1. Select **Open image** or drag an `.scp` file onto a pane.
 2. HxCFE decodes the flux capture to a private working sector image.
-3. Atari File Forge identifies the decoded filesystem as OFS or FFS and opens
-   it with the applicable catalogue and filename rules. It runs the complete
-   filesystem validator before presenting the pane, so a plausible root header
-   cannot hide a broken directory tree.
+3. Atari File Forge identifies the decoded GEMDOS volume and opens it with the
+   FAT12 catalogue and filename rules. It runs the complete filesystem
+   validator before presenting the pane, so a plausible boot sector cannot
+   hide a broken directory tree.
 4. HxCFE re-encodes the decoded sectors back to SCP and decodes that result
    again. If it does not match byte-for-byte, the capture opens read-only; it
    can still be browsed and copied from, but not rewritten safely.
@@ -141,13 +156,15 @@ sectors back to SCP, decodes that candidate again, and blocks the download if
 any byte differs from the working sectors.
 
 Some Greaseweazle SCP captures expose an HxCFE raw-writer edge case in which
-the final blank 256-byte sector is omitted even though all 16 sectors are
-reported on the last track of a DS/DD disk. Atari File Forge recognises only that exact
-one-sector-short form at the end of a known floppy geometry, restores the blank
-tail sector, then validates the complete image. It never pads a missing sector
-in the middle of a track. The supplied 80-track, double-sided sample
-therefore opens as a 901,120-byte `.adf`, exposes its complete nested directory
-tree, and exports directly through **File → Export as…**.
+the final blank 512-byte sector is omitted even though every sector is
+reported on the last track. Atari File Forge recognises only that exact
+one-sector-short form at the end of a known floppy geometry, restores the
+blank tail sector, then validates the complete image. It never pads a missing
+sector in the middle of a track, and it cannot mistake one geometry for
+another this way because no two shapes in the table are a single sector
+apart. A double-sided 80-track nine-sector capture therefore opens as a
+737,280-byte `.st`, exposes its complete nested directory tree, and exports
+directly through **File → Export as…**.
 
 In the native Linux edition, **Tools → Write physical floppy** can also send an
 SCP capture to a connected Greaseweazle. As with HFE, the flux-level write
@@ -163,26 +180,28 @@ ZIP, and never changes the working image.
 The same action has an **Export** control in every pane header, between
 **Save Image** and **Refresh View**. It stays visible but greyed out when the
 open media has no compatible target, and its tooltip gives the reason: a
-Hardfile HDA and GEO pair carries geometry no sector or flux container can
-represent, and HDF, DMS, ROM, Kickstart ROM and archive panes have nothing to convert.
+hard-disk image carries geometry no floppy container can represent, and ROM,
+STX and archive panes have nothing to convert.
 
-Available targets depend on the image's filing system and geometry:
+Available targets depend on the image's geometry:
 
-- Every OFS or FFS image can export its plain sector image as an `.adf`,
-  whichever filing system formatted it, or as the same image gzipped to `.adz`.
-  This is useful when an image was opened from an HFE or SCP container and a
-  plain sector image is wanted for an emulator.
-- DS/DD and high-density 3.5-inch floppies can also export as an HFE
-  or SCP flux container, using the same encode-then-verify check used when
-  saving an edited HFE or SCP.
+- Every GEMDOS floppy can export its plain sector image as a `.st`, or as an
+  `.msa` packed track by track, or as a `.dim` with the FastCopy Pro header.
+  This is useful when an image was opened from an HFE, SCP, IPF or STX
+  container and a plain sector image is wanted for an emulator.
+- Every shape in the ST family and the high-density disk can also export as
+  an HFE or SCP flux container, using the same encode-then-verify check used
+  when saving an edited HFE or SCP.
 
-The 5.25-inch geometry, RDB hard drives and Hardfile HDA/GEO pairs only offer
-the native sector export, because HxCFE has no blank flux layout for them and a
-hard drive's geometry is not something a flux container can represent.
+The 180 KiB PC geometry and hard-disk images only offer the native sector
+export, because HxCFE has nothing to read the first back as and a hard disk's
+geometry is not something a flux container can represent. STX is never an
+export target: it is a record of a physical read, and the workbench has no
+physical read to record.
 
 ## Troubleshooting
 
-### “The HFE conversion engine is not installed”
+### "The HFE conversion engine is not installed"
 
 Official 0.0.0 Docker images and native packages bundle HxCFE. If this error
 appears, confirm that the package is current and that all runtime files are
@@ -208,7 +227,7 @@ a direct diagnostic invocation, supply `LD_LIBRARY_PATH` as shown above.
 ### The image opens read-only
 
 Read the pane warning. HFE v2/v3, bad-sector and advanced track layouts are
-protected intentionally. Copy readable files to a new ADF, ADZ, FFS or clean
+protected intentionally. Copy readable files to a new `.st`, `.msa` or clean
 HFE v1 image instead of forcing a lossy rewrite.
 
 ### Conversion times out or saving fails verification
