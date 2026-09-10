@@ -35,23 +35,23 @@ def run(profile: str = "quick") -> dict:
     with tempfile.TemporaryDirectory(prefix="atari-forge-benchmark-") as folder:
         root = Path(folder)
         service = DiskService(root / "work")
-        drive = service.create_blank("ffs-hard", "BENCH", "20MB")
+        drive = service.create_blank("hd", "BENCH", "32MB")
         # A drive opens on its partition table. Selecting the first partition
         # is what opening one in the interface does, and it is what gives the
         # benchmark a volume to write into.
         service.select_partition(drive, 0)
-        adf = service.create_blank("adf", "BENCH")
-        hardfile = service.create_blank("hardfile", "BENCHSCSI", "20MB", "hardfile")
+        floppy = service.create_blank("ds-720k", "BENCH")
+        volume = service.create_blank("volume", "BENCHVOL", "32MB")
         files = []
         for number in range(file_count):
             path = root / f"FILE{number:04d}"
             path.write_bytes((f"generated-{number}\n".encode("ascii")) * 16)
             group = number // 40 + 1
-            files.append({"targetPath": f"PACK{group}/FILE{number:04d}", "hostPath": path})
+            files.append({"targetPath": f"PACK{group}/FILE{number:04d}.DAT", "hostPath": path})
         for number in range(min(20, file_count)):
-            service.put(adf, f"F{number:02d}", Path(files[number]["hostPath"]))
+            service.put(floppy, f"F{number:02d}.DAT", Path(files[number]["hostPath"]))
         service.put_host_tree(drive, "", files, preserve_directories=True)
-        service.make_directory(hardfile, "GAMES")
+        service.make_directory(volume, "GAMES")
 
         results = [
             measure(
@@ -59,7 +59,7 @@ def run(profile: str = "quick") -> dict:
                 lambda: service.list_partitions(drive),
                 repeats,
             ),
-            measure("floppy-list-20-files", lambda: service.browse_directory(adf, ""), repeats),
+            measure("floppy-list-20-files", lambda: service.browse_directory(floppy, ""), repeats),
             measure(
                 "drive-list-generated-tree",
                 lambda: service.browse_directory(drive, "PACK1"),
@@ -70,11 +70,11 @@ def run(profile: str = "quick") -> dict:
                 lambda: _bulk_import(service, files),
                 repeats,
             ),
-            measure("hardfile-root-list", lambda: service.browse_directory(hardfile, ""), repeats),
-            measure("hardfile-checkpoint", lambda: _checkpoint_round_trip(service, hardfile), repeats),
+            measure("volume-root-list", lambda: service.browse_directory(volume, ""), repeats),
+            measure("volume-checkpoint", lambda: _checkpoint_round_trip(service, volume), repeats),
             measure(
-                "hardfile-save-archive",
-                lambda: build_download_archive(service, hardfile),
+                "volume-save-archive",
+                lambda: build_download_archive(service, volume),
                 1 if profile == "quick" else 2,
             ),
         ]
@@ -92,7 +92,7 @@ def _checkpoint_round_trip(service: DiskService, session) -> None:
 
 
 def _bulk_import(service: DiskService, files: list[dict]) -> None:
-    target = service.create_blank("ffs-hard", "IMPORT", "20MB")
+    target = service.create_blank("hd", "IMPORT", "32MB")
     service.select_partition(target, 0)
     try:
         service.put_host_tree(target, "", files, preserve_directories=True)
