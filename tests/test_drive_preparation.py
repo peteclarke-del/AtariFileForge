@@ -82,6 +82,32 @@ class DriverCatalogueTests(unittest.TestCase):
         self.assertEqual(ahdi["id"], "driver-ahdi")
         self.assertEqual(ahdi["version"], "6.061")
 
+    def test_a_release_is_only_read_from_a_folder_belonging_to_that_driver(self) -> None:
+        """A drive root holds whatever its owner put there.
+
+        The operator's own ICD drive carries a folder called ``512K_1M``
+        beside the driver's ``ICDPRO_6.55A``. Reading a release from the
+        first folder that happens to end in a number reported the ICD driver
+        as version "1M", which is not a version of anything.
+        """
+        found = installed_driver(
+            ["ICDBOOT.SYS", "NEWDESK.INF"],
+            ["512K_1M", "ICDPRO_6.55A", "KOBOLD_3.5FR", "MEGASTE"],
+        )
+        self.assertEqual(found["id"], "driver-icd")
+        self.assertEqual(found["version"], "6.55A")
+
+    def test_a_driver_whose_folder_is_not_on_the_drive_reports_no_release(self) -> None:
+        """Saying nothing is right where the evidence is not there.
+
+        A driver copied in without its folder, or renamed, leaves nothing to
+        read a release from. An empty version prints as the bare file name,
+        which is exactly as much as the drive actually proves.
+        """
+        found = installed_driver(["SHDRIVER.SYS"], ["512K_1M", "GAMES"])
+        self.assertEqual(found["id"], "driver-ahdi")
+        self.assertEqual(found["version"], "")
+
     def test_a_drive_with_no_driver_file_says_so_rather_than_guessing(self) -> None:
         found = installed_driver(["NEWDESK.INF", "AUTO"], [])
         self.assertEqual(found["id"], DRIVERLESS)
