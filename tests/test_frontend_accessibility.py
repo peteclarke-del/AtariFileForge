@@ -75,6 +75,8 @@ class FrontendAccessibilityTests(unittest.TestCase):
                     ("st-format-text", "st-format"),
                     ("stx-format-text", "stx-format"),
                     ("msa-format-text", "msa-format"),
+                    ("flux-format-text", "flux-format"),
+                    ("tosrom-format-text", "tosrom-format"),
                     ("rom-format-text", "blue"),
                     ("hex-text", "hex-background"),
                     ("hex-address", "hex-background"),
