@@ -1,0 +1,51 @@
+' TILEMAP.GFA -- a made-up demo for the Atari File Forge test corpus
+' Every construct here is one the reader and the writer both claim.
+DEFWRD "a-z"
+DIM map%(20,12)
+width%=20
+height%=12
+@build_map(width%,height%)
+@show_map
+PRINT "cells filled: ";total%
+END
+PROCEDURE build_map(w%,h%)
+  LOCAL x%,y%
+  FOR y%=0 TO h%-1
+    FOR x%=0 TO w%-1
+      IF x%=0 OR y%=0 OR x%=w%-1 OR y%=h%-1
+        map%(x%,y%)=1
+      ELSE
+        map%(x%,y%)=0
+      ENDIF
+      INC total%
+    NEXT x%
+  NEXT y%
+RETURN
+PROCEDURE show_map
+  LOCAL x%,y%,row$
+  y%=0
+  WHILE y%<height%
+    row$=""
+    FOR x%=0 TO width%-1
+      row$=row$+CHR$(35-3*(map%(x%,y%)=0))
+    NEXT x%
+    PRINT row$
+    INC y%
+  WEND
+  REPEAT
+  UNTIL INKEY$<>""
+  DO
+    EXIT IF MOUSEK=2
+  LOOP
+  SELECT height%
+  CASE 12
+    PRINT "twelve rows"
+  CASE 24
+    PRINT "twenty-four rows"
+  DEFAULT
+    PRINT "an unusual height"
+  ENDSELECT
+RETURN
+FUNCTION area(w%,h%)
+  RETURN w%*h%
+ENDFUNC

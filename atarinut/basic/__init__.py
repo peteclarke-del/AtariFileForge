@@ -91,11 +91,19 @@ class Line:
 
 @dataclass(frozen=True)
 class Detection:
+    """What ``detect`` made of a run of bytes.
+
+    ``tokenised`` is about these bytes, not about the dialect: a GFA BASIC
+    program is tokenised, but the same program's ``.LST`` export is not, and
+    both are ``GFA_BASIC_3``.
+    """
+
     verdict: Verdict
     dialect: object = None
     reason: str = ""
     program_length: int | None = None
     line_count: int = 0
+    tokenised: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +298,10 @@ def detect(data: bytes) -> Detection:
             reason += " The program is PSAVE protected, so its names are gone."
         if consumed < len(raw):
             return Detection(Verdict.BASIC_TRAILING, GFA_BASIC_3,
-                             reason + f" {len(raw) - consumed:,} trailing bytes follow.", consumed, len(program.lines))
-        return Detection(Verdict.BASIC, GFA_BASIC_3, reason, consumed, len(program.lines))
-    if raw[:10] == gfa.MAGIC_2:
+                             reason + f" {len(raw) - consumed:,} trailing bytes follow.",
+                             consumed, len(program.lines), True)
+        return Detection(Verdict.BASIC, GFA_BASIC_3, reason, consumed, len(program.lines), True)
+    if gfa.MAGIC_2 in raw[:16]:
         return Detection(Verdict.NOT_BASIC, None,
                          "A GFA BASIC 2 saved program. Only its .LST listing export is readable here.")
     if raw[:10] == stos.PROGRAM_MAGIC:
@@ -300,13 +309,18 @@ def detect(data: bytes) -> Detection:
             program = stos.parse_program(raw)
         except DataError as error:
             return Detection(Verdict.NOT_BASIC, None, f"A STOS header that does not parse: {error}")
-        consumed = stos.HEADER_LENGTH + (program.lines[-1].end if program.lines else 0)
+        # The declared program area holds the lines, their terminator and any
+        # memory banks the program reserved, so it is all one program.
+        consumed = min(stos.HEADER_LENGTH + program.program_length, len(raw))
+        banks = sum(1 for bank in program.banks if bank.length)
         reason = f"{len(program.lines)} line(s) of STOS BASIC."
+        if banks:
+            reason += f" {banks} memory bank(s) are saved with it."
         if consumed < len(raw):
             return Detection(Verdict.BASIC_TRAILING, STOS_BASIC,
-                             reason + f" {len(raw) - consumed:,} trailing bytes hold the memory banks.",
-                             consumed, len(program.lines))
-        return Detection(Verdict.BASIC, STOS_BASIC, reason, consumed, len(program.lines))
+                             reason + f" {len(raw) - consumed:,} trailing bytes follow.",
+                             consumed, len(program.lines), True)
+        return Detection(Verdict.BASIC, STOS_BASIC, reason, consumed, len(program.lines), True)
     if raw[:10] == stos.BANK_MAGIC:
         return Detection(Verdict.NOT_BASIC, None, "A STOS memory bank file, which carries no program.")
     text = _as_text(raw)
@@ -316,11 +330,13 @@ def detect(data: bytes) -> Detection:
 
 
 def is_tokenised(data: bytes) -> bool:
-    """True when the bytes hold a program stored in a tokenised form."""
+    """True when *these bytes* hold a program in a tokenised form.
+
+    A GFA BASIC ``.LST`` is GFA BASIC and is not tokenised, so the question is
+    about the storage rather than about the dialect.
+    """
     detection = detect(data)
-    return detection.verdict in {Verdict.BASIC, Verdict.BASIC_TRAILING} and bool(
-        detection.dialect and detection.dialect.tokenised
-    )
+    return detection.verdict in {Verdict.BASIC, Verdict.BASIC_TRAILING} and detection.tokenised
 
 
 def _dialect_of(data: bytes, dialect: Dialect | None) -> Dialect:
