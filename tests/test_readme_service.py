@@ -141,10 +141,10 @@ class FloppyReadmeTests(unittest.TestCase):
             [cell.strip() for cell in header.strip("|").split("|")],
             ["Name", "Attributes", "Datestamp", "Size", "Kind"],
         )
-        row = next(line for line in readme.splitlines() if "`AUTO/START.PRG`" in line)
+        row = next(line for line in readme.splitlines() if "`AUTO\\START.PRG`" in line)
         self.assertEqual(
             [cell.strip() for cell in row.strip("|").split("|")],
-            ["`AUTO/START.PRG`", "`r----a`", "-", "512", "Program"],
+            ["`AUTO\\START.PRG`", "`r----a`", "-", "512", "Program"],
         )
         self.assertIn("1992-06-01T09:00:00", readme)
 
