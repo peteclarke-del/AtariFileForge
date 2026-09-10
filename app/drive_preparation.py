@@ -114,6 +114,11 @@ class Driver:
     files: tuple[str, ...]
     #: Programs that belong in ``AUTO`` rather than in the partition root.
     auto_files: tuple[str, ...] = ()
+    #: What the distribution's own folder is called, without its release. A
+    #: driver is normally copied onto a drive in a folder named for itself and
+    #: its version, so this is how a folder is recognised as belonging to this
+    #: driver rather than to something else the operator keeps on the drive.
+    folder_names: tuple[str, ...] = ()
     #: Whether this driver needs an executable root sector at all.
     boot_sector: bool = True
     note: str = ""
@@ -139,6 +144,7 @@ DRIVERS: tuple[Driver, ...] = (
         "Atari AHDI",
         ("SHDRIVER.SYS", "AHDI.SYS"),
         auto_files=("AHDI.PRG",),
+        folder_names=("AHDI", "SHDRIVER"),
         note="Atari's own driver. AHDI 6.0 loads SHDRIVER.SYS from the root "
              "sector; AHDI 3.0 is run from AUTO instead and is limited to "
              "16 MB partitions on TOS 1.x.",
@@ -147,6 +153,7 @@ DRIVERS: tuple[Driver, ...] = (
         "driver-hddriver",
         "HDDRIVER",
         ("HDDRIVER.SYS",),
+        folder_names=("HDDRIVER", "HDDRV"),
         note="Uwe Seimet's driver, the usual choice for large partitions and "
              "for modern interfaces such as ACSI2STM and UltraSatan.",
     ),
@@ -154,12 +161,14 @@ DRIVERS: tuple[Driver, ...] = (
         "driver-pp",
         "PP driver",
         ("PPDRIVER.SYS", "PPDRIVER.PRG"),
+        folder_names=("PPDRIVER", "PPDRV", "PP"),
         note="Peter Putnik's free driver for ACSI, SCSI and IDE drives.",
     ),
     Driver(
         "driver-icd",
         "ICD Pro driver",
         ("ICDBOOT.SYS",),
+        folder_names=("ICDPRO", "ICD", "ICDBOOT"),
         note="Supplied with ICD host adapters, and it drives most other ACSI "
              "hardware as well.",
     ),
@@ -179,7 +188,14 @@ _FILE_OWNERS = {
 #: release: ``ICDPRO_6.55A`` beside ``ICDBOOT.SYS``, ``AHDI_6.061`` beside
 #: ``SHDRIVER.SYS``. That folder is where the version comes from, because the
 #: driver file itself carries no version anything can read.
-_VERSION_IN_FOLDER = re.compile(r"[_-]v?([0-9]+(?:\.[0-9]+)*[A-Za-z]?)$")
+#:
+#: The folder has to be one of *this* driver's, which is why the name is
+#: matched as well as the release. A drive root holds whatever its owner put
+#: there, and a folder called ``512K_1M`` reads as a version to a pattern that
+#: only looks for digits on the end.
+_VERSION_IN_FOLDER = re.compile(
+    r"^(?P<name>[A-Za-z]+)[_-]v?(?P<release>[0-9]+(?:\.[0-9]+)*[A-Za-z]?)$"
+)
 
 
 def describe_drivers() -> list[dict]:
@@ -238,10 +254,16 @@ class Distribution:
 
 
 def _version_from(path: Path) -> str:
+    """The release a supplied distribution was unpacked as.
+
+    Here the folder is known to be the driver's, because it is the folder the
+    driver file was just found in, so the name half of the match is not
+    checked against anything.
+    """
     for candidate in (path.parent, path):
-        match = _VERSION_IN_FOLDER.search(candidate.name)
+        match = _VERSION_IN_FOLDER.fullmatch(candidate.name.strip())
         if match:
-            return match.group(1)
+            return match.group("release")
     return ""
 
 
@@ -318,14 +340,30 @@ def installed_driver(names, folders=()) -> dict:
         owner = _FILE_OWNERS.get(str(name).casefold())
         if owner is None:
             continue
-        version = ""
-        for folder in folders:
-            match = _VERSION_IN_FOLDER.search(str(folder))
-            if match:
-                version = match.group(1)
-                break
-        return {"id": owner.key, "installed": True, "version": version, "file": str(name)}
+        return {
+            "id": owner.key,
+            "installed": True,
+            "version": _release_beside(owner, folders),
+            "file": str(name),
+        }
     return {"id": DRIVERLESS, "installed": False, "version": "", "file": ""}
+
+
+def _release_beside(driver: Driver, folders) -> str:
+    """The release this driver was copied in as, from its own folder.
+
+    A folder counts only where its name is one this driver is distributed
+    under. Anything else on the drive belongs to the operator, and reading a
+    release out of it would report a version that is not the driver's.
+    """
+    known = {text.casefold() for text in driver.folder_names}
+    if not known:
+        return ""
+    for folder in folders:
+        match = _VERSION_IN_FOLDER.fullmatch(str(folder).strip())
+        if match and match.group("name").casefold() in known:
+            return match.group("release")
+    return ""
 
 
 # ---------------------------------------------------------------------------
