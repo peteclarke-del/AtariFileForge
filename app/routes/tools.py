@@ -1395,7 +1395,14 @@ def create_tools_blueprint(
             raise DiskError("Choose a file to disassemble.")
         try:
             origin = int(str(request.args.get("origin")), 0) if request.args.get("origin") not in (None, "") else None
-            start = int(str(request.args.get("start") or "0"), 0)
+            # An absent offset is not the same as zero. Zero is a deliberate
+            # request to disassemble from the first byte of the file, header
+            # included; absent lets the decoder start at the code.
+            start = (
+                int(str(request.args.get("start")), 0)
+                if request.args.get("start") not in (None, "")
+                else None
+            )
             length = int(str(request.args.get("length")), 0) if request.args.get("length") not in (None, "") else None
         except ValueError as exc:
             raise DiskError("Origin, offset and length must be valid decimal or 0x-prefixed numbers.") from exc

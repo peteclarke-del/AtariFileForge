@@ -637,7 +637,7 @@ def disassemble_file(
     side: int | None,
     architecture: str = "auto",
     origin: int | None = None,
-    start: int = 0,
+    start: int | None = None,
     length: int | None = None,
 ) -> dict:
     data, metadata, size, digest = _context(service, session, path, side, MAX_DISASSEMBLY_FILE)
@@ -655,7 +655,7 @@ def disassemble_file_data(
     path: str,
     architecture: str = "auto",
     origin: int | None = None,
-    start: int = 0,
+    start: int | None = None,
     length: int | None = None,
     *,
     size: int | None = None,
@@ -719,17 +719,19 @@ def _program_body(data: bytes, start: int, length: int | None):
     sizes as instructions, so a listing opened on any Atari program began with
     seven lines of nonsense before reaching the first real instruction.
 
-    The symbol table at the end is not code either, so the length is the text
-    segment. A caller that asks for a particular range gets exactly that
-    range, because somebody reading the header deliberately is entitled to.
+    The symbol table at the end is not code either, so the length defaults to
+    the text segment. A caller that names an offset gets exactly that offset,
+    because somebody reading the header deliberately is entitled to. An absent
+    offset is therefore not the same as zero, and the two are kept apart all
+    the way up to the query string.
     """
-    if start or length is not None:
-        return None, start, length
+    if start is not None:
+        return None, int(start), length
     header = program_header(data)
     if header is None:
-        return None, start, length
+        return None, 0, length
     text = int(header["text"])
-    return header, PROGRAM_TEXT_OFFSET, text or None
+    return header, PROGRAM_TEXT_OFFSET, length if length is not None else (text or None)
 
 
 def _project_data_rows(
