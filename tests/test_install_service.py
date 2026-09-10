@@ -9,6 +9,7 @@ title moved into a folder that already held something else.
 
 from __future__ import annotations
 
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,8 +26,8 @@ from app.install_service import (
 
 
 def program(body: bytes = b"code") -> bytes:
-    """The smallest thing TOS would accept as a program."""
-    return b"\x60\x1a" + (0).to_bytes(4, "big") * 5 + (0).to_bytes(2, "big") + body
+    """A GEMDOS program whose 28-byte header agrees with what follows it."""
+    return struct.pack(">HIIIIIIH", 0x601A, len(body), 0, 0, 0, 0, 0, 0) + body
 
 
 class StagingTests(unittest.TestCase):
@@ -346,6 +347,105 @@ class SingleProgramTests(unittest.TestCase):
             self.assertTrue(is_program_name(name), name)
         for name in ("A.DAT", "READ.ME", "A"):
             self.assertFalse(is_program_name(name), name)
+
+
+class DriveSoftwareAuditTests(unittest.TestCase):
+    """What is already on a drive, checked from the drive itself.
+
+    Only one fault here has a repair, and the reason is the point: a desktop
+    record naming a file that is not on the volume cannot start anything, so
+    removing it takes nothing away. A program whose header does not parse is
+    reported and never rewritten, because what the right bytes would have been
+    is not knowable from here.
+    """
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self._temporary.name)
+        self.addCleanup(self._temporary.cleanup)
+        self.service = DiskService(self.root / "work")
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
+        self.service.select_partition(self.drive, 0)
+        self.service.prepare_drive(self.drive)
+        self.service.make_directory(self.drive, "GAMES\\CHUCK")
+        volume_copy.write_file(
+            self.service, self.drive, "GAMES\\CHUCK\\CHUCK.PRG", program(b"chuck")
+        )
+        self.service.install_desktop_application(
+            self.drive, "GAMES\\CHUCK\\CHUCK.PRG", label="Chuck"
+        )
+
+    def _findings(self, report: dict) -> dict:
+        return {item["path"]: item for item in report["directories"]}
+
+    def test_a_drive_whose_programs_and_records_agree_reads_clean(self) -> None:
+        report = self.service.audit_drive_software(self.drive)
+        finding = self._findings(report)["GAMES\\CHUCK"]
+
+        self.assertEqual(finding["status"], "clean")
+        self.assertEqual(finding["programs"], ["CHUCK.PRG"])
+        self.assertEqual(report["repairable"], 0)
+
+    def test_a_program_that_is_not_one_is_reported_and_never_rewritten(self) -> None:
+        volume_copy.write_file(
+            self.service, self.drive, "GAMES\\CHUCK\\FIX.TOS",
+            b"this is not a program at all, not even nearly one",
+        )
+        before = self.service.read_file(self.drive, "GAMES\\CHUCK\\FIX.TOS")
+
+        finding = self._findings(self.service.audit_drive_software(self.drive))["GAMES\\CHUCK"]
+
+        self.assertEqual(finding["status"], "warning")
+        self.assertEqual(finding["repairs"], [])
+        self.assertTrue(any("0x601A" in warning for warning in finding["warnings"]))
+        self.assertEqual(self.service.read_file(self.drive, "GAMES\\CHUCK\\FIX.TOS"), before)
+
+    def test_a_truncated_program_is_told_from_a_whole_one(self) -> None:
+        whole = program(b"x" * 400)
+        volume_copy.write_file(self.service, self.drive, "GAMES\\CHUCK\\CUT.PRG", whole[:60])
+
+        finding = self._findings(self.service.audit_drive_software(self.drive))["GAMES\\CHUCK"]
+
+        self.assertTrue(any("truncated" in warning for warning in finding["warnings"]))
+
+    def test_a_record_naming_a_file_that_is_gone_is_offered_as_a_repair(self) -> None:
+        from app.gemdos_items import delete_gemdos_items
+
+        delete_gemdos_items(self.service, self.drive, ["GAMES\\CHUCK\\CHUCK.PRG"])
+
+        report = self.service.audit_drive_software(self.drive)
+        finding = self._findings(report)["GAMES\\CHUCK"]
+
+        self.assertEqual(report["repairable"], 1)
+        self.assertEqual(finding["status"], "repairable")
+        # The record that installs the application and the icon that shows it
+        # both name the missing file, so both are offered.
+        self.assertEqual(len(finding["repairs"]), 2)
+
+    def test_repairing_removes_those_records_and_nothing_else(self) -> None:
+        from app.gemdos_items import delete_gemdos_items
+        from app.drive_preparation import NEWDESK, desktop_records
+
+        before = desktop_records(self.service.read_file(self.drive, NEWDESK).decode("latin-1"))
+        delete_gemdos_items(self.service, self.drive, ["GAMES\\CHUCK\\CHUCK.PRG"])
+
+        result = self.service.repair_drive_software(self.drive, ["GAMES\\CHUCK"])
+
+        after = desktop_records(self.service.read_file(self.drive, NEWDESK).decode("latin-1"))
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(len(before) - len(after), 2)
+        self.assertNotIn("CHUCK.PRG", "\n".join(after))
+        self.assertIn("#K 4F 53 4C", "\n".join(after))
+
+    def test_a_repair_asked_for_where_there_is_none_is_refused(self) -> None:
+        with self.assertRaises(DiskError) as raised:
+            self.service.repair_drive_software(self.drive, ["GAMES\\CHUCK"])
+        self.assertIn("stale", str(raised.exception))
+
+    def test_a_floppy_has_nothing_installed_on_it_to_audit(self) -> None:
+        floppy = self.service.create_blank("ds-720k", "GAME")
+        with self.assertRaises(DiskError):
+            self.service.audit_drive_software(floppy)
 
 
 class SlugTests(unittest.TestCase):

@@ -182,9 +182,9 @@ def desktop_installed_programs(text: str) -> list[str]:
         if len(line) < 2 or line[0] != "#" or line[1] not in INSTALL_RECORDS:
             continue
         head = line.split("@", 1)[0].split(None, 4)
-        if len(head) < 2:
+        if len(head) <= 4:
             continue
-        path = head[-1].strip().upper()
+        path = head[4].strip().upper()
         if not path or "*" in path or "?" in path:
             continue
         found.append(atari_paths.leaf(path.split(":", 1)[-1]) or path)

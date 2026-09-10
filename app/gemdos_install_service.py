@@ -55,12 +55,21 @@ def desktop_record_paths(text: str) -> list[tuple[str, str]]:
     """
     found: list[tuple[str, str]] = []
     for line in re.split(r"\r\n|\r|\n", str(text or "")):
-        if len(line) < 2 or line[0] != "#" or line[1] not in (INSTALL_RECORDS | {"X"}):
+        if len(line) < 2 or line[0] != "#":
             continue
-        head = line.split("@", 1)[0].split(None, 4)
-        if len(head) < 2:
+        # An install record names its program after three numbers; a desktop
+        # icon names its file after four numbers and a drive-letter field that
+        # may be a space, so the two are split to different depths.
+        if line[1] in INSTALL_RECORDS:
+            fields = 4
+        elif line[1] == "X":
+            fields = 5
+        else:
             continue
-        path = head[-1].strip()
+        head = line.split("@", 1)[0].split(None, fields)
+        if len(head) <= fields:
+            continue
+        path = head[fields].strip()
         if not path or "*" in path or "?" in path:
             continue
         found.append((line, path))
@@ -168,7 +177,7 @@ class GemdosInstallMixin:
         way here. Both are worth saying and neither can be repaired from here.
         """
         try:
-            if mount.stat(path).size > PROGRAM_AUDIT_LIMIT:
+            if mount.stat(path).length > PROGRAM_AUDIT_LIMIT:
                 return ""
             data = mount.read_bytes(path)
         except Exception as exc:
@@ -218,7 +227,7 @@ class GemdosInstallMixin:
                         continue
                     owner = atari_paths.parent(inner)
                     stale.setdefault(owner, []).append(
-                        {"file": name, "record": record, "path": inner}
+                        {"file": name, "record": record, "letter": record[1], "path": inner}
                     )
 
             directories: dict[str, list[str]] = {}
@@ -253,7 +262,7 @@ class GemdosInstallMixin:
                     ) if fault
                 ]
                 repairs = [
-                    f"Remove the {item['file']} record that installs "
+                    f"Remove the #{item['letter']} record in {item['file']} that names "
                     f"{atari_paths.display(item['path'])}, which is not on this volume"
                     for item in stale.get(directory, [])
                 ]

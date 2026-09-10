@@ -990,7 +990,7 @@ function renderPane(index, preserveScroll = false) {
       ${physicalFloppyAction}
       <button class="menu-command build-deployment"><b>⇩</b><span>Build hardware deployment…</span></button>
       ${isPartitionIndex ? "" : `<button class="menu-command validate-image"><b>✓</b><span>${isRom ? "Check ROM structure" : "Check filesystem"}</span></button>`}
-      ${isHardDiskVolume ? '<button class="menu-command audit-drive-software"><b>⌁</b><span>Check installed drive software…</span></button>' : ""}
+      ${(isHardDiskVolume || acceptsInstall) && DRIVE_SOFTWARE_AUDIT_AVAILABLE ? '<button class="menu-command audit-drive-software"><b>⌁</b><span>Check installed drive software…</span></button>' : ""}
       ${acceptsInstall ? `<span class="menu-separator" role="separator"></span>
         <button class="menu-command prepare-drive"><b>⌘</b><span>Prepare this drive…</span></button>
         <button class="menu-command run-title-installer"><b>◎</b><span>Run a title's own installer…</span></button>
@@ -3471,13 +3471,12 @@ function bindImageExtractionPlan(index, allowRaw, options = {}) {
   showDirectory();
 }
 
-//: The install service is being rebuilt for the Atari and its endpoints are
-//: not published by this build yet. The dialogs below stay in place so the
-//: workflow is discoverable and the wording can be reviewed, but every
-//: control that would reach a `/install/` route is disabled and says so
-//: rather than failing at the network.
-const INSTALL_SERVICE_AVAILABLE = false;
-const INSTALL_UNAVAILABLE_NOTE = '<div class="help-warning"><strong>Not yet available in this build.</strong> The install service is being rebuilt for the Atari. Everything shown here is the finished shape of the workflow; the controls are disabled until the service answers.</div>';
+//: Whether the `/install/` routes are published by this build. They are, so
+//: every control below reaches a service that answers. The flag and the note
+//: are kept because a build that ships without the install blueprint has to
+//: be able to say so in the dialog rather than failing at the network.
+const INSTALL_SERVICE_AVAILABLE = true;
+const INSTALL_UNAVAILABLE_NOTE = '<div class="help-warning"><strong>Not available in this build.</strong> The install service is not published here, so these controls are disabled rather than failing at the network.</div>';
 
 //: The three honest ways a floppy becomes something a hard drive runs.
 //: Staging leads because it is the only one that cannot half-succeed: it
@@ -3563,14 +3562,6 @@ async function showStagedInstallations(index) {
       "Staged disks live in a folder on the drive they are destined for, so this needs a volume open.",
       { confirmLabel: "Close" },
     );
-  }
-  if (!INSTALL_SERVICE_AVAILABLE) {
-    return showModal(`
-      <h2>Staged disks</h2>
-      <p>Disks waiting on ${esc(volumeLabel(pane) || pane.image.name)}. Stage every disk of a set under one title, then install it here, or boot the drive in Hatari or a real machine and run the title's own installer against the staging folder.</p>
-      <div class="selected-destination"><small>STAGING FOLDER</small><code>${esc(drivePath(pane.partitionName || pane.image.driveLetter || "", DEFAULT_STAGING_PARENT))}</code></div>
-      ${INSTALL_UNAVAILABLE_NOTE}
-      <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div>`, () => true);
   }
   const partition = pane.partition == null ? "" : `&partition=${pane.partition}`;
   const data = await paneOperation(index, "Reading staged titles…", () =>
@@ -3662,9 +3653,9 @@ function volumeLabel(pane) {
 
 
 //: The hard-disk drivers a TOS machine can boot from, and the one case where
-//: it needs none at all. AHDI, HDDRIVER, PP and the ICD driver each write a
-//: loader into the root sector and a driver file onto the drive; EmuTOS reads
-//: ACSI, SCSI and IDE itself, so a drive prepared for it boots driverless.
+//: it needs none at all. The list the service publishes is the authority, and
+//: it also says which of them the operator has actually supplied a copy of;
+//: this is the fallback wording used before that answer arrives.
 const DRIVE_DRIVERS = [
   { value: "driver-emutos-builtin", label: "None · boot driverless under EmuTOS", detail: "EmuTOS reads ACSI, SCSI and IDE drives itself. Nothing is written to the root sector, so the drive stays readable by any machine running EmuTOS." },
   { value: "driver-ahdi", label: "Atari AHDI", detail: "Atari's own driver, written to the root sector with AHDI.PRG in the AUTO folder. It is limited to 16 MB partitions on TOS 1.x." },
@@ -3673,7 +3664,22 @@ const DRIVE_DRIVERS = [
   { value: "driver-icd", label: "ICD Pro driver", detail: "Supplied with ICD host adapters, and it also drives most other ACSI hardware." },
 ];
 
-//: Preparing a drive so a machine can boot from it: writing a hard-disk
+//: How a drive describes its own preparation in one line. Everything in it is
+//: read off the drive rather than remembered here, so a drive prepared on
+//: another machine reads as accurately as one prepared in this application.
+function drivePreparationSummary(state) {
+  if (!state) return "";
+  const parts = [
+    state.scheme === "mbr" ? "PC partition table" : `${String(state.scheme || "").toUpperCase()} partition table`,
+    state.byteSwapped ? "stored byte-swapped" : "",
+    state.rootSectorExecutable ? "root sector executable" : "root sector inert",
+    state.driver?.installed ? `${state.driver.file}${state.driver.version ? ` ${state.driver.version}` : ""} in the partition root` : "no driver file",
+    state.desktop?.length ? state.desktop.join(" and ") : "no desktop configuration",
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+//: Preparing a drive so a machine can start from it: writing a hard-disk
 //: driver onto the root sector, or declaring that EmuTOS will read the drive
 //: itself and no driver is needed.
 async function showPrepareDrive(index) {
@@ -3686,38 +3692,73 @@ async function showPrepareDrive(index) {
     );
   }
   const target = volumeLabel(pane) || pane.image.name;
-  return showModal(`
+  const partition = pane.partition == null ? "" : `?partition=${pane.partition}`;
+  let state = null;
+  try {
+    state = (await paneOperation(index, "Reading how this drive is prepared…", () =>
+      api(`/api/images/${pane.image.id}/install/driver${partition}`))).preparation;
+  } catch (error) {
+    return toast(error.message, true);
+  }
+  const published = state.drivers?.length ? state.drivers : DRIVE_DRIVERS.map(driver => ({ id: driver.value, label: driver.label, note: driver.detail }));
+  const supplied = Object.fromEntries((state.available || []).map(row => [row.id, row]));
+  const detailFor = id => {
+    const driver = published.find(item => item.id === id);
+    const copy = supplied[id];
+    const note = driver?.note || DRIVE_DRIVERS.find(item => item.value === id)?.detail || "";
+    if (!copy || copy.available) return note;
+    return `${note} No copy of this driver was found, so it cannot be installed yet.`;
+  };
+  const closed = showModal(`
     <h2>Prepare this drive</h2>
-    <p>Makes ${esc(target)} bootable, either by installing a hard-disk driver on it or by declaring that EmuTOS will read the drive without one.</p>
-    <div class="help-note"><strong>Your own driver:</strong> Atari File Forge does not ship AHDI, HDDRIVER, the PP driver or the ICD driver and cannot fetch them. Point at the copy you own; EmuTOS needs no driver at all.</div>
+    <p>Makes ${esc(target)} startable, either by installing a hard-disk driver on it or by declaring that EmuTOS will read the drive without one.</p>
+    <div class="selected-destination"><small>THIS DRIVE NOW</small><code>${esc(drivePreparationSummary(state))}</code></div>
+    <div class="help-note"><strong>Your own driver:</strong> Atari File Forge does not ship AHDI, HDDRIVER, the PP driver or the ICD driver and cannot fetch them. Put the files you own in <code>~/.config/atari-file-forge/drivers</code> or <code>firmware/drivers</code>, unpacked as they were published. EmuTOS needs no driver at all.</div>
     <div class="field"><label>Hard-disk driver</label>
-      <select name="driveDriver" ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>
-        ${DRIVE_DRIVERS.map(driver => `<option value="${esc(driver.value)}">${esc(driver.label)}</option>`).join("")}
+      <select name="driveDriver">
+        ${published.map(driver => `<option value="${esc(driver.id)}"${supplied[driver.id] && !supplied[driver.id].available ? " disabled" : ""}>${esc(driver.label)}${supplied[driver.id]?.version ? ` · ${esc(supplied[driver.id].version)}` : ""}${supplied[driver.id] && !supplied[driver.id].available ? " · not supplied" : ""}</option>`).join("")}
       </select>
-      <small data-driver-detail>${esc(DRIVE_DRIVERS[0].detail)}</small></div>
-    <div class="field" data-driver-files hidden><label>Driver files</label>
-      <button type="button" class="button" data-choose-driver ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>Choose the driver files…</button>
-      <small>The driver's own program and any files it expects in the AUTO folder.</small></div>
-    <div class="file-selection-summary" data-driver-summary>
-      <span class="file-selection-empty">No driver files chosen yet.</span>
-    </div>
-    <label class="check-field"><input type="checkbox" name="createFolders" value="yes" checked ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}> Create the folders a prepared drive expects (AUTO, GEMSYS, GAMES)</label>
+      <small data-driver-detail>${esc(detailFor(published[0]?.id))}</small></div>
+    <label class="check-field"><input type="checkbox" name="createFolders" value="yes" checked> Create the folders a prepared drive expects (AUTO, GEMSYS, GAMES)</label>
+    <label class="check-field"><input type="checkbox" name="writeDesktop" value="yes" checked> Write a desktop configuration if this volume has none</label>
     <div class="help-note">Files already on the volume are left alone, so an existing drive is added to rather than replaced, and preparing twice does not undo work done in between.</div>
-    ${INSTALL_SERVICE_AVAILABLE ? "" : INSTALL_UNAVAILABLE_NOTE}
     <div class="modal-actions">
       <button class="button ghost" value="cancel">Close</button>
-      <button class="button primary" value="prepare" data-prepare-drive disabled>Prepare the drive</button>
+      <button class="button primary" value="prepare" data-prepare-drive>Prepare the drive</button>
     </div>`,
-  async () => {
-    throw new Error("The drive preparation service is not available in this build.");
+  async form => {
+    const result = await trackedPaneOperation(index, "Preparing the drive…", operationId =>
+      api(`/api/images/${pane.image.id}/install/driver`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          driver: form.get("driveDriver"),
+          partition: pane.partition,
+          createFolders: form.get("createFolders") === "yes",
+          desktop: form.get("writeDesktop") === "yes",
+          operationId,
+        }),
+      }));
+    pane.image = result.image;
+    await loadDirectory(index);
+    (result.warnings || []).forEach(warning => toast(warning, true));
+    toast(result.driver.installed
+      ? `${result.label} installed on ${target}.`
+      : `${target} prepared to start driverless under EmuTOS.`);
   });
+  //: The note under the picker is the whole of what tells an operator what
+  //: they are choosing, so it follows the choice rather than describing only
+  //: the first entry.
+  const picker = modalContent.querySelector('[name="driveDriver"]');
+  const detail = modalContent.querySelector("[data-driver-detail]");
+  picker?.addEventListener("change", () => { detail.textContent = detailFor(picker.value); });
+  return closed;
 }
 
 //: Running a title's own installer. There is no tree to copy: the installer
 //: is Atari code that asks where things should go, reads what the live system
-//: has loaded and writes the result itself. So this checks everything that can
-//: be checked from here, then boots the machine with the disk in A: and hands
-//: over the keyboard.
+//: has loaded and writes the result itself. So this puts the machine in the
+//: state the installer needs and hands over the keyboard.
 async function showTitleInstaller(index) {
   const pane = panes[index];
   if (!paneAcceptsInstall(pane)) {
@@ -3727,23 +3768,44 @@ async function showTitleInstaller(index) {
       { confirmLabel: "Close" },
     );
   }
+  //: The installer reads its disks out of the floppy drives, so the disks
+  //: have to be images that are already open. An Atari has two drives, which
+  //: is why exactly two are offered and the rest are swapped by hand.
+  const floppies = panes
+    .map((item, position) => ({ item, position }))
+    .filter(({ item, position }) => item.image && position !== index && item.image.kind !== "hd");
+  if (!floppies.length) {
+    return alertNotice(
+      "Run a title's own installer",
+      "Open the title's first disk in another pane first: the installer reads it out of drive A:, so it has to be an image this session already has.",
+      { confirmLabel: "Close" },
+    );
+  }
+  const options = floppies.map(({ item, position }) =>
+    `<option value="${esc(item.image.id)}">${esc(paneLabel(position))}</option>`).join("");
   return showModal(`
     <h2>Run a title's own installer</h2>
     <p>Boots ${esc(volumeLabel(pane) || pane.image.name)} in Hatari with the title's first disk in drive A:, so its own installer can ask its questions and write its own files.</p>
-    <div class="help-note"><strong>The installer belongs to the title.</strong> Productivity software installs itself by running a program that reads the machine it finds and asks where things should go. It cannot be run unattended, so this checks what it can and then hands you the machine with everything in place.</div>
-    <div class="field"><label>Installation disk</label>
-      <button type="button" class="button" data-choose-install-disk ${INSTALL_SERVICE_AVAILABLE ? "" : "disabled"}>Choose a disk image…</button>
-      <small>An ST, MSA, DIM, STX or HFE image of the disk you own. Nothing is downloaded.</small></div>
-    <div class="file-selection-summary" data-install-disk-summary>
-      <span class="file-selection-empty">No disk chosen yet.</span>
-    </div>
-    ${INSTALL_SERVICE_AVAILABLE ? "" : INSTALL_UNAVAILABLE_NOTE}
+    <div class="help-note"><strong>The installer belongs to the title.</strong> Productivity software installs itself by running a program that reads the machine it finds and asks where things should go. It cannot be run unattended, so this puts everything in place and then hands you the machine.</div>
+    <div class="field"><label>Drive A:</label>
+      <select name="diskA">${options}</select>
+      <small>An ST, MSA, DIM, STX or HFE image of the disk you own, already open in another pane. Nothing is downloaded.</small></div>
+    <div class="field"><label>Drive B:</label>
+      <select name="diskB"><option value="">Leave empty</option>${options}</select>
+      <small>An Atari has two floppy drives. Swap the rest of the set as the installer asks for them.</small></div>
     <div class="modal-actions">
       <button class="button ghost" value="cancel">Close</button>
-      <button class="button primary" value="boot" data-boot-installer disabled>Boot with the disk</button>
+      <button class="button primary" value="boot" data-boot-installer>Boot with the disk</button>
     </div>`,
-  async () => {
-    throw new Error("The installer service is not available in this build.");
+  async form => {
+    const disks = [form.get("diskA"), form.get("diskB")].filter(Boolean);
+    const result = await paneOperation(index, "Starting Hatari…", () =>
+      api(`/api/images/${pane.image.id}/install/emulator`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ disks, partition: pane.partition }),
+      }));
+    toast(result.result.summary);
   });
 }
 
@@ -5299,16 +5361,36 @@ function showHealthDashboard(index) {
   });
 }
 
-//: Checking the software already installed on a drive: whether a program's
-//: launcher still finds the files it calls, and whether anything on the drive
-//: reaches past GEMDOS to the sectors underneath. The service behind it is
-//: being rebuilt for the Atari, so the dialog states what it will check and
-//: says plainly that it cannot run yet.
-const DRIVE_SOFTWARE_AUDIT_AVAILABLE = false;
+//: Checking the software already installed on a drive: whether every program
+//: on it is a program the machine would actually run, and whether the desktop
+//: still names files that are there. Only the second has a repair, because it
+//: is the only one whose right answer can be proved from the drive alone.
+const DRIVE_SOFTWARE_AUDIT_AVAILABLE = true;
+
+//: One folder's finding, with its repair offered only when there is one.
+function driveSoftwareFindingMarkup(finding) {
+  const repairs = finding.repairs || [];
+  const warnings = finding.warnings || [];
+  return `
+    <div class="staged-title" data-finding="${esc(finding.path)}">
+      <div>
+        <b>${esc(drivePath("", finding.path))}</b>
+        <small>${finding.fileCount} file${finding.fileCount === 1 ? "" : "s"}${finding.programs?.length ? ` · ${esc(finding.programs.join(", "))}` : ""}</small>
+        ${repairs.map(repair => `<small class="staged-conflict">${esc(repair)}</small>`).join("")}
+        ${warnings.map(warning => `<small class="staged-conflict">${esc(warning)}</small>`).join("")}
+        ${repairs.length || warnings.length ? "" : '<small class="muted">Nothing to report.</small>'}
+      </div>
+      <div class="staged-actions">
+        ${repairs.length
+          ? `<label class="check-field"><input type="checkbox" name="repair" value="${esc(finding.path)}" checked> Repair</label>`
+          : ""}
+      </div>
+    </div>`;
+}
 
 function showDriveSoftwareAudit(index) {
   const pane = panes[index];
-  if (pane.image.kind !== "gemdos" || !pane.image.hardDisk) {
+  if (!paneAcceptsInstall(pane)) {
     toast("Installed software auditing is available only for a volume on a hard drive.", true);
     return;
   }
@@ -5317,14 +5399,43 @@ function showDriveSoftwareAudit(index) {
   showModal(`<div class="analysis-dialog health-introduction">
     <small>INSTALLED DRIVE SOFTWARE</small>
     <h2>Check installed drive software</h2>
-    <div class="help-warning"><strong>This can take several minutes on a large drive image.</strong> Atari File Forge walks every installed folder and the launchers it finds, comparing what each one calls with what is actually beside it. Progress remains visible and the scan can be aborted safely.</div>
-    <div class="field"><label>Scan</label><select name="root" ${DRIVE_SOFTWARE_AUDIT_AVAILABLE ? "" : "disabled"}><option value="">Whole volume (${esc(drivePath(driveLetter, ""))})</option>${current ? `<option value="${esc(current)}">Current folder (${esc(drivePath(driveLetter, current))})</option>` : ""}</select></div>
-    <div class="help-note">The first pass is read-only. Where a fault is provable, the exact proposed change is listed for each folder before anything is written; a program that reads sectors directly, or switches drives behind GEMDOS, is reported and never rewritten.</div>
-    ${DRIVE_SOFTWARE_AUDIT_AVAILABLE ? "" : '<div class="help-warning"><strong>Not yet available in this build.</strong> The installed-software audit is being rebuilt for GEMDOS. The check will read <code>/drive-software/audit</code> and its repairs <code>/drive-software/repair</code>.</div>'}
-    <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button primary" type="submit" ${DRIVE_SOFTWARE_AUDIT_AVAILABLE ? "" : "disabled"}>Run check</button></div>
-  </div>`, async () => {
-    throw new Error("The installed-software audit is not available in this build.");
+    <div class="help-warning"><strong>This can take several minutes on a large drive image.</strong> Atari File Forge walks every folder that holds a program, reads each program's header and compares what the desktop installs with what is actually on the volume. Progress remains visible and the scan can be aborted safely.</div>
+    <div class="field"><label>Scan</label><select name="root"><option value="">Whole volume (${esc(drivePath(driveLetter, ""))})</option>${current ? `<option value="${esc(current)}">Current folder (${esc(drivePath(driveLetter, current))})</option>` : ""}</select></div>
+    <div class="help-note">The first pass is read-only. A desktop record naming a file that is not on the volume is the one provable fault, so it is the only one offered as a repair; a program whose header does not parse is reported and never rewritten.</div>
+    <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button primary" type="submit">Run check</button></div>
+  </div>`, async form => {
+    const root = String(form.get("root") || "");
+    const partition = pane.partition == null ? "" : `&partition=${pane.partition}`;
+    const report = await trackedPaneOperation(index, "Checking installed drive software…", operationId =>
+      api(`/api/images/${pane.image.id}/drive-software/audit?root=${encodeURIComponent(root)}&operationId=${encodeURIComponent(operationId)}${partition}`));
+    renderDriveSoftwareAudit(index, report);
+    return false;
   });
+}
+
+function renderDriveSoftwareAudit(index, report) {
+  const pane = panes[index];
+  const findings = report.directories || [];
+  showModal(`<div class="analysis-dialog">
+    <small>INSTALLED DRIVE SOFTWARE</small>
+    <h2>${report.checked} folder${report.checked === 1 ? "" : "s"} checked</h2>
+    <p>${report.repairable} with a provable repair · ${report.warnings} with something worth reading · scanned from ${esc(drivePath(pane.partitionName || "", report.root || ""))}</p>
+    <div class="staged-title-list">${findings.map(driveSoftwareFindingMarkup).join("") || '<p class="muted">No folder on this volume holds a program.</p>'}</div>
+    <div class="help-note">Repairing removes the desktop records listed above and nothing else. The check is run again before anything is written, so a result that has gone stale is refused rather than acted on.</div>
+    <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button primary" type="submit" ${report.repairable ? "" : "disabled"}>Repair the folders ticked</button></div>
+  </div>`, async form => {
+    const directories = form.getAll("repair").map(String);
+    if (!directories.length) return toast("Tick at least one folder to repair.", true) || false;
+    const result = await trackedPaneOperation(index, "Repairing installed drive software…", operationId =>
+      api(`/api/images/${pane.image.id}/drive-software/repair`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directories, partition: pane.partition, operationId }),
+      }));
+    pane.image = result.image;
+    await loadDirectory(index);
+    toast(`${result.repair.count} folder${result.repair.count === 1 ? "" : "s"} repaired.`);
+  }, { replace: true });
 }
 
 async function showSelectionPreflight(index) {
