@@ -24,9 +24,14 @@ exactly as GFA BASIC does, two spaces per level.
 
 What is proven and what is best effort
 --------------------------------------
-``detokenise`` reproduces GFA BASIC 3.5's own ``.LST`` output byte for byte on
-the corpus under ``tests/fixtures/basic`` (real programs with the listings GFA
-wrote next to them) and agrees with the gfalist reference utility elsewhere.
+What the tests prove is that this module is self-consistent and stable:
+``detokenise(tokenise(s)) == s`` for every listing in
+``tests/fixtures/basic``, and tokenising a listing twice gives the same
+bytes. No ``.GFA`` file written by a real GFA BASIC 3 was available to compare
+against, so *that* claim is not made: the layout and the token tables come
+from the GPL gfalist utility, and the spacing and indentation rules were
+inferred from real ``.LST`` source. A listing this module produces may
+therefore differ from GFA's own in a detail no test here can catch.
 
 A saved file also carries things no listing can: block-structure words that
 are absolute RAM addresses, alignment bytes that are whatever was in memory,
@@ -35,16 +40,15 @@ order with stale names in it. GFA BASIC rebuilds all of that on LOAD. So the
 byte-level round-trip claim is ``tokenise(detokenise(x)) == canonicalise(x)``,
 where ``canonicalise`` re-serialises the decoded token stream through the same
 writer ``tokenise`` uses (zero alignment bytes and block words, names in first
-use order, no stale names). The tests prove that on every corpus file, and
-``detokenise(tokenise(s)) == s`` on every real listing and generated program.
+use order, no stale names). The tests prove that on every corpus file.
 
-How GFA chooses among alternative encodings of the same text (integer or
-float constant, numeric or string comparison, argument-count variants of a
-function) was derived from the corpus and is exact for what the corpus
-exercises; the rules in ``_ExpressionScanner`` and ``_Encoder.choose_command``
-say which choices are inferred. The choice of digits for a fractional float
-literal is not covered by the corpus (no real listing in it has one); the
-lister prints the fewest digits that read back to the same stored value.
+Where the same text has more than one possible encoding (an integer or a
+float constant, a numeric or a string comparison, the argument-count variants
+of a function) the choice made here is the one that survives a round trip, not
+necessarily the one GFA itself would make. ``_ExpressionScanner`` and
+``_Encoder.choose_command`` say where a choice is inferred. A fractional float
+literal is printed with the fewest digits that read back to the same stored
+value.
 """
 
 from __future__ import annotations
@@ -550,7 +554,12 @@ def render_model(model: LineModel, depth: int) -> tuple[list[tuple[str, str, obj
             fragments.append((COMMENT if command in COMMENT_COMMANDS else STRING, model.text, ("text", model.text)))
         return fragments, indent, next_depth
     has_more = bool(model.items) and model.items[0].kind not in ("comment", "inline")
-    if command in OPTIONAL_SPACE_COMMANDS and has_more:
+    body = _item_fragments(model)
+    # A token that already carries its own leading space, such as " AT(",
+    # supplies the separator itself, so PRINT AT(1,8) is not spaced twice.
+    if command in OPTIONAL_SPACE_COMMANDS and has_more and not (
+        model.operand is None and body and body[0][1].startswith(" ")
+    ):
         fragments.append((SPACE, " ", None))
     if model.operand is not None:
         kind, name = model.operand
@@ -561,7 +570,7 @@ def render_model(model: LineModel, depth: int) -> tuple[list[tuple[str, str, obj
                 fragments.append((OPERATOR, follower, None))
         elif command in PROCEDURE_COMMANDS and has_more and command != PROCEDURE_CALL_COMMAND:
             fragments.append((OPERATOR, "(", None))
-    fragments.extend(_item_fragments(model))
+    fragments.extend(body)
     return fragments, indent, next_depth
 
 
@@ -945,6 +954,16 @@ class _Encoder:
         for text in sorted(MEMORY_BRACKETS, key=len, reverse=True):
             if upper.startswith(text):
                 return self.memory_assignment(text, line[len(text):])
+        # GFA BASIC 3 lets a procedure be called by name alone, without the @
+        # that its own lister prints, so hand-written source has to be
+        # accepted here even though a listing never comes back that way.
+        call = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_.]*)\s*(\(.*\))?", line)
+        if call is not None and "=" not in line:
+            model = LineModel(PROCEDURE_CALL_COMMAND, operand=(CLASS_PROCEDURE, call.group(1)))
+            if call.group(2):
+                model.items.append(Item("tok", 157))
+                model.items.extend(self.expression(call.group(2)[1:-1] + ")"))
+            return model
         return self.assignment(line, LET_CODES if False else ASSIGNMENT_CODES)
 
     def keyword_statement(self, text: str, codes: list[int], rest: str) -> LineModel:
