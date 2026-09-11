@@ -11,7 +11,7 @@ METAINFO = ROOT / "packaging/linux/uk.co.atarifileforge.AtariFileForge.metainfo.
 
 class VersionTests(unittest.TestCase):
     def test_packaged_version_matches_stable_release(self):
-        self.assertEqual(application_version(), "0.1.0")
+        self.assertEqual(application_version(), "0.2.0")
 
 
 class ReleaseRecordTests(unittest.TestCase):
