@@ -563,7 +563,16 @@ def write_partition_table(
             reader.write_block(table_sector, bytes(table))
     put_be32(root, ROOT_BAD_START, 0)
     put_be32(root, ROOT_BAD_COUNT, 0)
-    apply_boot_checksum(root, bootable)
+    # ``bootable`` asks for a root sector the ROM will execute, and the
+    # checksum is the only thing that marks one. Setting it on a sector whose
+    # loader area is empty hands the machine a page of zeros to run, which
+    # ends in a double bus error before the desktop ever appears. So the mark
+    # goes on only when there is a loader in the sector to justify it; the
+    # partition's own bootable flag, written above, is what says which
+    # partition to start from, and a driver installed later writes the loader
+    # and sets the checksum then.
+    loader = ICD_PARTITIONS if scheme == "icd" else ROOT_HD_SIZE
+    apply_boot_checksum(root, bootable and any(root[:loader]))
     reader.write_block(0, bytes(root))
     reader.flush()
     disk = read_partition_table(reader)
