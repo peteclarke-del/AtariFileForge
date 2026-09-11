@@ -97,8 +97,10 @@ class Desktop:
     #: Programs that belong in ``AUTO`` rather than the desktop's own folder.
     #: They run before GEM appears, in the order the directory holds them.
     auto_files: tuple[str, ...] = ()
-    #: Desk accessories. TOS loads these from the root of the boot drive and
-    #: nowhere else, so this is the one category that cannot go in a folder.
+    #: Files that have to sit in the root of the boot drive: desk accessories,
+    #: which TOS loads from there and nowhere else, and the resource files
+    #: they read beside themselves. An accessory without its resource loads
+    #: and then has nothing to draw, which looks exactly like not loading.
     #: On these products the control panel is an accessory rather than a CPX.
     accessories: tuple[str, ...] = ()
     #: Control panel modules for XControl, which reads them from the folder
@@ -166,9 +168,17 @@ DESKTOPS: tuple[Desktop, ...] = (
             "NEODESK.EXE", "NEODESK.RSC", "NEODESK.HLP", "NEOICONS.NIC",
             "SETTINGS.RSC", "HELP.RSC", "ICONEDIT.RSC", "NEODESK.INF",
         ),
-        # NeoDesk's control panel is an accessory rather than a CPX, and so is
-        # its command line. Both have to be in the root to be loaded.
-        accessories=("NEOCNTRL.ACC", "NEOQUEUE.ACC", "TRASHCAN.ACC", "NEO_CLI.ACC"),
+        # Straight from Gribnif's own INSTALL.SCR. Each accessory is copied to
+        # the root together with the resource it reads, and NEOLOAD.PRG is
+        # copied into AUTO as well as into the program's folder, which is what
+        # starts NeoDesk when the machine comes up.
+        accessories=(
+            "NEOCNTRL.ACC", "NEOCNTRL.RSC",
+            "NEOQUEUE.ACC", "NEOQ_C.RSC", "NEOQ_M.RSC",
+            "TRASHCAN.ACC", "TRASHCAN.RSC",
+            "NEO_CLI.ACC", "NEO_CLI.NIC",
+        ),
+        auto_files=("NEOLOAD.PRG",),
         folder="NEODESK4",
         folder_names=("NEODESK", "NEODESK4"),
         machines=frozenset({"st", "megast", "ste", "megaste", "tt030"}),
@@ -250,10 +260,13 @@ GENEVA = Desktop(
         "GENEVA.CNF", "GEM.CNF", "GNVA_TOS.PRG", "GNVA_TOS.RSC", "TERMCAP",
         "TASKMAN.RSC",
     ),
-    # The task manager is how a person switches between the programs Geneva
-    # is running, so it is not optional, and being an accessory it belongs in
-    # the root rather than beside the program.
-    accessories=("TASKMAN.ACC", "GNVADESK.ACC"),
+    # From Geneva's own INSTALL.SCR: the task manager and its resource go to
+    # the root, and GENEVA.PRG goes into AUTO, which is what starts it.
+    accessories=(
+        "TASKMAN.ACC", "TASKMAN.RSC",
+        "GNVADESK.ACC", "GNVADESK.RSC",
+    ),
+    auto_files=("GENEVA.PRG",),
     folder="GENEVA",
     folder_names=("GENEVA",),
     machines=frozenset({"st", "megast", "ste", "megaste", "tt030"}),
@@ -571,6 +584,38 @@ def _memory_text(memory_bytes: int) -> str:
     return f"{memory_bytes // KIB} KB"
 
 
+def _start_up_notes(desktop: Desktop, started_from_auto: bool) -> list[str]:
+    """What still has to happen before this desktop comes up on its own.
+
+    Where the distribution's own installer puts a program in ``AUTO``, that is
+    the answer and it has been done. NeoDesk is the awkward case: its loader
+    goes in ``AUTO``, but Gribnif's script says plainly that whether it takes
+    the place of the built-in desktop depends on the machine's ROM, and offers
+    Geneva as the way to arrange it. Repeating that is more use than a warning
+    written from guesswork.
+    """
+    if not started_from_auto:
+        return [
+            f"{desktop.label} is installed and on the desktop, but nothing "
+            "starts it automatically: its distribution puts no program in "
+            "AUTO. Start it from the desktop, or follow its own documentation "
+            "for starting it at boot."
+        ]
+    notes = [
+        f"{desktop.label} starts from the AUTO folder, which is where its own "
+        "installer puts it. AUTO programs run in the order the folder holds "
+        "them, so check that order if the machine does not come up as expected."
+    ]
+    if desktop.key == "desktop-neodesk":
+        notes.append(
+            "Whether NeoDesk takes the place of the built-in desktop rather "
+            "than running alongside it depends on the machine's ROM version. "
+            "Gribnif's own installer says so and offers Geneva as the way to "
+            "arrange it, so install Geneva as well if that is what you want."
+        )
+    return notes
+
+
 class DesktopReplacementMixin:
     """Installing a replacement desktop from the operator's own copy."""
 
@@ -612,6 +657,18 @@ class DesktopReplacementMixin:
     #: The seventh and anything after it are ignored, silently, which is a
     #: thing worth being told about rather than discovering on the machine.
     MAX_ACCESSORIES = 6
+
+    def _auto_order(self, session: ImageSession) -> list[str]:
+        """The AUTO folder in the order TOS will run it."""
+        try:
+            with self.gemdos_mount(session, writable=False) as mount:
+                return [
+                    entry.name
+                    for entry in mount.volume.iter_entries("AUTO")
+                    if entry.name not in ("..", ".") and not entry.is_dir
+                ]
+        except Exception:
+            return []
 
     def _accessory_warnings(self, session: ImageSession) -> list[str]:
         """Say so when the root now holds more accessories than TOS will load."""
@@ -763,16 +820,16 @@ class DesktopReplacementMixin:
             # operator who has tuned an AUTO folder or an accessory wants to
             # know it survived, and wants to know it was not installed.
             "kept": kept,
+            # The order AUTO holds its programs in is the order they run, and
+            # it is the thing most likely to need a look afterwards, so it is
+            # reported rather than left to be discovered.
+            "autoOrder": self._auto_order(session),
             "desktopFile": name,
             "records": added,
             "applications": installed_applications(merged),
-            "warnings": self._accessory_warnings(session) + [
-                f"{desktop.label} is installed and on the desktop, but the "
-                "built-in TOS desktop still starts first. Making a "
-                "replacement start in its place is arranged differently by "
-                "every TOS release and by every one of these programs, so it "
-                "is left to its own documented method rather than guessed at.",
-            ],
+            "warnings": self._accessory_warnings(session) + _start_up_notes(
+                desktop, bool(distribution.auto)
+            ),
         }
 
 
