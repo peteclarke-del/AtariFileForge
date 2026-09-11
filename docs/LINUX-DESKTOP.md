@@ -86,8 +86,12 @@ Release filenames identify `deb13` or `ubuntu24.04` and use the Debian
 architecture name `amd64`, `arm64` or `armhf`. Build packages on the Debian or
 Ubuntu release that will run them. Native
 Python extensions are not assumed to be portable between different Python
-ABIs. The package intentionally excludes firmware, commercial images and
-managed emulator binaries. Configure installed emulators with the variables in
+ABIs. The package bundles the GPL EmuTOS images, so the emulator starts
+without a TOS ROM of your own, and intentionally excludes TOS ROMs, commercial
+images and managed emulator binaries. An installed package looks for your own
+TOS ROMs in `~/.config/atari-file-forge/tos` and your hard-disk drivers in
+`~/.config/atari-file-forge/drivers`, not in a checkout's `firmware/` folder;
+link or copy them there. Configure installed emulators with the variables in
 the Emulator paths section below.
 
 Launch **Atari File Forge** from the desktop application menu, run

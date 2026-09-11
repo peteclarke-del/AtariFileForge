@@ -102,8 +102,9 @@ For each target:
       while the private library matches the exact file hash and original bytes.
 - [ ] `git diff --check` passes.
 - [ ] The native `.deb` builds on each claimed Debian or Ubuntu target, passes
-      `dpkg-deb --info` and `dpkg-deb --contents`, and contains no firmware,
-      samples, working images or Git metadata.
+      `dpkg-deb --info` and `dpkg-deb --contents`, carries the bundled EmuTOS,
+      and contains no TOS ROM or other firmware, samples, working images or
+      Git metadata.
 - [ ] A clean test machine installs the `.deb` with APT, shows the desktop
       entry and MIME associations, launches the GTK host, saves an image, then
       upgrades and removes the package without deleting XDG user state.
