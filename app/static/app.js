@@ -3656,7 +3656,12 @@ async function showPrepareDrive(index) {
         api(`/api/images/${pane.image.id}/install/desktop-replacement`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ desktop: chosenDesktop, partition: pane.partition, operationId }),
+          body: JSON.stringify({
+            desktop: chosenDesktop,
+            partition: pane.partition,
+            folder: desktopFolder,
+            operationId,
+          }),
         }));
       pane.image = installed.image;
       (installed.desktop.warnings || []).forEach(warning => toast(warning, true));
@@ -3679,8 +3684,45 @@ async function showPrepareDrive(index) {
   desktopPicker?.addEventListener("change", () => {
     desktopDetail.textContent = desktopReplacementDetail(desktops, desktopPicker.value);
   });
+  const folderButton = modalContent.querySelector("[data-choose-desktop-folder]");
+  const folderNote = modalContent.querySelector("[data-desktop-folder]");
+  folderButton?.addEventListener("click", async () => {
+    const folder = await chooseSourceFolder();
+    if (!folder) return;
+    desktopFolder = folder;
+    folderNote.textContent = `Looking in ${folder}`;
+    // What is installable changes with the folder, so ask again and rebuild
+    // the choices rather than leaving a list describing somewhere else.
+    try {
+      const refreshed = await api(`/api/install/desktops?${new URLSearchParams({ folder })}`);
+      desktops = { ...desktops, available: refreshed.available };
+      const chosen = desktopPicker.value;
+      desktopPicker.innerHTML = desktopReplacementOptions(desktops);
+      desktopPicker.value = [...desktopPicker.options].some(option => option.value === chosen && !option.disabled)
+        ? chosen : "desktop-none";
+      desktopDetail.textContent = desktopReplacementDetail(desktops, desktopPicker.value);
+    } catch (error) { toast(error.message, true); }
+  });
   return closed;
 }
+
+//: The native host answers with a real path, because it is the server that
+//: reads the folder. A browser cannot give one at all, so the button that
+//: asks for it is only offered where it can be answered.
+function canChooseSourceFolder() {
+  return Boolean(window.webkit?.messageHandlers?.atariDesktop);
+}
+
+function chooseSourceFolder() {
+  if (!canChooseSourceFolder()) return Promise.resolve("");
+  return new Promise(resolve => {
+    pendingSourceFolder = resolve;
+    window.webkit.messageHandlers.atariDesktop.postMessage("choose-source-folder");
+  });
+}
+
+let pendingSourceFolder = null;
+let desktopFolder = "";
 
 //: The replacement desktop. The built-in TOS desktop has no icons of your
 //: own, no program groups and no way to find a file, so every serious machine
@@ -3702,24 +3744,42 @@ function desktopReplacementDetail(catalogue, id) {
 }
 
 function desktopReplacementField(catalogue) {
-  const desktops = catalogue.desktops || [];
-  if (!desktops.length) return "";
+  if (!(catalogue.desktops || []).length) return "";
+  return `<div class="field"><label>Replacement desktop</label>
+      <select name="driveDesktop">${desktopReplacementOptions(catalogue)}</select>
+      <small data-desktop-detail>${esc(desktopReplacementDetail(catalogue, desktopReplacementInitial(catalogue)))}</small>
+      ${canChooseSourceFolder() ? `<div class="desktop-source-choice">
+        <button type="button" class="button compact" data-choose-desktop-folder>Other…</button>
+        <small data-desktop-folder>Looks in the usual places, and downloads a free desktop if it is not there.</small>
+      </div>` : ""}</div>`;
+}
+
+function desktopReplacementInitial(catalogue) {
   const supplied = Object.fromEntries((catalogue.available || []).map(row => [row.id, row]));
   const preferred = catalogue.recommended?.id;
-  const options = [{ id: "desktop-none", label: "None, keep the built-in TOS desktop" }]
+  return supplied[preferred]?.obtainable !== false ? preferred : "desktop-none";
+}
+
+function desktopReplacementOptions(catalogue) {
+  const desktops = catalogue.desktops || [];
+  const supplied = Object.fromEntries((catalogue.available || []).map(row => [row.id, row]));
+  const preferred = desktopReplacementInitial(catalogue);
+  return [{ id: "desktop-none", label: "None, keep the built-in TOS desktop" }]
     .concat(desktops.map(desktop => ({ id: desktop.id, label: desktop.label })))
     .map(option => {
       const copy = supplied[option.id];
-      const unavailable = copy && !copy.available;
+      const catalogued = desktops.find(item => item.id === option.id);
+      // A free desktop with somewhere to download it from is offered whether
+      // or not a copy is here, because choosing it is what fetches it. Only
+      // one that is somebody's property and has not been supplied is refused.
+      const obtainable = copy ? copy.obtainable !== false : true;
       const version = copy?.version ? ` ${copy.version}` : "";
-      const suffix = unavailable ? " · not supplied" : version;
-      const chosen = option.id === preferred && !unavailable;
-      return `<option value="${esc(option.id)}"${unavailable ? " disabled" : ""}${chosen ? " selected" : ""}>${esc(option.label)}${esc(suffix)}</option>`;
+      const suffix = copy && !copy.available
+        ? (catalogued?.free ? " · downloads when chosen" : " · not supplied")
+        : version;
+      const chosen = option.id === preferred && obtainable;
+      return `<option value="${esc(option.id)}"${obtainable ? "" : " disabled"}${chosen ? " selected" : ""}>${esc(option.label)}${esc(suffix)}</option>`;
     }).join("");
-  const initial = supplied[preferred]?.available ? preferred : "desktop-none";
-  return `<div class="field"><label>Replacement desktop</label>
-      <select name="driveDesktop">${options}</select>
-      <small data-desktop-detail>${esc(desktopReplacementDetail(catalogue, initial))}</small></div>`;
 }
 
 //: Running a title's own installer. There is no tree to copy: the installer
@@ -8519,6 +8579,13 @@ window.AtariDesktopHost = Object.freeze({
     } catch (error) {
       toast(`Could not display ${image.name}: ${error.message}`, true);
     }
+  },
+  sourceFolderChosen(folder) {
+    // The native folder chooser answers here. An empty string means the
+    // operator cancelled, which is an answer too.
+    const waiting = pendingSourceFolder;
+    pendingSourceFolder = null;
+    if (waiting) waiting(String(folder || ""));
   },
   showError(message, paneIndex = null) {
     toast(String(message || "The Linux desktop operation failed."), true);

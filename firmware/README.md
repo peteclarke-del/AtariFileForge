@@ -135,15 +135,27 @@ folder per desktop unpacked as it was published is the shape to use. Naming
 the folder after the release, `TERADESK_4.06` say, means the version is read
 from it and reported.
 
-| Desktop | Licence | Suits |
-| --- | --- | --- |
-| TeraDesk | Free software, GPL | Any machine, and the one to choose below 2 MB |
-| NeoDesk 4 | Commercial, Gribnif Software | ST to TT with 2 MB or more |
-| Gemini with Mupfel | Free to use | Anyone who wants a shell in the desktop |
-| Thing | Free to use | STE and later, and anything running MagiC or MiNT |
+| Desktop | Licence | Obtained | Suits |
+| --- | --- | --- | --- |
+| TeraDesk | Free software, GPL 2 | Downloaded when chosen | Any machine, and the one to choose below 2 MB |
+| Thing | Open source, by its author | Downloaded when chosen | STE and later, and anything running MagiC or MiNT |
+| NeoDesk 4 | Commercial, Gribnif Software | Supply your own | ST to TT with 2 MB or more |
+| Gemini with Mupfel | Source is MIT, binary unclear | Supply your own | Anyone who wants a shell in the desktop |
 
-Nothing here is bundled, including TeraDesk. The application recommends one
-for the machine the drive is being built for and installs the copy you supply.
+**The licence decides whether it is fetched, not how easy it is to find.**
+TeraDesk and Thing are downloaded from their own publishers the first time
+they are chosen, and land in the same directory you would have put a copy in,
+so afterwards a download and your own copy are the same thing. NeoDesk is
+commercial. Gemini's source was released under the MIT licence but the only
+binary distribution found states no licence at all, so neither is fetched.
+
+Nothing is bundled in the repository, including the two that can be
+downloaded.
+
+**Other…** in the prepare-drive dialog points the application at a folder of
+your own for one install, which is where to send it if your copies live in a
+downloads folder. Archives are read without unpacking them, so a ZIP straight
+from the publisher works as it is.
 
 What it does not do is make the replacement start instead of the built-in
 desktop. Every TOS release and every one of these programs arranges that

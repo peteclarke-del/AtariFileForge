@@ -325,6 +325,13 @@ def run(argv: list[str] | None = None) -> int:
             if message == "expect-folder":
                 self.expecting_folder = True
                 return
+            if message == "choose-source-folder":
+                # A folder the operator points at so software can be installed
+                # from it. Unlike an import, the page needs the path itself
+                # rather than the files, because it is the server that reads
+                # them, so the answer goes back as a string.
+                self._choose_source_folder()
+                return
             if message == "open-images" or message.startswith("open-images:"):
                 _command, separator, pane_value = message.partition(":")
                 try:
@@ -462,6 +469,38 @@ def run(argv: list[str] | None = None) -> int:
                 "window.AtariDesktopHost.chooserOpened("
                 f"{json.dumps(preferred_pane)});"
             )
+
+        def _choose_source_folder(self) -> None:
+            """Ask for a folder to install software from, and name it to the page."""
+            chooser = Gtk.FileChooserNative.new(
+                "Choose the folder the software is in",
+                self.window,
+                Gtk.FileChooserAction.SELECT_FOLDER,
+                "_Choose",
+                "_Cancel",
+            )
+            chooser.connect("response", self._source_folder_chosen)
+            self.chooser_targets[chooser] = None
+            chooser.show()
+
+        def _source_folder_chosen(self, chooser, response) -> None:
+            try:
+                folder = ""
+                if response in {
+                    Gtk.ResponseType.ACCEPT,
+                    Gtk.ResponseType.OK,
+                    Gtk.ResponseType.YES,
+                    Gtk.ResponseType.APPLY,
+                }:
+                    chosen = chooser.get_file()
+                    folder = chosen.get_path() if chosen is not None else ""
+                self._evaluate_frontend(
+                    "window.AtariDesktopHost.sourceFolderChosen("
+                    f"{json.dumps(folder or '')});"
+                )
+            finally:
+                self.chooser_targets.pop(chooser, None)
+                _close_chooser_later(GLib, chooser)
 
         def _files_chosen(self, chooser, response) -> None:
             try:
