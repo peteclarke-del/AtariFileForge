@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request, send_file, send_from_directory
+from flask import (
+    Blueprint,
+    jsonify,
+    make_response,
+    request,
+    send_file,
+)
 
 from ..download_archive import build_download_archive, prepared_download
+from ..asset_version import asset_version, stamp_index
 from ..disk_service import DiskError, DiskService
 from ..image_opening import open_image_upload
 from ..hardware_profiles import hardware_catalogue, normalise_hardware_profile
@@ -27,7 +34,18 @@ def create_images_blueprint(
 
     @blueprint.get("/")
     def index():
-        return send_from_directory(static_dir, "index.html")
+        """The page, with its asset version computed from the assets.
+
+        Serving the file as it sits on disk meant the version was whatever
+        somebody last typed into it, so a browser could go on running an old
+        interface over new code indefinitely. The version follows the files
+        now, and the page itself is never cached so a new one always arrives.
+        """
+        page = stamp_index(static_dir, asset_version(static_dir))
+        response = make_response(page)
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     @blueprint.get("/api/health")
     def health():
