@@ -203,7 +203,7 @@ physical read to record.
 
 ### "The HFE conversion engine is not installed"
 
-Official 0.0.0 Docker images and native packages bundle HxCFE. If this error
+Official 0.1.0 Docker images and native packages bundle HxCFE. If this error
 appears, confirm that the package is current and that all runtime files are
 present:
 

@@ -178,7 +178,10 @@ class DesktopPackagingTests(unittest.TestCase):
             self.assertIn(required, workflow)
         self.assertIn("tools/build-source-archive.sh", workflow)
         self.assertIn('cd "$stage/opt/atari-file-forge"', workflow)
-        self.assertTrue((ROOT / "docs/releases/0.0.0.md").is_file())
+        # The release workflow publishes these as the release's notes, so a
+        # version without them fails at the last step, after every build.
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertTrue((ROOT / f"docs/releases/{version}.md").is_file())
 
 
 if __name__ == "__main__":
