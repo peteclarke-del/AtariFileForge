@@ -5232,8 +5232,8 @@ function createTargetMedia(format) {
 const PROFILE_STORAGE_KEY = "atari-file-forge-hardware-profiles";
 const RECIPE_STORAGE_KEY = "atari-file-forge-import-recipes";
 
-//: Twelve machines a person is likely to be working towards, built from the
-//: add-on identifiers in app/hardware_profiles.py. Each one is a real
+//: Seventeen machines a person is likely to be working towards, built from
+//: the add-on identifiers in app/hardware_profiles.py. Each one is a real
 //: combination: the TOS release the machine shipped with or was upgraded to,
 //: the memory it plausibly holds, the drive and storage fitted to it and the
 //: driver that makes that storage bootable.
@@ -5250,6 +5250,16 @@ const BUILTIN_PROFILES = [
   { name: "ST with EmuTOS and ACSI2STM", machine: "st", addons: ["tos-emutos", "ram-4m", "drive-a-ds", "acsi2stm", "driver-emutos-builtin", "monitor-colour", "gemdos-hd-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "emutos", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "STE with a 68030 accelerator", machine: "ste", addons: ["tos-206", "ram-4m", "drive-a-ds", "ide-adapter", "cf-adapter", "driver-hddriver", "acc-68030-pak", "fpu-68881", "monitor-colour", "desktop-inf"], catalogMachine: "ste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "Mega ST · UltraSatan and the ICD driver", machine: "megast", addons: ["tos-102", "ram-2m", "drive-a-ds", "ultrasatan", "driver-icd", "monitor-mono", "cartridge-port", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  // The machines still in use with modern storage: an SD card through
+  // ACSI2STM, a Gotek in place of the floppy drive, and a BlueSCSI on a Mega
+  // ST, which reaches it through an ACSI-to-SCSI host adapter and so is the
+  // third-party ACSI enclosure. The Mega ST's blitter is built in, so it needs
+  // no add-on. ICD Pro drives both ACSI2STM and an ICD-bridged BlueSCSI.
+  { name: "1040 STF · 1 MiB, ACSI2STM and a Gotek", machine: "st", addons: ["tos-104", "ram-1m", "drive-a-ds", "gotek", "acsi2stm", "driver-icd", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "1040 STE · 4 MiB and ACSI2STM", machine: "ste", addons: ["tos-162", "ram-4m", "drive-a-ds", "acsi2stm", "driver-icd", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST · 4 MiB, blitter and BlueSCSI", machine: "megast", addons: ["tos-104", "ram-4m", "drive-a-ds", "acsi-third-party", "driver-icd", "monitor-mono", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "1040 STFM · 1 MiB and ACSI2STM", machine: "st", addons: ["tos-104", "ram-1m", "drive-a-ds", "acsi2stm", "driver-icd", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "520 STFM · 1 MiB and ACSI2STM", machine: "st", addons: ["tos-104", "ram-1m", "drive-a-ds", "acsi2stm", "driver-icd", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
 ];
 
 //: A GEMDOS volume is FAT12 on a floppy and FAT16 on a hard drive, and a
@@ -5348,16 +5358,39 @@ function correctSchema6Profile(profile) {
   };
 }
 
+//: Schema 8 added five presets. A stored list already holds the others and
+//: whatever its owner saved, so it gains only the ones it does not already
+//: have by name, after everything else: nothing moves, so the active
+//: profile's index still points at the same profile, and a profile of the
+//: same name somebody saved themselves is theirs and is left alone.
+const SCHEMA_8_PRESETS = new Set([
+  "1040 STF · 1 MiB, ACSI2STM and a Gotek",
+  "1040 STE · 4 MiB and ACSI2STM",
+  "Mega ST · 4 MiB, blitter and BlueSCSI",
+  "1040 STFM · 1 MiB and ACSI2STM",
+  "520 STFM · 1 MiB and ACSI2STM",
+]);
+
+function addSchema8Presets(saved) {
+  const held = new Set(saved.map(profile => profile.name));
+  return [
+    ...saved,
+    ...BUILTIN_PROFILES
+      .filter(profile => SCHEMA_8_PRESETS.has(profile.name) && !held.has(profile.name))
+      .map(profile => ({ ...profile, addons: [...profile.addons] })),
+  ];
+}
+
 function storedHardwareProfiles() {
   const saved = storedCollection(PROFILE_STORAGE_KEY, []);
   const schemaKey = `${PROFILE_STORAGE_KEY}-schema`;
   const schema = persistentStorage.getItem(schemaKey);
-  if (schema === "7" && saved.length) return saved;
-  if (schema === "6" && saved.length) {
-    const corrected = saved.map(correctSchema6Profile);
-    saveCollection(PROFILE_STORAGE_KEY, corrected);
-    persistentStorage.setItem(schemaKey, "7");
-    return corrected;
+  if (schema === "8" && saved.length) return saved;
+  if ((schema === "6" || schema === "7") && saved.length) {
+    const upgraded = addSchema8Presets(schema === "6" ? saved.map(correctSchema6Profile) : saved);
+    saveCollection(PROFILE_STORAGE_KEY, upgraded);
+    persistentStorage.setItem(schemaKey, "8");
+    return upgraded;
   }
   // Profile names shipped by earlier releases, replaced by the machine list
   // the hardware catalogue now supplies.
@@ -5368,7 +5401,7 @@ function storedHardwareProfiles() {
     ...saved.filter(profile => !builtInNames.has(profile.name) && !superseded.has(profile.name)),
   ];
   saveCollection(PROFILE_STORAGE_KEY, migrated);
-  persistentStorage.setItem(schemaKey, "7");
+  persistentStorage.setItem(schemaKey, "8");
   return migrated;
 }
 
