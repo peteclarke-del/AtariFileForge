@@ -253,6 +253,19 @@ class ShippedPackageTests(unittest.TestCase):
                     f"app imports {package}, so the container cannot omit it",
                 )
 
+    def test_the_package_check_script_holds_no_apostrophe(self) -> None:
+        """The package is built and checked by a script quoted as sh -lc '...'.
+
+        An apostrophe anywhere in it, even in a comment, ends the quoting
+        early, and the rest then runs on the CI host rather than in the build
+        container, where every path it checks is empty. That failed every
+        package once, silently, over the word "operator's".
+        """
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        body = workflow.split("sh -lc '", 1)[1].split("\n            '", 1)[0]
+        self.assertIn("EmuTOS gate passed", body)
+        self.assertNotIn("'", body)
+
     def test_the_debian_package_copies_every_application_package(self) -> None:
         root = Path(__file__).resolve().parent.parent
         builder = (root / "tools" / "build-linux-package.sh").read_text(encoding="utf-8")

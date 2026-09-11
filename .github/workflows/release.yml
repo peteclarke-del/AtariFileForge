@@ -130,10 +130,10 @@ jobs:
               cd "$stage/opt/atari-file-forge"
               PYTHONPATH="$stage/opt/atari-file-forge/vendor:$stage/opt/atari-file-forge" python3 -c "import flask; import atarinut.filesystem; import atarinut.tosrom; from capstone import CS_ARCH_M68K, CS_MODE_M68K_000, Cs; Cs(CS_ARCH_M68K, CS_MODE_M68K_000); from app.server import create_app; print(\"Package runtime gate passed\")"
               LD_LIBRARY_PATH="$stage/opt/atari-file-forge/native/lib" "$stage/opt/atari-file-forge/native/bin/hxcfe" -help >/dev/null
-              # The emulator has to start with no ROM of the operator's own,
-              # which is what the bundled EmuTOS is for, and no TOS ROM may
-              # ever ship. 0.1.0 went out without EmuTOS, so a Mega ST with no
-              # ROM supplied reported the emulator unavailable.
+              # The emulator has to start without a ROM supplied by the
+              # operator, which is what the bundled EmuTOS is for, and no TOS
+              # ROM may ever ship. 0.1.0 went out without EmuTOS, so a Mega ST
+              # with no ROM supplied reported the emulator unavailable.
               test -f "$stage/opt/atari-file-forge/firmware/emutos/etos192uk.img"
               test -f "$stage/opt/atari-file-forge/firmware/emutos/LICENSE.txt"
               test ! -e "$stage/opt/atari-file-forge/firmware/tos"
