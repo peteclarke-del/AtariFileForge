@@ -7,7 +7,7 @@ finished.
 
 A checked item is implemented and covered by the normal project documentation
 and tests. An unchecked item remains in scope. The first release that can be
-called usable is `0.1.0`; `0.0.0` is the development baseline.
+called usable is `0.1.0`.
 
 ## 1. Filing system and media
 

@@ -88,7 +88,7 @@ Release builds also provide a native-architecture Debian package. Install it
 on the Debian or Ubuntu release for which it was built:
 
 ```bash
-sudo apt install ./atari-file-forge_0.0.0-1~deb13_amd64.deb
+sudo apt install ./atari-file-forge_0.1.0-1~deb13_amd64.deb
 atari-file-forge
 ```
 
@@ -154,25 +154,13 @@ developing; they will not be committed or packaged.
 
 ## Current status
 
-The current version is `0.0.0`, a development baseline rather than a release.
-The repository, the naming, the bundled firmware and the version line are
-established; the Atari filing system, the media formats, the ROM tools and the
-emulator integration are working; the workflows built on top of them are not
-all finished. The first version that can be called usable is `0.1.0`.
+The current release is `0.1.0`, the first that can be called usable. It
+provides the editing, drive preparation, analysis and deployment workflows for
+the whole ST range, in the browser and in the Linux desktop application. The
+[release notes](docs/releases/0.1.0.md) describe what it does and what it does
+not yet do.
 
-The port is being done in layers, from the formats upward. The engines listed
-below are the finished layer: the filing system, the container decoders, the
-ROM decoder, the hardware catalogue, the emulator command builder, the
-deployment planner and the analysis reports all import, run and are covered by
-their own tests. The service layer above them is not finished. As this handbook
-is written the disk, session, comparison, archive, hex and editor services and
-the headless CLI are still being retargeted, and several modules in `app/` do
-not yet import from this tree, so a checkout of this baseline may not start.
-Anything this handbook describes as a pane, a dialog or a menu should be read
-as the workflow being built rather than a control you can use today. Run
-`python -m atarinut` directly meanwhile.
-
-What works now:
+What this release does:
 
 - The GEMDOS filing system, read and written: FAT12 floppies and FAT16
   partitions, 8.3 names, the attribute byte, FAT datestamps, defragmentation
@@ -181,76 +169,65 @@ What works now:
   containers that wrap them.
 - AHDI partition tables, their extended chains, the ICD twelve-entry table and
   PC master boot records, including byte-swapped images dumped through an IDE
-  adapter.
+  adapter, with the TOS release limits for each partition size reported rather
+  than discovered.
 - Pasti STX captures, read-only, with a per-track protection report.
 - HFE and SCP flux containers through the bundled HxCFloppyEmulator converter,
   with the encode, decode and byte-for-byte compare policy that decides whether
   a container may be edited at all.
 - Preservation captures, when the optional decoder library is installed.
+- Preparing a drive: partitioning, formatting, the boot sector, a hard-disk
+  driver from your own copy or driverless booting under EmuTOS, the folders a
+  prepared drive expects, and the desktop configuration. A replacement desktop
+  can be installed at the same time, and NeoDesk and Geneva are set up the way
+  Gribnif's own installers set them up, cookie jar and all.
+- Staging a floppy onto a drive, installing a staged title into its own
+  folder, and running a title's own installer under the emulator.
 - TOS and cartridge ROM decoding: the header, both dates, the country and video
   standard, the trap entry points proven from their vector installs, the system
   fonts, and the cartridge application chain.
 - Hatari for every machine in the range, over floppy, ACSI, SCSI, IDE and
-  host-folder media, including a whole-drive hand-off that attaches a hard-disk
-  image to the interface the profile declares rather than extracting one volume
-  out of it.
+  host-folder media, including a whole-drive hand-off that attaches a
+  hard-disk image to the interface the profile declares, rather than
+  extracting one volume out of it, and boots from it.
 - Firmware selection: a real TOS ROM you supply is preferred, and the bundled
   EmuTOS 1.4 boots the machine when none is found, so the emulator always
   works.
 - The hardware catalogue: six machines with their add-ons, requirements and
-  conflicts, used by analysis, deployment and the emulator.
-- 68000-family disassembly annotated with the TRAP calls, the TOS system
-  variables and the ST hardware registers, and cheat-candidate analysis built
-  on top of it. Proven machine-code changes are saved as
-  exact-hash guarded patches; the host-private library matches the complete
-  file hash and the original bytes, then applies through an automatic
-  checkpoint.
+  conflicts, applied to the whole workspace and used by analysis, deployment
+  and the emulator.
+- Atari analysis: `AUTO` folder order, desktop configuration, program headers
+  and their flags, bootable-disk evidence, name conflicts and TOS limits, in
+  the health dashboard, the manifest and the generated README of every saved
+  package.
+- Deployment packages for a Gotek, an SD card, a CF card, a host folder and a
+  real ACSI drive, each with its own verification steps.
+- GFA BASIC, STOS BASIC and Atari ST BASIC in the editor, and 68000-family
+  disassembly annotated with the TRAP calls, the TOS system variables and the
+  ST hardware registers, with cheat-candidate analysis built on top of it.
+  Proven machine-code changes are saved as exact-hash guarded patches.
 - Undo and named checkpoints, owner-isolated recovery, background job tracking
   and a host-private collection catalogue.
 
 The [product backlog](docs/BACKLOG.md) is the authority on what remains. The
 next section repeats the parts of it that change what you can do with this
-build today.
+release.
 
-### Known limits of this build
+### Known limits of this release
 
-These are stated here rather than discovered later. Each one is an unchecked
-row in the [backlog](docs/BACKLOG.md).
+These are stated here rather than discovered later.
 
-- **Preparing a drive and installing software onto it.** Partitioning,
-  formatting, writing the boot sector, installing a hard-disk driver into the
-  `AUTO` folder, staging a floppy onto a drive, running a title's own installer
-  under the emulator and merging `DESKTOP.INF` entries are all in scope and
-  none of them is in this build. You can create a partitioned image and copy
-  files into it; you cannot yet have the application make that image bootable
-  for you.
-- **Atari analysis reports.** The `AUTO` folder order, the desktop
-  configuration, program headers and their flags, bootable-disk evidence, name
-  conflicts and the TOS limits that apply to an image are being written into
-  the health and manifest reports as this is published. Treat the reports in
-  this build as incomplete rather than as a clean bill of health.
-- **The saved-package README.** The generated technical README inside a saved
-  ZIP is being rewritten around the Atari facts, with attributes and datestamps
-  in place of the previous platform's metadata fields.
-- **Hardware deployment packages.** The Gotek, SD-card, CompactFlash,
-  host-folder and ACSI targets and their verification steps are being finished.
-  The [deployment guide](docs/HARDWARE-DEPLOYMENT-GUIDE.md) describes the
-  intended package for each target and is accurate about what a package holds;
-  the assistant that builds them is not yet complete in this build.
 - **The Online Library.** Searching and downloading from the Atari collections,
   and identifying a title from the naming conventions the Atari archives use,
-  are not yet in this build. The five sources are configured and described in
-  the [collection guide](docs/COLLECTION-GUIDE.md), but the search and install
-  workflow around them is unfinished.
-- **BASIC in the editor.** The engine reads and lists GFA BASIC 3, STOS BASIC
-  and Atari ST BASIC, and writes back the dialects that round-trip exactly.
-  Wiring that through the file editor is not yet in this build.
-- **The workbench frontend.** Porting the panes, media badges, machine lists
-  and columns to the Atari media is unfinished, so parts of the running
-  interface still use the previous platform's vocabulary. The in-application
-  handbook is being rewritten alongside it.
+  are not finished. The sources are configured and described in the
+  [collection guide](docs/COLLECTION-GUIDE.md), but the search and install
+  workflow around them is incomplete.
 - **Picture, music and resource formats.** The ST range's own image, sound and
   GEM resource formats are not previewed. They open in the hex editor.
+- **Filenames drawn in the ST character set.** A name is decoded as Latin-1 so
+  that writing it back produces the identical bytes. The ST font's glyphs below
+  code 32, such as the musical notes some disks use in an extension, are not
+  yet drawn.
 - **The 1.44 MiB high-density geometry.** It is created, read and written as a
   sector image. The complete flux round trip for it has not been measured on
   hardware, so an HFE or SCP at that density is not yet claimed as verified end
@@ -267,6 +244,11 @@ row in the [backlog](docs/BACKLOG.md).
 - **HFE and SCP creation.** Creating or converting a flux container needs the
   HxC converter, which the Docker image and the native packages build. A bare
   checkout reports it as unavailable rather than writing an unverified image.
+- **Hard-disk driver loaders.** A driver whose distribution carries no
+  root-sector loader, AHDI and ICD Pro among them, has its files installed but
+  the loader left to its own installer, because the loader lives inside that
+  program. Run the driver's installer once, or boot the drive driverless under
+  EmuTOS. The preparation says which applies.
 - **Firmware.** No Atari TOS ROM is shipped or downloaded, and none can be:
   TOS is not free to redistribute. The bundled EmuTOS 1.4 boots every machine
   in the range, so the emulator works without one. Point a profile at a TOS ROM
@@ -286,10 +268,12 @@ row in the [backlog](docs/BACKLOG.md).
   extracted into writable media. The LZH decoder covers `-lh0-`, `-lh4-`
   through `-lh7-` and directory entries, and names any other method rather than
   guessing at it. Editing a member in place, without extracting it first, is
-  not yet in this build.
-- **The release gate.** The architecture build matrix, the generated-media and
-  fault-injection gates and the real-hardware gate on an ST or STE with a real
-  drive and a real hard-disk interface have not been run for this baseline.
+  not yet supported.
+- **Real hardware.** The Python, JavaScript and browser suites and the AMD64,
+  ARM64 and ARMv7 image builds run on every commit, and the Debian and Ubuntu
+  packages for all three architectures are built for every release. The
+  real-hardware gate, with an edited disk on a real ST or STE and a prepared
+  drive on a real hard-disk interface, has not been recorded for this release.
 
 Atari media can contain unusual formats, copy protection and boot sectors that
 are programs in their own right. Keep a known-good source image and test
@@ -2755,12 +2739,12 @@ curl http://localhost:8684/api/health
 A healthy response looks like:
 
 ```json
-{"engine":"atarinut","status":"ok","version":"0.0.0"}
+{"engine":"atarinut","status":"ok","version":"0.1.0"}
 ```
 
-The [release checklist](docs/RELEASE-CHECKLIST.md) defines the full gate. None
-of its architecture, generated-media, fault-injection or real-hardware rows has
-been completed for this baseline.
+The [release checklist](docs/RELEASE-CHECKLIST.md) defines the full gate. Its
+automated rows are evidenced by the CI and release workflow runs on the tagged
+commit. Its real-hardware rows have not been recorded for this release.
 
 ## Main dependencies
 

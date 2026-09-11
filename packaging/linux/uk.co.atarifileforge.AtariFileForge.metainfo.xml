@@ -42,6 +42,11 @@
   <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
   <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
   <releases>
+    <release version="0.1.0" date="2026-09-11">
+      <description>
+        <p>The first usable release. Opens, edits and saves ST floppy images, MSA, DIM, STX, HFE and SCP containers and partitioned ACSI, SCSI and IDE hard drives with GEMDOS attributes and datestamps preserved; prepares a drive with a hard-disk driver, a desktop and NeoDesk or Geneva set up the way their own installers do; decodes TOS and cartridge ROMs; and boots any machine from the ST to the Falcon030 in Hatari, with EmuTOS bundled so the emulator always works.</p>
+      </description>
+    </release>
     <release version="0.0.0" date="2026-09-10">
       <description>
         <p>Initial import of Atari File Forge.</p>
