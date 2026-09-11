@@ -250,7 +250,11 @@ class HardDiskCliTests(unittest.TestCase):
         self.assertEqual(self.image.stat().st_size, 20 * MIB)
         report = run_json("partitions", "--as", "json", str(self.image))["reports"]["partitions"]
         self.assertEqual(report["metadata"]["scheme"], "ahdi")
-        self.assertTrue(report["metadata"]["bootable"])
+        # ``--bootable`` flags the first partition, which is what tells a
+        # driver where to start. The root sector stays inert because nothing
+        # has written a loader into it; see RootSectorTests for why.
+        self.assertFalse(report["metadata"]["bootable"])
+        self.assertTrue(report["rows"][0]["bootable"])
         rows = report["rows"]
         self.assertEqual([row["name"] for row in rows], ["C:", "D:"])
         self.assertEqual([row["label"] for row in rows], ["HD1", "HD2"])

@@ -1008,11 +1008,22 @@ class DrivePreparationMixin:
                 + " or ".join(str(path) for path in driver_directories())
                 + ", or choose the folder or disk image it is on."
             )
+        limit = ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else ROOT_BOOT_CODE_LIMIT
         if distribution.boot_code:
             report(f"Writing the {chosen.label} boot loader", 0, 4)
-            limit = ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else ROOT_BOOT_CODE_LIMIT
             sector[:limit] = distribution.boot_code[:limit]
             apply_boot_checksum(sector, True)
+            reader.write_block(0, bytes(sector))
+            reader.flush()
+        elif not any(sector[:limit]):
+            # This driver ships no loader of its own: AHDI and ICD Pro are
+            # started from the AUTO folder, and their installers leave the
+            # root sector alone. A sector left marked executable with nothing
+            # in it is a machine that halts on a double bus error before the
+            # desktop appears, so the mark comes off here. That also repairs
+            # a drive already in that state, which is why it is done on every
+            # preparation rather than only on a fresh one.
+            apply_boot_checksum(sector, False)
             reader.write_block(0, bytes(sector))
             reader.flush()
         return distribution

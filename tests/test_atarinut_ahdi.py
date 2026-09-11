@@ -66,6 +66,53 @@ class RootSectorTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_a_root_sector_holding_a_loader_is_marked_executable(self) -> None:
+        """The mark follows the loader, so a real one still gets one.
+
+        A driver writes its loader into the root sector and then asks for the
+        sector to be made executable. That has to keep working: withholding
+        the mark from a sector that genuinely boots would leave a prepared
+        drive unable to start.
+        """
+        path = self.tmp / "loader.ahd"
+        create_partitioned_image(path, 32 * MIB, [{"label": "SYS"}], bootable=False)
+        reader = reader_for(path, writable=True)
+        try:
+            sector = bytearray(reader.read_block(0))
+            # Anything but zeros stands in for a driver's loader here; what
+            # matters is that the sector is no longer empty.
+            sector[:0x1C2] = b"\x60\x1E" + bytes(0x1C0)
+            reader.write_block(0, bytes(sector))
+            reader.flush()
+            disk = write_partition_table(
+                reader,
+                [{"label": "SYS", "size_bytes": 8 * MIB, "start_sector": 1}],
+                bootable=True,
+            )
+        finally:
+            reader.close()
+        self.assertTrue(disk.bootable)
+        self.assertTrue(is_executable_sector(path.read_bytes()[:512]))
+
+    def test_an_empty_root_sector_is_never_marked_executable(self) -> None:
+        """A machine given zeros to execute halts on a double bus error.
+
+        The ROM runs the root sector when its words sum to 0x1234 and looks no
+        further, so the mark on a sector with nothing in it is a promise the
+        drive cannot keep: TOS loads the sector, jumps into it, runs off the
+        end of the zeros and halts before the desktop appears.
+        """
+        path = self.tmp / "empty.ahd"
+        disk = create_partitioned_image(
+            path, 32 * MIB, [{"label": "SYS", "bootable": True}], bootable=True,
+        )
+        self.assertFalse(disk.bootable)
+        root = path.read_bytes()[:512]
+        self.assertFalse(is_executable_sector(root))
+        # The partition is still flagged, because that is a separate thing:
+        # it tells a driver which partition to boot once one is installed.
+        self.assertEqual(root[ROOT_PARTITIONS], 0x81)
+
     def test_root_sector_layout_is_big_endian_and_checksummed(self) -> None:
         path = self.tmp / "hd.ahd"
         disk = create_partitioned_image(
@@ -79,10 +126,14 @@ class RootSectorTests(unittest.TestCase):
             bootable=True,
         )
         self.assertEqual(disk.scheme, "ahdi")
-        self.assertTrue(disk.bootable)
+        # ``bootable`` asks for a root sector the ROM will execute, and there
+        # is no loader in this one to execute. Marking it anyway hands the
+        # machine a page of zeros and halts it on a double bus error, so the
+        # mark is withheld until a driver writes its loader in.
+        self.assertFalse(disk.bootable)
         self.assertFalse(disk.byte_swapped)
         root = path.read_bytes()[:512]
-        self.assertEqual(word_sum(root), 0x1234)
+        self.assertNotEqual(word_sum(root), 0x1234)
         self.assertEqual(be32_at(root, 0x1C2), 32 * MIB // SECTOR_SIZE)
         first = _entry(root, ROOT_PARTITIONS)
         self.assertEqual(first, (0x81, b"GEM", 1, 8 * MIB // SECTOR_SIZE))
