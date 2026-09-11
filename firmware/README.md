@@ -138,19 +138,44 @@ from it and reported.
 | Desktop | Licence | Obtained | Suits |
 | --- | --- | --- | --- |
 | TeraDesk | Free software, GPL 2 | Downloaded when chosen | Any machine, and the one to choose below 2 MB |
+| NeoDesk 4 | Freeware, Apache 2.0 with the Commons Clause | Downloaded when chosen | ST to TT with 2 MB or more |
 | Thing | Open source, by its author | Downloaded when chosen | STE and later, and anything running MagiC or MiNT |
-| NeoDesk 4 | Commercial, Gribnif Software | Supply your own | ST to TT with 2 MB or more |
-| Gemini with Mupfel | Source is MIT, binary unclear | Supply your own | Anyone who wants a shell in the desktop |
+| Gemini with Mupfel | Shareware, source later MIT | Supply your own | Anyone who wants a shell in the desktop |
+| Geneva | Freeware, Apache 2.0 with the Commons Clause | Downloaded when chosen | Alongside NeoDesk, for multitasking |
+
+Geneva is not a desktop. It is a cooperative multitasker that runs under one,
+giving the machine a dropdown menu bar and several programs at once. It was
+written to pair with NeoDesk, so it is offered alongside rather than instead.
 
 **The licence decides whether it is fetched, not how easy it is to find.**
-TeraDesk and Thing are downloaded from their own publishers the first time
-they are chosen, and land in the same directory you would have put a copy in,
-so afterwards a download and your own copy are the same thing. NeoDesk is
-commercial. Gemini's source was released under the MIT licence but the only
-binary distribution found states no licence at all, so neither is fetched.
+Gribnif released NeoDesk and Geneva as freeware under Apache 2.0 with the
+Commons Clause, which permits use and redistribution but not sale, so both are
+downloaded from Gribnif when chosen. TeraDesk and Thing come from their own
+publishers the same way. Gemini was shareware and its source was later
+released under the MIT licence, but no binary distribution was found to fetch
+from, so it is installed from your own copy.
 
-Nothing is bundled in the repository, including the two that can be
-downloaded.
+A download lands in the same directory you would have put a copy in, so
+afterwards a download and your own copy are the same thing. Nothing is bundled
+in the repository.
+
+**A distribution is read wherever it is, in whatever shape it arrived.** An
+unpacked folder, a ZIP, a `.st`, `.msa` or `.dim` floppy image, or a ZIP with
+the original floppies inside it, which is what both Gribnif downloads are.
+Nothing has to be unpacked first.
+
+**Files go where TOS looks for them.** A program and its resources go in a
+folder of their own. A desk accessory goes in the root of the boot drive,
+because that is the only place TOS loads one from, and on these products the
+control panel is an accessory: NeoDesk's is `NEOCNTRL.ACC` and Geneva's task
+manager is `TASKMAN.ACC`. An `AUTO` program goes in `AUTO`, and a control
+panel module goes in `CPX`.
+
+**Nothing already on the drive is replaced.** An `AUTO` program holds a place
+in a sequence you may have arranged deliberately, and an accessory may be your
+own, so an existing one is kept and reported as kept rather than overwritten.
+TOS loads only the first six accessories it finds in the root, so you are told
+when a drive goes past that and which ones will be ignored.
 
 **Other…** in the prepare-drive dialog points the application at a folder of
 your own for one install, which is where to send it if your copies live in a
