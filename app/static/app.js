@@ -8397,23 +8397,43 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     renderWorkbench("profiles");
     toast("Hardware profile saved");
   };
-  modalContent.querySelector("[data-apply-profile]").onclick = async () => {
+  const applyButton = modalContent.querySelector("[data-apply-profile]");
+  applyButton.onclick = async () => {
     // Every open image takes the profile, and making it the active one means
     // images opened afterwards take it too. Applying it to a single pane named
     // in a dropdown left the rest of the workspace describing a different
     // machine, which is a difference nothing on screen announced.
+    //
+    // The edits are kept as well as applied. Images opened later read the
+    // stored profile, so applying without keeping gave them the version from
+    // before the edits, and reopening the Workbench showed that version too,
+    // which read as though Apply had done nothing.
     const profile = read();
+    profiles[selectedIndex] = profile;
+    saveCollection(PROFILE_STORAGE_KEY, profiles);
+    setActiveWorkbenchProfile(selectedIndex, profile);
     const targets = panes
       .map((pane, index) => ({ pane, index }))
       .filter(({ pane }) => pane.image);
+    // A second click while the first is still working would only queue the
+    // same requests again.
+    applyButton.disabled = true;
+    const refused = [];
     for (const { pane, index } of targets) {
-      const data = await api(`/api/images/${pane.image.id}/hardware-profile`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(profile) });
-      pane.image = data.image;
-      renderPane(index);
+      try {
+        const data = await api(`/api/images/${pane.image.id}/hardware-profile`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(profile) });
+        pane.image = data.image;
+        renderPane(index);
+      } catch (error) {
+        // One image refusing the profile is no reason to leave the others
+        // unapplied, or the dialog open with no word of what went wrong.
+        refused.push(`${pane.image.name}: ${error.message}`);
+      }
     }
-    setActiveWorkbenchProfile(selectedIndex, profile);
     modal.close();
-    toast(`${profile.name} applied to ${targets.length} open image${targets.length === 1 ? "" : "s"} and to whatever is opened next${profile.accelerated ? " · Accelerator compatibility warnings enabled" : ""}`);
+    const applied = targets.length - refused.length;
+    if (refused.length) toast(`${profile.name} was not applied to ${refused.join(" · ")}`, true);
+    toast(`${profile.name} applied to ${applied} open image${applied === 1 ? "" : "s"} and to whatever is opened next${profile.accelerated ? " · Accelerator compatibility warnings enabled" : ""}`);
   };
   if (profiles[selectedIndex]) {
     modalContent.querySelector('[name="profileSelect"]').value = String(selectedIndex);
