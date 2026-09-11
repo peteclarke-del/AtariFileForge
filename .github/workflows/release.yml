@@ -74,6 +74,27 @@ jobs:
           path: .release-cache/${{ matrix.distro.id }}-${{ matrix.arch.debian }}
           key: release-pip-${{ matrix.distro.id }}-${{ matrix.arch.debian }}-${{ hashFiles('packaging/linux/requirements-debian.txt') }}
 
+      # Docker Hub resets or refuses the base image's pull often enough to
+      # fail a release that has nothing wrong with it, as it did for the
+      # v0.1.0 Ubuntu 24.04 arm64 package, and that one job failing holds back
+      # the whole release. PR #61 gave CI's image builds a second attempt;
+      # this does the same here by pulling the image on its own, with retries,
+      # so the build below finds it already present. When the registry is
+      # healthy the first pull succeeds and this costs nothing.
+      - name: Pull the build image
+        env:
+          PACKAGE_IMAGE: ${{ matrix.distro.image }}
+          PACKAGE_PLATFORM: ${{ matrix.arch.platform }}
+        run: |
+          for attempt in 1 2 3 4; do
+            if docker pull --quiet --platform "$PACKAGE_PLATFORM" "$PACKAGE_IMAGE"; then
+              exit 0
+            fi
+            echo "Pulling $PACKAGE_IMAGE for $PACKAGE_PLATFORM failed on attempt $attempt."
+            sleep $((attempt * 15))
+          done
+          exit 1
+
       - name: Build and inspect package
         env:
           PACKAGE_IMAGE: ${{ matrix.distro.image }}
