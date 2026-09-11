@@ -5234,18 +5234,18 @@ const RECIPE_STORAGE_KEY = "atari-file-forge-import-recipes";
 //: the memory it plausibly holds, the drive and storage fitted to it and the
 //: driver that makes that storage bootable.
 const BUILTIN_PROFILES = [
-  { name: "520ST · TOS 1.04, single-sided drive", machine: "st", addons: ["tos-104", "ram-512k", "drive-a-ss", "monitor-colour", "tv-modulator", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "520ST · TOS 1.04, single-sided drive", machine: "st", addons: ["tos-104", "ram-512k", "drive-a-ss", "tv-modulator", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "1040ST · TOS 1.04, two drives", machine: "st", addons: ["tos-104", "ram-1m", "drive-a-ds", "drive-b-external", "monitor-mono", "printer", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
-  { name: "Mega ST 2 · blitter and an ACSI Megafile", machine: "megast", addons: ["tos-104", "ram-2m", "drive-a-ds", "acsi-megafile", "driver-ahdi", "blitter", "monitor-mono", "midi", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "ahdi", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST 2 · blitter and an ACSI Megafile", machine: "megast", addons: ["tos-104", "ram-2m", "drive-a-ds", "acsi-megafile", "driver-ahdi", "monitor-mono", "midi", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "ahdi", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "520STE · TOS 1.62, colour monitor", machine: "ste", addons: ["tos-162", "ram-512k", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "1040STE · TOS 1.62, 4 MiB", machine: "ste", addons: ["tos-162", "ram-4m", "drive-a-ds", "drive-b-external", "monitor-colour", "midi", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "Mega STE · TOS 2.06 with a hard-disk driver", machine: "megaste", addons: ["tos-206", "ram-4m", "hd-floppy", "scsi-internal", "driver-hddriver", "monitor-mono", "midi", "desktop-inf"], catalogMachine: "megaste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "TT030 · TT RAM and internal SCSI", machine: "tt030", addons: ["tos-306", "ram-2m", "tt-ram", "hd-floppy", "scsi-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "tt030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "Falcon030 · internal IDE and VGA", machine: "falcon030", addons: ["tos-4xx", "ram-14m", "hd-floppy", "ide-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "midi", "desktop-inf"], catalogMachine: "falcon030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
   { name: "ST with a Gotek", machine: "st", addons: ["tos-104", "ram-1m", "gotek", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
-  { name: "ST with EmuTOS and ACSI2STM", machine: "st", addons: ["tos-emutos", "ram-4m", "drive-a-ds", "acsi2stm", "driver-emutos-builtin", "monitor-colour", "gemdos-hd-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug" },
-  { name: "STE with a 68030 accelerator", machine: "ste", addons: ["tos-206", "ram-4m", "drive-a-ds", "ide-adapter", "cf-adapter", "driver-hddriver", "acc-68030-pak", "fpu-68881", "monitor-vga", "desktop-inf"], catalogMachine: "ste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
-  { name: "Mega ST · UltraSatan and the ICD driver", machine: "megast", addons: ["tos-102", "ram-2m", "drive-a-ds", "ultrasatan", "driver-icd", "blitter", "monitor-mono", "cartridge-port", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "ST with EmuTOS and ACSI2STM", machine: "st", addons: ["tos-emutos", "ram-4m", "drive-a-ds", "acsi2stm", "driver-emutos-builtin", "monitor-colour", "gemdos-hd-folder"], catalogMachine: "st", filingSystem: "fat16", targetHardware: "hd", driverBuild: "emutos", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "STE with a 68030 accelerator", machine: "ste", addons: ["tos-206", "ram-4m", "drive-a-ds", "ide-adapter", "cf-adapter", "driver-hddriver", "acc-68030-pak", "fpu-68881", "monitor-colour", "desktop-inf"], catalogMachine: "ste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug" },
+  { name: "Mega ST · UltraSatan and the ICD driver", machine: "megast", addons: ["tos-102", "ram-2m", "drive-a-ds", "ultrasatan", "driver-icd", "monitor-mono", "cartridge-port", "auto-folder"], catalogMachine: "megast", filingSystem: "fat16", targetHardware: "hd", driverBuild: "icd", page: "0", emulator: "hatari", debugger: "hatari-debug" },
 ];
 
 //: A GEMDOS volume is FAT12 on a floppy and FAT16 on a hard drive, and a
@@ -5317,10 +5317,44 @@ function saveCollection(key, value) {
   persistentStorage.setItem(key, JSON.stringify(value));
 }
 
+//: Schema 6 shipped five presets carrying hardware their machine cannot take,
+//: which the Workbench then dropped without a word as each one loaded: a
+//: blitter on the Mega ST, which has one built in; a VGA monitor on an STE;
+//: two displays on the 520ST; and a hard-disk driver field that disagreed
+//: with the EmuTOS driver add-on. A stored copy may carry edits made since,
+//: so only the invalid entries are corrected, and only where still present.
+const SCHEMA_6_PRESET_CORRECTIONS = {
+  "520ST · TOS 1.04, single-sided drive": { remove: ["monitor-colour"], when: "tv-modulator" },
+  "Mega ST 2 · blitter and an ACSI Megafile": { remove: ["blitter"] },
+  "STE with a 68030 accelerator": { remove: ["monitor-vga"], add: ["monitor-colour"] },
+  "Mega ST · UltraSatan and the ICD driver": { remove: ["blitter"] },
+  "ST with EmuTOS and ACSI2STM": { driverBuild: "emutos", when: "driver-emutos-builtin" },
+};
+
+function correctSchema6Profile(profile) {
+  const correction = SCHEMA_6_PRESET_CORRECTIONS[profile.name];
+  const addons = [...(profile.addons || [])];
+  if (!correction || (correction.when && !addons.includes(correction.when))) return profile;
+  const removed = (correction.remove || []).filter(id => addons.includes(id));
+  if (correction.remove && !removed.length) return profile;
+  return {
+    ...profile,
+    addons: [...addons.filter(id => !removed.includes(id)), ...(correction.add || []).filter(id => !addons.includes(id))],
+    ...(correction.driverBuild ? { driverBuild: correction.driverBuild } : {}),
+  };
+}
+
 function storedHardwareProfiles() {
   const saved = storedCollection(PROFILE_STORAGE_KEY, []);
   const schemaKey = `${PROFILE_STORAGE_KEY}-schema`;
-  if (persistentStorage.getItem(schemaKey) === "6" && saved.length) return saved;
+  const schema = persistentStorage.getItem(schemaKey);
+  if (schema === "7" && saved.length) return saved;
+  if (schema === "6" && saved.length) {
+    const corrected = saved.map(correctSchema6Profile);
+    saveCollection(PROFILE_STORAGE_KEY, corrected);
+    persistentStorage.setItem(schemaKey, "7");
+    return corrected;
+  }
   // Profile names shipped by earlier releases, replaced by the machine list
   // the hardware catalogue now supplies.
   const superseded = new Set(saved.filter(profile => !ONLINE_MACHINES.some(([value]) => value === profile.machine)).map(profile => profile.name));
@@ -5330,7 +5364,7 @@ function storedHardwareProfiles() {
     ...saved.filter(profile => !builtInNames.has(profile.name) && !superseded.has(profile.name)),
   ];
   saveCollection(PROFILE_STORAGE_KEY, migrated);
-  persistentStorage.setItem(schemaKey, "6");
+  persistentStorage.setItem(schemaKey, "7");
   return migrated;
 }
 
@@ -8228,12 +8262,17 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
   const hardwareMachineIds = () => (catalogue?.machines || []).map(machine => machine.id);
   const machineDefaults = {
     st: { addons: ["tos-104", "ram-1m", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "st", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "1M" },
-    megast: { addons: ["tos-104", "ram-2m", "drive-a-ds", "blitter", "monitor-mono", "auto-folder"], catalogMachine: "megast", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
+    megast: { addons: ["tos-104", "ram-2m", "drive-a-ds", "monitor-mono", "auto-folder"], catalogMachine: "megast", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
     ste: { addons: ["tos-162", "ram-1m", "drive-a-ds", "monitor-colour", "auto-folder"], catalogMachine: "ste", filingSystem: "fat12", targetHardware: "floppy", driverBuild: "none", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "1M" },
     megaste: { addons: ["tos-206", "ram-4m", "hd-floppy", "scsi-internal", "driver-hddriver", "monitor-mono", "desktop-inf"], catalogMachine: "megaste", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "4M" },
     tt030: { addons: ["tos-306", "ram-2m", "tt-ram", "hd-floppy", "scsi-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "tt030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "2M" },
     falcon030: { addons: ["tos-4xx", "ram-14m", "hd-floppy", "ide-internal", "driver-hddriver", "fpu-68882", "monitor-vga", "desktop-inf"], catalogMachine: "falcon030", filingSystem: "fat16", targetHardware: "hd", driverBuild: "hddriver", page: "0", emulator: "hatari", debugger: "hatari-debug", ram: "14M" },
   };
+  // The Hard-disk driver field and the driver add-on name the same choice.
+  // They used to be set independently, so a profile could say HDDRIVER in one
+  // and AHDI in the other. Each now follows the other.
+  const driverAddonFor = { emutos: "driver-emutos-builtin", ahdi: "driver-ahdi", hddriver: "driver-hddriver", pp: "driver-pp", icd: "driver-icd" };
+  const driverBuildFor = Object.fromEntries(Object.entries(driverAddonFor).map(([build, addon]) => [addon, build]));
   const selectedAddons = () => [
     ...[...modalContent.querySelectorAll('[name="profileAddon"]:checked')].map(input => input.value),
     ...[...modalContent.querySelectorAll('[name="profileAddonSelect"]')].map(select => select.value).filter(Boolean),
@@ -8325,10 +8364,18 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
       const hasDrive = ["acsi-megafile", "acsi-third-party", "acsi2stm", "ultrasatan", "cosmosex", "ide-internal", "ide-adapter", "scsi-internal", "cf-adapter"].some(id => values.includes(id));
       modalContent.querySelector('[name="profileFs"]').value = hasDrive ? "fat16" : "fat12";
       modalContent.querySelector('[name="profileTarget"]').value = hasDrive ? "hd" : "floppy";
-      if (hasDrive && modalContent.querySelector('[name="profileDriver"]').value === "none") {
-        modalContent.querySelector('[name="profileDriver"]').value = values.includes("driver-emutos-builtin") ? "emutos" : "hddriver";
+      const driverField = modalContent.querySelector('[name="profileDriver"]');
+      const driverAddon = values.find(id => driverBuildFor[id]);
+      if (!hasDrive) driverField.value = "none";
+      else if (driverAddon) driverField.value = driverBuildFor[driverAddon];
+      else if (driverField.value === "none") {
+        // A drive has just been fitted. The driver is chosen for the field and
+        // the add-on together, so they do not start out disagreeing.
+        driverField.value = values.includes("tos-emutos") ? "emutos" : "hddriver";
+        setAddonSelected(driverAddonFor[driverField.value], true);
+        selectRequirements(driverAddonFor[driverField.value]);
+        refreshAddonDescriptions();
       }
-      if (!hasDrive) modalContent.querySelector('[name="profileDriver"]').value = "none";
       applyDependencies();
       updateAddonSummary();
     });
@@ -8357,9 +8404,15 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     modalContent.querySelector('[name="profileCatalogMachine"]').value = onlineMachineFromProfile(profile) || "all";
     modalContent.querySelector('[name="profileFs"]').value = WORKBENCH_FILE_SYSTEMS.some(([value]) => value === profile.filingSystem) ? profile.filingSystem : "fat12";
     modalContent.querySelector('[name="profileTarget"]').value = TARGET_MEDIA.some(([value]) => value === profile.targetHardware) ? profile.targetHardware : "auto";
-    modalContent.querySelector('[name="profileDriver"]').value = DRIVE_DRIVER_BUILDS.some(([value]) => value === profile.driverBuild) ? profile.driverBuild : "none";
     modalContent.querySelector('[name="profilePage"]').value = profile.page || "0";
     renderAddons(profile.addons || []);
+    // The driver add-on is what the emulator and the analysis act on, so the
+    // field follows it; a profile saved while the two disagreed shows the
+    // driver actually fitted.
+    const driverAddon = selectedAddons().find(id => driverBuildFor[id]);
+    modalContent.querySelector('[name="profileDriver"]').value = driverAddon
+      ? driverBuildFor[driverAddon]
+      : DRIVE_DRIVER_BUILDS.some(([value]) => value === profile.driverBuild) ? profile.driverBuild : "none";
     modalContent.querySelector('[name="profileEmulator"]').value = profile.emulator || "auto";
     modalContent.querySelector('[name="profileDebugger"]').value = profile.debugger || "auto";
     const ram = modalContent.querySelector('[name="profileEmulatorRam"]');
@@ -8386,6 +8439,20 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
     modalContent.querySelector('[name="profileEmulatorRam"]').value = defaults.ram;
     renderAddons(defaults.addons);
     applyDependencies();
+  };
+  modalContent.querySelector('[name="profileDriver"]').onchange = event => {
+    // Choosing a driver here fits the matching add-on in place of the current
+    // one, and choosing none removes it.
+    const current = selectedAddons().find(id => driverBuildFor[id]);
+    if (current) setAddonSelected(current, false);
+    const addon = driverAddonFor[event.target.value];
+    if (addon) {
+      setAddonSelected(addon, true);
+      selectRequirements(addon);
+    }
+    removeInvalidDependants();
+    refreshAddonDescriptions();
+    updateAddonSummary();
   };
   modalContent.querySelector('[name="profileFs"]').onchange = () => applyDependencies();
   modalContent.querySelector('[name="profileEmulator"]').onchange = () => applyDependencies();
