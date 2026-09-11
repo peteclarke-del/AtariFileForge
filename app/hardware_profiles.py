@@ -47,7 +47,9 @@ ADDONS = [
     _addon("ram-1m", "1 MiB ST RAM", "main-memory", ["st", "megast", "ste", "megaste", "falcon030"], "The memory a 1040ST, 1040STE, Mega 1 or basic Falcon shipped with.", emulator="hatari"),
     _addon("ram-2m", "2 MiB ST RAM", "main-memory", ["megast", "megaste", "tt030"], "A Mega 2 or the standard TT030 fitting.", emulator="hatari"),
     _addon("ram-2.5m", "2.5 MiB ST RAM", "main-memory", ["st", "ste"], "The common 1040 upgrade that pairs the original 1 MiB with a 2 MiB SIMM bank.", emulator="hatari"),
-    _addon("ram-4m", "4 MiB ST RAM", "main-memory", ["megast", "ste", "megaste", "tt030", "falcon030"], "The full complement of ST RAM the 68000 memory controller can address.", emulator="hatari"),
+    # The ST takes it too: its memory controller drives two banks of up to
+    # 2 MiB, the same support the 2.5 MiB upgrade relies on.
+    _addon("ram-4m", "4 MiB ST RAM", "main-memory", ["st", "megast", "ste", "megaste", "tt030", "falcon030"], "The full complement of ST RAM the 68000 memory controller can address.", emulator="hatari"),
     _addon("ram-14m", "14 MiB ST RAM", "main-memory", ["falcon030"], "The largest Falcon memory board, needed by most Falcon multimedia software.", emulator="hatari"),
     _addon("tt-ram", "TT RAM (Fast RAM)", "expansion-memory", THIRTY_TWO_BIT, "16 MiB of 32-bit memory above the ST RAM, reached only by the 68030 and only with 32-bit addressing.", emulator="hatari"),
 
