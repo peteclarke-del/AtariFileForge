@@ -182,12 +182,16 @@ def create_images_blueprint(
         return jsonify(image=service.summary(session))
 
     @blueprint.patch("/api/images/<image_id>/hardware-profile")
-    @image_mutation("changing the hardware profile")
+    # The profile describes the machine an image is used with; it changes no
+    # byte of the image. Declaring it an image mutation copied the whole image
+    # into an undo checkpoint first, which is seconds of disk work on a large
+    # hard drive, and Workbench -> Apply profile does it for every open image.
+    @request_effect("external", "recording the machine an image is used with")
     def set_hardware_profile(image_id):
         data = payload()
         session = service.get(image_id)
         allowed = {
-            "name", "machine", "filingSystem", "handlerBuild", "accelerated",
+            "name", "machine", "filingSystem", "driverBuild", "accelerated",
             "page", "menuType", "notes", "targetHardware", "catalogMachine",
             "emulator", "debugger", "emulatorRam", "emulatorBoot", "addons",
         }
