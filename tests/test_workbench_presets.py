@@ -30,7 +30,10 @@ def _literal(pattern: str):
     match = re.search(pattern, APP, re.S)
     if match is None:
         raise AssertionError(f"{pattern} was not found in app.js")
-    text = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', match.group(1))
+    # A whole-line // comment is ordinary JavaScript between entries, and
+    # nothing JSON can carry.
+    text = re.sub(r"(?m)^\s*//.*$", "", match.group(1))
+    text = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', text)
     return json.loads(re.sub(r",(\s*[}\]])", r"\1", text))
 
 
@@ -41,7 +44,7 @@ class WorkbenchPresetTests(unittest.TestCase):
         cls.defaults = _literal(r"const machineDefaults = (\{.*?\n  \});")
 
     def test_every_preset_is_hardware_its_machine_can_take(self):
-        self.assertEqual(len(self.presets), 12)
+        self.assertEqual(len(self.presets), 17)
         for preset in self.presets:
             with self.subTest(preset=preset["name"]):
                 normalised = normalise_hardware_profile(dict(preset))
