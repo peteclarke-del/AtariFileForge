@@ -168,17 +168,19 @@ class InstallTests(unittest.TestCase):
         )
         self.assertFalse(any(record.startswith("#X") for record in result["records"]))
 
-    def test_it_says_that_the_built_in_desktop_still_starts_first(self) -> None:
+    def test_it_says_when_nothing_will_start_the_desktop(self) -> None:
         """Claiming more than was done would be the worst outcome here.
 
-        Making a replacement start in place of the built-in desktop is
-        arranged differently by every TOS release and by every one of these
-        programs. This installs it and says so, rather than writing a guess
-        into the operator's desktop configuration.
+        TeraDesk's distribution puts no program in AUTO, so nothing starts it
+        when the machine comes up. Saying that is more use than a warning
+        about replacing the built-in desktop, which is a different question.
         """
         result = self.service.install_desktop_replacement(self.drive, "desktop-teradesk")
         self.assertTrue(result["warnings"])
-        self.assertIn("still starts first", result["warnings"][0])
+        self.assertTrue(
+            any("nothing starts it automatically" in text for text in result["warnings"]),
+            result["warnings"],
+        )
 
     def test_choosing_none_writes_nothing(self) -> None:
         before = {
@@ -497,3 +499,65 @@ class DistributionShapeTests(unittest.TestCase):
     def test_a_floppy_holding_something_else_yields_nothing(self) -> None:
         self._disk({"NEODESK4\\READ.ME": b"not a program"})
         self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-thing"], [self.folder]))
+
+
+class VendorInstallerTests(unittest.TestCase):
+    """What these products' own installation scripts do.
+
+    Both NeoDesk and Geneva ship an INSTALL.SCR on their master disk, which is
+    the authority on where their files go. Reading it settled three things
+    that had been guessed at: both start from AUTO, every accessory is copied
+    with the resource it reads, and the order AUTO holds them in matters.
+    """
+
+    def test_both_start_from_the_auto_folder(self) -> None:
+        """The distribution putting a program in AUTO is what starts it."""
+        self.assertEqual(
+            DESKTOPS_BY_KEY["desktop-neodesk"].auto_files, ("NEOLOAD.PRG",)
+        )
+        self.assertEqual(
+            DESKTOPS_BY_KEY["companion-geneva"].auto_files, ("GENEVA.PRG",)
+        )
+
+    #: What each accessory reads beside itself, from the installers that copy
+    #: them. NEOQUEUE carries two, one per resolution.
+    ACCESSORY_RESOURCES = {
+        "NEOCNTRL.ACC": ("NEOCNTRL.RSC",),
+        "NEOQUEUE.ACC": ("NEOQ_C.RSC", "NEOQ_M.RSC"),
+        "TRASHCAN.ACC": ("TRASHCAN.RSC",),
+        "NEO_CLI.ACC": ("NEO_CLI.NIC",),
+        "TASKMAN.ACC": ("TASKMAN.RSC",),
+        "GNVADESK.ACC": ("GNVADESK.RSC",),
+    }
+
+    def test_every_accessory_is_installed_with_its_resource(self) -> None:
+        """An accessory with no resource loads and has nothing to draw.
+
+        From the outside that is indistinguishable from not loading at all,
+        which is how it was reported: the control panel was simply not there.
+        """
+        for key in ("desktop-neodesk", "companion-geneva"):
+            names = {name.upper() for name in DESKTOPS_BY_KEY[key].accessories}
+            for accessory in sorted(n for n in names if n.endswith(".ACC")):
+                with self.subTest(accessory=accessory):
+                    expected = self.ACCESSORY_RESOURCES.get(accessory)
+                    self.assertIsNotNone(
+                        expected, f"{accessory} has no recorded resource",
+                    )
+                    for resource in expected:
+                        self.assertIn(resource, names)
+
+    def test_a_desktop_that_starts_itself_says_so_rather_than_warning(self) -> None:
+        notes = desktops._start_up_notes(DESKTOPS_BY_KEY["companion-geneva"], True)
+        self.assertTrue(any("starts from the AUTO folder" in note for note in notes))
+
+    def test_neodesk_repeats_what_gribnif_says_about_replacing_the_desktop(self) -> None:
+        """Its own installer says this depends on the ROM. So does this."""
+        notes = desktops._start_up_notes(DESKTOPS_BY_KEY["desktop-neodesk"], True)
+        joined = " ".join(notes)
+        self.assertIn("ROM version", joined)
+        self.assertIn("Geneva", joined)
+
+    def test_a_desktop_with_nothing_in_auto_says_it_will_not_start_itself(self) -> None:
+        notes = desktops._start_up_notes(DESKTOPS_BY_KEY["desktop-teradesk"], False)
+        self.assertTrue(any("nothing starts it automatically" in note for note in notes))
