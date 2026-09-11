@@ -1430,17 +1430,17 @@ dialog:has(.bulk-copy-planner) form { padding: 22px; }
 /* Above everything the workspace can raise. A pane's stacking order grows by
    one each time it is brought to the front, so any small number here means
    that after enough clicks a window sits on top of the messages. */
-.toast-region { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 9px; z-index: 2147483300; max-height: calc(100dvh - 40px); overflow-y: auto; }
-.modal-toast-region { position: absolute; right: 16px; bottom: 16px; z-index: 10100; max-width: min(420px, calc(100% - 32px)); pointer-events: none; }
-.modal-toast-region .toast { pointer-events: auto; }
-.toast { width: min(360px, calc(100vw - 40px)); padding: 12px 15px; border: 1px solid var(--ink); border-radius: 9px; background: var(--ink); color: var(--on-accent); box-shadow: 4px 4px 0 var(--yellow); font-size: 12px; animation: toast-in .18s ease-out; }
-.toast.error { background: var(--danger); box-shadow: 4px 4px 0 var(--danger-soft); }
-/* An error waits to be read. It carries its own dismiss, and the text is
-   selectable so a message can be copied somewhere rather than transcribed. */
-.toast.error { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start; user-select: text; }
+.toast-region { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 9px; z-index: 2147483300; max-height: calc(100dvh - 40px); overflow-y: auto; pointer-events: none; }
+/* The colour says how serious it is: information yellow, a warning orange,
+   an error red. Each pair is one the palette already holds to WCAG AA. */
+.toast { width: min(360px, calc(100vw - 40px)); padding: 12px 15px; border: 1px solid var(--ink); border-radius: 9px; background: var(--yellow); color: var(--on-yellow); box-shadow: 4px 4px 0 var(--ink); font-size: 12px; animation: toast-in .18s ease-out; pointer-events: auto; }
+.toast.warning { background: var(--orange); color: var(--on-accent); }
+.toast.error { background: var(--danger); color: var(--on-accent); box-shadow: 4px 4px 0 var(--danger-soft); }
+/* An error or a warning waits to be read. It carries its own dismiss, and the
+   text is selectable so a message can be copied rather than transcribed. */
+.toast.error, .toast.warning { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start; user-select: text; }
 .toast-dismiss { padding: 0 4px; border: 0; border-radius: 5px; background: transparent; color: inherit; font: 600 14px/1 DM Mono, monospace; cursor: pointer; }
 .toast-dismiss:hover, .toast-dismiss:focus-visible { background: color-mix(in srgb, var(--paper) 28%, transparent); }
-.toast-dismiss-all { justify-self: end; padding: 5px 10px; border: 1px solid var(--ink); border-radius: 7px; background: var(--paper); color: var(--ink); font: 600 11px DM Mono, monospace; cursor: pointer; }
 .page-warning-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: var(--overlay-backdrop); backdrop-filter: blur(3px); }
 .page-warning-card { width: min(520px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); color: var(--ink); box-shadow: 0 24px 80px var(--modal-shadow); }
 .page-warning-card h2 { margin: 0 0 10px; text-align: center; }

@@ -123,6 +123,36 @@ class FrontendAccessibilityTests(unittest.TestCase):
                         f"{mode} {foreground} on {background}",
                     )
 
+    def test_each_kind_of_message_has_its_own_readable_colour(self):
+        """Information is yellow, a warning orange and an error red.
+
+        The pairs are read out of the stylesheet rather than restated here, so
+        a change of colour is checked for contrast in both themes as it lands.
+        """
+        rules = {}
+        for selector, level in ((r"\.toast", "info"), (r"\.toast\.warning", "warning"), (r"\.toast\.error", "error")):
+            block = re.search(selector + r" \{([^}]*)\}", self.styles).group(1)
+            rules[level] = (
+                re.search(r"(?<![-\w])background: var\(--([\w-]+)\)", block).group(1),
+                re.search(r"(?<![-\w])color: var\(--([\w-]+)\)", block).group(1),
+            )
+        self.assertEqual(rules, {
+            "info": ("yellow", "on-yellow"),
+            "warning": ("orange", "on-accent"),
+            "error": ("danger", "on-accent"),
+        })
+        for mode, palette in self.palettes.items():
+            for level, (background, text) in rules.items():
+                with self.subTest(mode=mode, level=level):
+                    self.assertGreaterEqual(
+                        _contrast(palette[text], palette[background]), 4.5,
+                        f"{mode} {level} message text on its background",
+                    )
+
+    def test_messages_need_no_dismiss_all_button(self):
+        self.assertNotIn("Dismiss all", self.core)
+        self.assertNotIn("toast-dismiss-all", self.styles)
+
     def test_both_palettes_define_the_same_tokens(self):
         self.assertEqual(set(self.palettes["light"]), set(self.palettes["dark"]))
         for token in (
