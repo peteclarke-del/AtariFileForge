@@ -110,13 +110,33 @@ sites that hosted them. The application therefore installs from the copy you
 already own, which is almost certainly the one already sitting on a drive you
 have.
 
-Put each driver in its own folder under `firmware/drivers/`, or under
-`~/.config/atari-file-forge/drivers`, and the application will offer it by
-name. One level of nesting is read, so a folder per driver is the shape to
-use. Both locations are ignored by Git for the same reason the ROMs are.
+| Driver | Terms | Obtained |
+| --- | --- | --- |
+| ICD Pro | ICD stated none and the company is gone; mirrored freely for decades | Downloaded when chosen |
+| Atari AHDI | Atari stated none and never released it; treated as free everywhere | Supply your own |
+| HDDRIVER | Sold by Uwe Seimet | Supply your own |
+| PP driver | Sold by Pera Putnik, who lists the prices himself | Supply your own |
 
-A driver you have not supplied is still listed, marked as not supplied and
-not selectable, so the choice you cannot make is visible rather than absent.
+The two that are sold are never fetched, and that is decided by the catalogue
+rather than by the request, so nothing can ask for one. AHDI is not fetched
+either, for a different reason: no source was found that is the owner's rather
+than somebody's copy, so wiring one up would be asserting a provenance this
+cannot show.
+
+Put a driver you supply in its own folder under `firmware/drivers/`, or under
+`~/.config/atari-file-forge/drivers`. It is also read straight out of a ZIP or
+a `.st`, `.msa` or `.dim` floppy image, so a download does not have to be
+unpacked first, and **Other…** points at a folder of your own for one install.
+Both locations are ignored by Git for the same reason the ROMs are.
+
+A driver that can be downloaded is offered whether or not a copy is here. One
+that is sold is listed, marked as not supplied and not selectable, so the
+choice you cannot make is visible rather than absent.
+
+A driver's control panel module goes into the `CPX` folder, where XControl
+reads them from: ICD Pro carries `ADSCSI.CPX`. Its driver ships as
+`ICDBOOT.PRG` and is installed as `ICDBOOT.SYS` in the partition root, because
+that is the name the root sector loads.
 
 You do not need a driver at all if you are booting the drive under EmuTOS,
 which mounts a partitioned drive without one. That is the default, and it is
