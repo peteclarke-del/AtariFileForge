@@ -161,8 +161,12 @@ DRIVERS: tuple[Driver, ...] = (
     Driver(
         "driver-ahdi",
         "Atari AHDI",
-        ("SHDRIVER.SYS", "AHDI.SYS"),
-        auto_files=("AHDI.PRG",),
+        # AHDI 6 is installed as SHDRIVER.SYS in the partition root, which is
+        # what the root sector loads. The distribution ships the same bytes as
+        # AHDI.PRG, so that name is looked for too and written under the one
+        # the loader expects. AHDI 3 is run from AUTO instead, which is the
+        # operator's own arrangement rather than something to install here.
+        ("SHDRIVER.SYS", "AHDI.SYS", "AHDI.PRG"),
         folder_names=("AHDI", "SHDRIVER"),
         free=True,
         licence=(
@@ -318,33 +322,49 @@ def _version_from(path: Path) -> str:
     driver file was just found in, so the name half of the match is not
     checked against anything.
     """
-    for candidate in (path.parent, path):
+    # The release folder is not always the immediate parent: AHDI 6.061 keeps
+    # its driver in AHDI_6.061/HINSTALL, so the name to read is a level above
+    # the one the file sits in.
+    candidates = [path, *path.parents[: MAX_DRIVER_DEPTH + 1]]
+    for candidate in candidates:
         match = _VERSION_IN_FOLDER.fullmatch(candidate.name.strip())
         if match:
             return match.group("release")
     return ""
 
 
-def _find(directory: Path, name: str) -> Path | None:
-    """Find one file by name, in this directory or one level below it.
+#: How far below a driver directory a distribution's files are looked for.
+#: AHDI 6.061 keeps its driver in AHDI_6.061/HINSTALL, so one level is not
+#: enough; three covers every distribution seen without walking a whole disk.
+MAX_DRIVER_DEPTH = 3
 
-    A driver is unpacked as it was published, which means the files usually
-    arrive inside the distribution's own folder rather than loose. Looking one
-    level down means the operator does not have to flatten anything.
+
+def _find(directory: Path, name: str, depth: int = 0) -> Path | None:
+    """Find one file by name, in this directory or in a folder below it.
+
+    A driver is unpacked as it was published, which means the files arrive
+    inside the distribution's own folders rather than loose, and often a
+    folder deeper than that. Searching down means the operator does not have
+    to flatten anything.
+
+    Files in a directory are checked before descending into it, so a driver
+    sitting where it was installed wins over a copy buried in the
+    distribution's own installer folder.
     """
-    if not directory.is_dir():
+    if not directory.is_dir() or depth > MAX_DRIVER_DEPTH:
         return None
     wanted = name.casefold()
     try:
-        for entry in sorted(directory.iterdir()):
+        entries = sorted(directory.iterdir())
+        for entry in entries:
             if entry.is_file() and entry.name.casefold() == wanted:
                 return entry
-        for entry in sorted(directory.iterdir()):
+        for entry in entries:
             if not entry.is_dir():
                 continue
-            for child in sorted(entry.iterdir()):
-                if child.is_file() and child.name.casefold() == wanted:
-                    return child
+            found = _find(entry, name, depth + 1)
+            if found is not None:
+                return found
     except OSError:
         return None
     return None
@@ -1114,7 +1134,8 @@ class DrivePreparationMixin:
             )
         elif distribution is not None and not distribution.boot_code:
             warnings.append(
-                f"{distribution.name} was copied into the root of the boot partition, "
+                f"{distribution.installed_name or distribution.name} was written "
+                "into the root of the boot partition, "
                 f"but the {chosen.label} distribution carries no root-sector loader "
                 "this application can write, so the root sector was left as it was. "
                 "Run the driver's own installation program once on the machine, or "
