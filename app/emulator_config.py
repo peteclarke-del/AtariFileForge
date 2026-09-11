@@ -545,7 +545,22 @@ def emulator_command(
         for index, disc in enumerate(compact_discs, start=1):
             arguments += ["--scsi", f"{index}={disc}"]
 
-    arguments += ["--fast-boot", "true", "--confirm-quit", "false", "--statusbar", "false"]
+    # With Hatari's fast boot, EmuTOS starts from A: even with a hard-drive
+    # image attached, so the drive is there but its AUTO folder and
+    # accessories never run, which looks exactly like a prepared drive that
+    # loads nothing. Booting the drive therefore boots at normal speed. A
+    # GEMDOS folder is unaffected, because Hatari makes it the boot drive
+    # itself, and "Mount only" keeps the fast boot, which is what leaves the
+    # machine at its own desktop with the drive merely attached.
+    boots_drive = (
+        not is_folder
+        and suffix in DRIVE_SUFFIXES
+        and str(profile.get("emulatorBoot") or "auto").strip().lower() != "catalogue"
+    )
+    arguments += [
+        "--fast-boot", "false" if boots_drive else "true",
+        "--confirm-quit", "false", "--statusbar", "false",
+    ]
     if not (native and interactive):
         # The container has no sound device, and a bounded run has no listener.
         arguments += ["--sound", "off"]

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from app import desktop_replacement as desktops
+from app import volume_copy
 from app.desktop_replacement import (
     DESKTOPS,
     DESKTOPS_BY_KEY,
@@ -561,3 +562,137 @@ class VendorInstallerTests(unittest.TestCase):
     def test_a_desktop_with_nothing_in_auto_says_it_will_not_start_itself(self) -> None:
         notes = desktops._start_up_notes(DESKTOPS_BY_KEY["desktop-teradesk"], False)
         self.assertTrue(any("nothing starts it automatically" in note for note in notes))
+
+
+#: GEM.CNF as it is on Geneva's master disk, NeoDesk line commented out.
+MASTER_GEM_CNF = (
+    b"# gem.cnf\r\nsetenv PATH=,\\geneva\r\nsetenv ACCPATH=\\\r\n"
+    b"setenv TOSRUN=\\geneva\\gnva_tos.prg\r\n#shell c:\\neodesk4\\neodesk.exe\r\n"
+)
+
+
+class GribnifStartUpTests(unittest.TestCase):
+    """NeoDesk and Geneva come up at boot the way Gribnif's installers set them up.
+
+    Installed without the cookie jar manager, Geneva stopped at boot with "You
+    must run JARxxx before Geneva" and nothing else loaded. Both INSTALL.SCR
+    scripts copy JARXXX.PRG into AUTO as JAR10.PRG and NeoDesk's moves it to
+    the front; Geneva's also writes the GEM.CNF line that starts NeoDesk.
+    """
+
+    def setUp(self) -> None:
+        import shutil
+        self.supplied = Path(tempfile.mkdtemp(prefix="aff-gribnif-"))
+        self.addCleanup(lambda: shutil.rmtree(self.supplied, ignore_errors=True))
+        self.jar = program(b"cookie jar manager")
+        for relative, payload in {
+            "GENEVA/GENEVA/GENEVA.PRG": program(b"geneva"),
+            "GENEVA/GENEVA/GEM.CNF": MASTER_GEM_CNF,
+            "GENEVA/JARXXX/JARXXX.PRG": self.jar,
+            "NEODESK4/NEODESK4/NEOLOAD.PRG": program(b"neoload"),
+            "NEODESK4/NEODESK4/NEODESK.EXE": b"neodesk",
+            "NEODESK4/JARXXX/JARXXX.PRG": self.jar,
+        }.items():
+            path = self.supplied / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        for name in ("DESKTOP_DIR", "REPOSITORY_DESKTOP_DIR"):
+            previous = getattr(desktops, name)
+            self.addCleanup(setattr, desktops, name, previous)
+            setattr(desktops, name, self.supplied)
+        self.work = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work.cleanup)
+        self.service = DiskService(Path(self.work.name))
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
+        self.service.select_partition(self.drive, 0)
+
+    def install(self, key: str, **options) -> dict:
+        return self.service.install_desktop_replacement(
+            self.drive, key, download=False, **options
+        )
+
+    def auto(self) -> list[str]:
+        return self.service._auto_order(self.drive)
+
+    def gem_cnf(self) -> str:
+        return self.service.read_file(self.drive, "GENEVA\\GEM.CNF").decode("latin-1")
+
+    def put_auto(self, name: str, payload: bytes) -> None:
+        source = Path(self.work.name) / name
+        source.write_bytes(payload)
+        if not volume_copy.directory_exists(self.service, self.drive, "AUTO"):
+            self.service.make_directory(self.drive, "AUTO")
+        self.service.put(self.drive, f"AUTO\\{name}", source)
+
+    def test_geneva_brings_its_cookie_jar_and_runs_it_first(self) -> None:
+        result = self.install("companion-geneva")
+
+        self.assertEqual(self.auto(), ["JAR10.PRG", "GENEVA.PRG"])
+        self.assertEqual(self.service.read_file(self.drive, "AUTO\\JAR10.PRG"), self.jar)
+        self.assertIn("AUTO\\JAR10.PRG", result["files"])
+
+    def test_the_prepared_pair_boots_jar_then_geneva_then_neodesk(self) -> None:
+        # The Workbench installs the multitasker first, then the desktop.
+        self.install("companion-geneva")
+        result = self.install("desktop-neodesk")
+
+        self.assertEqual(self.auto(), ["JAR10.PRG", "GENEVA.PRG", "NEOLOAD.PRG"])
+        self.assertIn("AUTO\\JAR10.PRG", result["kept"])
+        self.assertIn("shell C:\\NEODESK4\\NEODESK.EXE\r\n", self.gem_cnf())
+        self.assertNotIn("#shell", self.gem_cnf())
+        self.assertIn("setenv TOSRUN=\\geneva\\gnva_tos.prg\r\n", self.gem_cnf())
+
+    def test_geneva_starts_neodesk_whichever_is_installed_first(self) -> None:
+        self.install("desktop-neodesk")
+        result = self.install("companion-geneva")
+
+        self.assertIn("shell C:\\NEODESK4\\NEODESK.EXE", self.gem_cnf())
+        self.assertTrue(any("start NeoDesk as its desktop" in note for note in result["warnings"]))
+        self.assertEqual(self.auto(), ["JAR10.PRG", "NEOLOAD.PRG", "GENEVA.PRG"])
+
+    def test_the_jar_goes_after_a_boot_manager_and_everything_else_keeps_its_place(self) -> None:
+        self.put_auto("XBOOT.PRG", program(b"boot manager"))
+        self.put_auto("CLOCK.PRG", program(b"clock"))
+        self.service.set_access(self.drive, ["AUTO\\CLOCK.PRG"], False)
+        before = self.service.list_directory(self.drive, "AUTO")["entries"]
+        clock = next(entry for entry in before if entry["name"] == "CLOCK.PRG")
+
+        self.install("companion-geneva")
+
+        self.assertEqual(self.auto(), ["XBOOT.PRG", "JAR10.PRG", "CLOCK.PRG", "GENEVA.PRG"])
+        after = self.service.list_directory(self.drive, "AUTO")["entries"]
+        moved = next(entry for entry in after if entry["name"] == "CLOCK.PRG")
+        self.assertEqual(self.service.read_file(self.drive, "AUTO\\CLOCK.PRG"), program(b"clock"))
+        self.assertEqual(moved["datestamp"], clock["datestamp"])
+        self.assertEqual(moved["attributes"], clock["attributes"])
+
+    def test_a_jar_already_in_auto_is_kept_where_it_is_and_mentioned(self) -> None:
+        self.put_auto("CLOCK.PRG", program(b"clock"))
+        self.put_auto("JAR16.PRG", program(b"their own jar"))
+
+        result = self.install("companion-geneva")
+
+        self.assertEqual(self.auto(), ["CLOCK.PRG", "JAR16.PRG", "GENEVA.PRG"])
+        self.assertIn("AUTO\\JAR16.PRG", result["kept"])
+        self.assertTrue(any("JAR16.PRG" in note for note in result["warnings"]))
+
+    def test_a_shell_line_naming_another_desktop_is_left_alone(self) -> None:
+        self.install("companion-geneva")
+        own = Path(self.work.name) / "gem.cnf"
+        own.write_bytes(MASTER_GEM_CNF + b"shell c:\\thing\\thing.app\r\n")
+        self.service.put(self.drive, "GENEVA\\GEM.CNF", own)
+
+        result = self.install("desktop-neodesk")
+
+        self.assertIn("shell c:\\thing\\thing.app", self.gem_cnf())
+        self.assertNotIn("shell C:\\NEODESK4", self.gem_cnf())
+        self.assertTrue(any("already starts" in note for note in result["warnings"]))
+
+    def test_a_copy_without_the_cookie_jar_says_what_is_missing(self) -> None:
+        (self.supplied / "GENEVA/JARXXX/JARXXX.PRG").unlink()
+        (self.supplied / "NEODESK4/JARXXX/JARXXX.PRG").unlink()
+
+        result = self.install("companion-geneva")
+
+        self.assertEqual(self.auto(), ["GENEVA.PRG"])
+        self.assertTrue(any("JARXXX.PRG" in note for note in result["warnings"]))
