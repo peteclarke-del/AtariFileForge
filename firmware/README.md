@@ -202,11 +202,26 @@ your own for one install, which is where to send it if your copies live in a
 downloads folder. Archives are read without unpacking them, so a ZIP straight
 from the publisher works as it is.
 
-What it does not do is make the replacement start instead of the built-in
-desktop. Every TOS release and every one of these programs arranges that
-differently, so the desktop is installed, listed among the applications and
-put on the desktop itself, and the result says plainly that the built-in
-desktop still comes up first.
+**How each one starts is taken from its own installer.** NeoDesk and Geneva
+ship an `INSTALL.SCR` on their master disk, and that script is the authority:
+both put a program in `AUTO`, which is what starts them when the machine comes
+up. `NEOLOAD.PRG` and `GENEVA.PRG` go there, and Geneva goes in first, because
+`AUTO` runs its programs in the order the folder holds them and Geneva has to
+be up before NeoDesk loads under it. The resulting order is reported so you can
+see it.
+
+Whether NeoDesk takes the place of the built-in desktop rather than running
+alongside it depends on the machine's ROM version. Gribnif's own installer says
+so and offers Geneva as the way to arrange it, so that is what this repeats
+rather than guessing.
+
+TeraDesk and Thing put nothing in `AUTO`, so nothing starts them, and the
+result says so.
+
+**An accessory is installed with the resource it reads.** One without its
+resource loads and then has nothing to draw, which from the outside looks
+exactly like not loading at all. `NEOCNTRL.ACC` needs `NEOCNTRL.RSC`,
+`NEOQUEUE.ACC` needs two, one per resolution, and so on.
 
 ## Checking a ROM
 

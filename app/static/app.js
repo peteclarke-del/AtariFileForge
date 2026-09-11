@@ -3663,12 +3663,14 @@ async function showPrepareDrive(index) {
         }),
       }));
     pane.image = result.image;
-    // A desktop is installed before the multitasker that runs under it, so
-    // that the one which decides how the machine starts is in place first.
+    // The multitasker goes in first, because AUTO runs its programs in the
+    // order the folder holds them and Geneva has to be up before NeoDesk
+    // loads under it. Installing in this order is what puts them in that
+    // order on the drive.
     const catalogued = Object.fromEntries((desktops.desktops || []).map(row => [row.id, row]));
     const chosen = form.getAll("driveDesktop")
       .map(String)
-      .sort((left, right) => Number(catalogued[left]?.companion) - Number(catalogued[right]?.companion));
+      .sort((left, right) => Number(catalogued[right]?.companion) - Number(catalogued[left]?.companion));
     const warnings = [];
     for (const desktop of chosen) {
       const installed = await trackedPaneOperation(
