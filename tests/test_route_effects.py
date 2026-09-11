@@ -41,7 +41,6 @@ class RouteEffectTests(unittest.TestCase):
             "files.transfer_image_to_directory", "hex_editor.write_file_hex",
             "hex_editor.write_hex", "images.compact", "images.configure_rom_layout",
             "images.prepare_image_download",
-            "images.rename_image",
             "rom_tools.rom_build", "rom_tools.rom_patch", "rom_tools.rom_project",
             "rom_tools.rom_repair",
             "tools.apply_image_patch",
