@@ -253,9 +253,17 @@ class DrivePreparationTests(unittest.TestCase):
         self.service = DiskService(self.root / "work")
         self.drivers = self.root / "drivers"
         self.drivers.mkdir()
+        # Both directories are looked in, so a test that patches only one is
+        # not isolated: it passes or fails depending on whether the developer
+        # happens to keep a driver beside the source.
         self._previous = drive_preparation.DRIVER_DIR
+        self._previous_repository = drive_preparation.REPOSITORY_DRIVER_DIR
         drive_preparation.DRIVER_DIR = self.drivers
+        drive_preparation.REPOSITORY_DRIVER_DIR = self.drivers
         self.addCleanup(setattr, drive_preparation, "DRIVER_DIR", self._previous)
+        self.addCleanup(
+            setattr, drive_preparation, "REPOSITORY_DRIVER_DIR", self._previous_repository,
+        )
 
     def _drive(self, name: str = "SYSTEM", capacity: str = "40MB"):
         drive = self.service.create_blank("hd", name, capacity)
