@@ -25,12 +25,7 @@ itself, so it is one double-click away, and the result says so plainly.
 from __future__ import annotations
 
 import dataclasses
-import io
 import os
-import tempfile
-import urllib.error
-import urllib.request
-import zipfile
 from pathlib import Path
 
 from . import atari_paths, volume_copy
@@ -48,6 +43,8 @@ from .drive_preparation import (
 )
 from .image_session import ImageSession
 from .errors import DiskError
+from .software_bundles import BUNDLE_SUFFIXES, DISK_SUFFIXES, archive_files, volume_files
+from .software_download import MAX_DOWNLOAD_BYTES, fetch_archive
 
 #: Where the operator keeps the desktops they own, on the same convention the
 #: hard-disk drivers already use.
@@ -360,94 +357,14 @@ def _wanted_names(desktop: Desktop) -> dict[str, str]:
     return wanted
 
 
-#: The disk images a distribution arrives on. Atari software of this period is
-#: published as a floppy, and the two that can be downloaded from their authors
-#: today are still a ZIP with the original floppies inside it.
-DISK_SUFFIXES = (".st", ".msa", ".dim")
-
-#: How deep a distribution floppy is walked looking for the program. Two is
-#: enough for every one of these: a folder per product, and a folder inside it.
-MAX_DISK_DEPTH = 3
-
-
-def _volume_files(image: Path, wanted: dict[str, str]) -> dict[str, bytes]:
-    """Read the wanted files off a GEMDOS floppy, wherever they sit on it.
-
-    A distribution floppy puts its program in a folder named after the product,
-    sometimes with another folder inside. The files are matched on their own
-    names rather than on a path, because the path differs between products and
-    the name does not.
-    """
-    try:
-        from atarinut.filesystem import reader_for
-        from atarinut.filesystem.gemdos import GEMDOSVolume
-
-        volume = GEMDOSVolume(reader_for(image))
-    except Exception:
-        return {}
-    held: dict[str, bytes] = {}
-
-    def walk(folder: str, depth: int) -> None:
-        if depth > MAX_DISK_DEPTH:
-            return
-        try:
-            entries = list(volume.iter_entries(folder))
-        except Exception:
-            return
-        for entry in entries:
-            path = f"{folder}\\{entry.name}" if folder else entry.name
-            if entry.is_dir:
-                walk(path, depth + 1)
-                continue
-            proper = wanted.get(entry.name.casefold())
-            if proper is None or proper in held:
-                continue
-            try:
-                held[proper] = volume.read_bytes(path)
-            except Exception:
-                continue
-
-    walk("", 0)
-    return held
-
-
 def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None:
     """Read a distribution straight out of a ZIP, without unpacking it first.
 
-    A desktop arrives as an archive, and an operator who has just downloaded
-    one should not have to unpack it before it can be used. The files are
-    matched on their own names wherever they sit inside it, because every one
-    of these archives puts them in a folder of its own.
+    An operator who has just downloaded one should not have to unpack it
+    before it can be used, and both desktops downloadable from their own
+    authors are a ZIP with the original distribution floppies inside.
     """
-    wanted = _wanted_names(desktop)
-    try:
-        with zipfile.ZipFile(archive) as bundle:
-            held: dict[str, bytes] = {}
-            disks = []
-            for entry in bundle.infolist():
-                if entry.is_dir():
-                    continue
-                leaf = entry.filename.replace("\\", "/").rsplit("/", 1)[-1]
-                if Path(leaf).suffix.casefold() in DISK_SUFFIXES:
-                    disks.append(entry)
-                    continue
-                proper = wanted.get(leaf.casefold())
-                if proper is None or proper in held:
-                    continue
-                held[proper] = bundle.read(entry)
-            # Both desktops that can be downloaded from their own authors are
-            # a ZIP with the original distribution floppies inside it, so the
-            # program is on a disk rather than loose in the archive.
-            for entry in disks:
-                if all(name in held for name in wanted.values()):
-                    break
-                with tempfile.TemporaryDirectory(prefix="aff-distribution-") as folder:
-                    image = Path(folder) / Path(entry.filename).name
-                    image.write_bytes(bundle.read(entry))
-                    for name, payload in _volume_files(image, wanted).items():
-                        held.setdefault(name, payload)
-    except (OSError, zipfile.BadZipFile, RuntimeError):
-        return None
+    held = archive_files(archive, _wanted_names(desktop))
     program = next((name for name in desktop.files if name in held), None)
     if program is None:
         return None
@@ -472,7 +389,7 @@ def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None
 
 def _from_disk(desktop: Desktop, image: Path) -> DesktopDistribution | None:
     """Read a distribution off one floppy image."""
-    held = _volume_files(image, _wanted_names(desktop))
+    held = volume_files(image, _wanted_names(desktop))
     program = next((name for name in desktop.files if name in held), None)
     if program is None:
         return None
@@ -566,7 +483,7 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
                 bundles = sorted(
                     entry for entry in root.iterdir()
                     if entry.is_file()
-                    and entry.suffix.casefold() in (".zip", *DISK_SUFFIXES)
+                    and entry.suffix.casefold() in BUNDLE_SUFFIXES
                 )
             except OSError:
                 bundles = []
@@ -577,60 +494,22 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
     return None
 
 
-#: How much of a download is accepted before it is refused. A replacement
-#: desktop is a few hundred kilobytes; anything past this is not one.
-MAX_DOWNLOAD_BYTES = 32 * MIB
-
-
 def fetch_desktop(desktop: Desktop, destination: Path | None = None, opener=None) -> Path:
     """Download a freely licensed desktop into the operator's own directory.
 
     Only a desktop whose licence allows it is fetched, and the check is on the
     catalogue rather than on the request, so no caller can ask for one that is
     somebody's property.
-
-    What arrives is written into the same directory an operator would have put
-    their own copy in, under a folder naming the release. That means a
-    download and a copy the operator supplied are afterwards indistinguishable,
-    and the next install finds it without going near the network.
     """
     if not desktop.free or not desktop.sources:
-        raise DiskError(
-            f"{desktop.label} cannot be downloaded. {desktop.licence}"
-        )
-    directory = Path(destination) if destination is not None else DESKTOP_DIR
-    directory.mkdir(parents=True, exist_ok=True)
-    request_opener = opener or urllib.request.urlopen
-    failures = []
-    for source in desktop.sources:
-        try:
-            with request_opener(source.url, timeout=120) as response:
-                payload = response.read(MAX_DOWNLOAD_BYTES + 1)
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            failures.append(f"{source.label}: {exc}")
-            continue
-        if len(payload) > MAX_DOWNLOAD_BYTES:
-            failures.append(f"{source.label}: larger than {MAX_DOWNLOAD_BYTES // MIB} MB")
-            continue
-        if not zipfile.is_zipfile(io.BytesIO(payload)):
-            failures.append(f"{source.label}: what arrived is not a ZIP archive")
-            continue
-        archive = directory / f"{desktop.folder or desktop.key}.zip"
-        archive.write_bytes(payload)
-        if _from_archive(desktop, archive) is None:
-            archive.unlink(missing_ok=True)
-            failures.append(
-                f"{source.label}: the archive holds no "
-                + " or ".join(desktop.files)
-            )
-            continue
-        return archive
-    raise DiskError(
-        f"{desktop.label} could not be downloaded. "
-        + "; ".join(failures)
-        + ". Put your own copy in "
-        + str(directory)
-        + " instead."
+        raise DiskError(f"{desktop.label} cannot be downloaded. {desktop.licence}")
+    return fetch_archive(
+        desktop.label,
+        [(source.label, source.url) for source in desktop.sources],
+        Path(destination) if destination is not None else DESKTOP_DIR,
+        desktop.folder or desktop.key,
+        accepts=lambda archive: _from_archive(desktop, archive) is not None,
+        opener=opener,
     )
 
 

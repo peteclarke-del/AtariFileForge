@@ -3616,7 +3616,12 @@ async function showPrepareDrive(index) {
     const copy = supplied[id];
     const note = driver?.note || DRIVE_DRIVERS.find(item => item.value === id)?.detail || "";
     if (!copy || copy.available) return note;
-    return `${note} No copy of this driver was found, so it cannot be installed yet.`;
+    // A driver that may be fetched is offered without a copy, because
+    // choosing it is what fetches it. One that is sold says so instead.
+    if (copy.obtainable !== false) {
+      return `${note} No copy here yet, so choosing this downloads one.`;
+    }
+    return `${note} ${driver?.licence || "No copy of this driver was found, so it cannot be installed yet."}`;
   };
   const closed = showModal(`
     <h2>Prepare this drive</h2>
@@ -3625,7 +3630,14 @@ async function showPrepareDrive(index) {
     <div class="help-note"><strong>Your own driver:</strong> Atari File Forge does not ship AHDI, HDDRIVER, the PP driver or the ICD driver and cannot fetch them. Put the files you own in <code>~/.config/atari-file-forge/drivers</code> or <code>firmware/drivers</code>, unpacked as they were published. EmuTOS needs no driver at all.</div>
     <div class="field"><label>Hard-disk driver</label>
       <select name="driveDriver">
-        ${published.map(driver => `<option value="${esc(driver.id)}"${supplied[driver.id] && !supplied[driver.id].available ? " disabled" : ""}>${esc(driver.label)}${supplied[driver.id]?.version ? ` · ${esc(supplied[driver.id].version)}` : ""}${supplied[driver.id] && !supplied[driver.id].available ? " · not supplied" : ""}</option>`).join("")}
+        ${published.map(driver => {
+          const copy = supplied[driver.id];
+          const obtainable = copy ? copy.obtainable !== false : true;
+          const state = copy && !copy.available
+            ? (driver.free ? " · downloads when chosen" : " · not supplied")
+            : (copy?.version ? ` · ${copy.version}` : "");
+          return `<option value="${esc(driver.id)}"${obtainable ? "" : " disabled"}>${esc(driver.label)}${esc(state)}</option>`;
+        }).join("")}
       </select>
       <small data-driver-detail>${esc(detailFor(published[0]?.id))}</small></div>
     ${desktopReplacementField(desktops)}
@@ -3644,6 +3656,7 @@ async function showPrepareDrive(index) {
         body: JSON.stringify({
           driver: form.get("driveDriver"),
           partition: pane.partition,
+          folder: desktopFolder,
           createFolders: form.get("createFolders") === "yes",
           desktop: form.get("writeDesktop") === "yes",
           operationId,

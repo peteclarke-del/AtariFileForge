@@ -34,6 +34,8 @@ from app.drive_preparation import (
     find_distribution,
     installed_applications,
     installed_driver,
+    DRIVERS_BY_KEY,
+    fetch_driver,
     is_installed_application,
     merge_desktop,
     record_letter,
@@ -370,12 +372,29 @@ class DrivePreparationTests(unittest.TestCase):
         )
 
     def test_a_driver_that_was_not_supplied_is_refused_with_the_licence_reason(self) -> None:
+        """The refusal has to say what is known about the terms.
+
+        AHDI is treated as free everywhere, but no source was found that is
+        the owner's rather than somebody's copy, so there is nothing to fetch
+        and the message says both halves of that.
+        """
         drive = self._drive()
         with self.assertRaises(DiskError) as raised:
             self.service.prepare_drive(drive, driver="driver-ahdi")
         message = str(raised.exception)
         self.assertIn(str(self.drivers), message)
-        self.assertIn("EmuTOS", message)
+        self.assertIn("No download is wired up", message)
+
+    def test_a_driver_that_is_sold_is_never_fetched(self) -> None:
+        """The catalogue decides, so no request can ask for a driver that is sold."""
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("a driver that is sold must not be downloaded")
+
+        for key in ("driver-hddriver", "driver-pp"):
+            with self.subTest(driver=key):
+                with self.assertRaises(DiskError) as raised:
+                    fetch_driver(DRIVERS_BY_KEY[key], self.drivers, opener=refuse)
+                self.assertIn("Sold by its author", str(raised.exception))
 
     def test_preparing_twice_does_not_undo_what_was_done_in_between(self) -> None:
         drive = self._drive()
