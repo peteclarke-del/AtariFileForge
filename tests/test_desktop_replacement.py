@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import struct
 import tempfile
 import unittest
@@ -111,7 +112,7 @@ class SuppliedCopyTests(unittest.TestCase):
         self.assertEqual([name for name, _ in found.companions], ["TERADESK.RSC"])
 
     def test_a_desktop_that_was_not_supplied_is_simply_absent(self) -> None:
-        self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], [self.supplied]))
+        self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-gemini"], [self.supplied]))
 
     def test_installing_one_that_was_not_supplied_says_where_to_put_it(self) -> None:
         with tempfile.TemporaryDirectory() as work:
@@ -121,9 +122,9 @@ class SuppliedCopyTests(unittest.TestCase):
             desktops.DESKTOP_DIR = self.supplied
             desktops.REPOSITORY_DESKTOP_DIR = self.supplied
             with self.assertRaises(DiskError) as caught:
-                service.install_desktop_replacement(drive, "desktop-neodesk")
+                service.install_desktop_replacement(drive, "desktop-gemini")
             message = str(caught.exception)
-            self.assertIn("Gribnif", message)
+            self.assertIn("Shareware", message)
             self.assertIn(str(self.supplied), message)
 
 
@@ -231,8 +232,8 @@ class LicenceTests(unittest.TestCase):
             raise AssertionError("a proprietary desktop must not be downloaded")
 
         with self.assertRaises(DiskError) as caught:
-            desktops.fetch_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], opener=refuse)
-        self.assertIn("Gribnif", str(caught.exception))
+            desktops.fetch_desktop(DESKTOPS_BY_KEY["desktop-gemini"], opener=refuse)
+        self.assertIn("Shareware", str(caught.exception))
 
 
 class DownloadTests(unittest.TestCase):
@@ -337,10 +338,162 @@ class ArchiveAndFolderTests(unittest.TestCase):
         self.assertEqual(found.source, archive)
 
     def test_a_folder_holding_somebody_elses_archives_finds_nothing(self) -> None:
+        # Gemini has no download, so nothing here can stand in for it.
         import io
         import zipfile
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as bundle:
             bundle.writestr("HOLIDAY.JPG", b"not an atari program")
         (self.folder / "photos.zip").write_bytes(buffer.getvalue())
-        self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], [self.folder]))
+        self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-gemini"], [self.folder]))
+
+
+class PlacementTests(unittest.TestCase):
+    """Where each kind of file has to land for TOS to find it.
+
+    A program can live anywhere, but an accessory is loaded from the root of
+    the boot drive and nowhere else, an AUTO program runs before GEM in the
+    order the directory holds it, and a control panel module is read from the
+    folder XControl's CPXPATH names. Putting any of them in the wrong place
+    means it silently does not happen.
+    """
+
+    def setUp(self) -> None:
+        import shutil
+        self.supplied = Path(tempfile.mkdtemp(prefix="aff-place-"))
+        self.addCleanup(lambda: shutil.rmtree(self.supplied, ignore_errors=True))
+        root = self.supplied / "SAMPLE_1.00"
+        root.mkdir()
+        for name, payload in {
+            "TERADESK.PRG": program(b"desktop"),
+            "TERADESK.RSC": b"resource",
+            "PANEL.ACC": b"an accessory",
+            "EARLY.PRG": program(b"auto"),
+            "TUNING.CPX": b"a control panel module",
+        }.items():
+            (root / name).write_bytes(payload)
+        desktops.DESKTOP_DIR = self.supplied
+        desktops.REPOSITORY_DESKTOP_DIR = self.supplied
+        self.desktop = dataclasses.replace(
+            DESKTOPS_BY_KEY["desktop-teradesk"],
+            accessories=("PANEL.ACC",),
+            auto_files=("EARLY.PRG",),
+            control_panel=("TUNING.CPX",),
+        )
+        DESKTOPS_BY_KEY["desktop-sample"] = self.desktop
+        self.addCleanup(DESKTOPS_BY_KEY.pop, "desktop-sample", None)
+        self.work = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work.cleanup)
+        self.service = DiskService(Path(self.work.name))
+        self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
+        self.service.select_partition(self.drive, 0)
+
+    def _names(self, folder=""):
+        return {
+            entry["name"]
+            for entry in self.service.list_directory(self.drive, folder)["entries"]
+        }
+
+    def test_an_accessory_goes_to_the_root_and_not_beside_the_program(self) -> None:
+        self.service.install_desktop_replacement(self.drive, "desktop-sample")
+        self.assertIn("PANEL.ACC", self._names())
+        self.assertNotIn("PANEL.ACC", self._names("TERADESK"))
+
+    def test_an_auto_program_goes_into_auto(self) -> None:
+        self.service.install_desktop_replacement(self.drive, "desktop-sample")
+        self.assertIn("EARLY.PRG", self._names("AUTO"))
+
+    def test_a_control_panel_module_goes_into_the_cpx_folder(self) -> None:
+        self.service.install_desktop_replacement(self.drive, "desktop-sample")
+        self.assertIn("TUNING.CPX", self._names(desktops.CPX_FOLDER))
+
+    def test_an_auto_program_already_there_is_never_replaced(self) -> None:
+        """AUTO order is often the difference between starting and not.
+
+        A program already in AUTO holds a place in that sequence which the
+        operator may have arranged deliberately, so it is left exactly as it
+        is and reported as kept rather than quietly overwritten.
+        """
+        theirs = Path(self.work.name) / "theirs"
+        theirs.write_bytes(program(b"the operator's own"))
+        self.service.make_directory(self.drive, "AUTO")
+        self.service.put(self.drive, "AUTO\\EARLY.PRG", theirs)
+        result = self.service.install_desktop_replacement(self.drive, "desktop-sample")
+        self.assertIn("AUTO\\EARLY.PRG", result["kept"])
+        self.assertNotIn("AUTO\\EARLY.PRG", result["files"])
+        self.assertEqual(
+            self.service.read_file(self.drive, "AUTO\\EARLY.PRG"),
+            theirs.read_bytes(),
+        )
+
+    def test_an_accessory_already_there_is_never_replaced(self) -> None:
+        theirs = Path(self.work.name) / "panel"
+        theirs.write_bytes(b"the operator's own accessory")
+        self.service.put(self.drive, "PANEL.ACC", theirs)
+        result = self.service.install_desktop_replacement(self.drive, "desktop-sample")
+        self.assertIn("PANEL.ACC", result["kept"])
+        self.assertEqual(
+            self.service.read_file(self.drive, "PANEL.ACC"), theirs.read_bytes()
+        )
+
+    def test_too_many_accessories_is_reported_rather_than_discovered(self) -> None:
+        """TOS loads six and ignores the rest without saying anything."""
+        spare = Path(self.work.name) / "spare"
+        spare.write_bytes(b"accessory")
+        for index in range(7):
+            self.service.put(self.drive, f"SPARE{index}.ACC", spare)
+        result = self.service.install_desktop_replacement(self.drive, "desktop-sample")
+        warning = next((text for text in result["warnings"] if "only the first" in text), "")
+        self.assertTrue(warning, result["warnings"])
+        self.assertIn("8 desk accessories", warning)
+
+
+class DistributionShapeTests(unittest.TestCase):
+    """A distribution arrives on a floppy, because that is how Atari software was sold."""
+
+    def setUp(self) -> None:
+        import shutil
+        self.folder = Path(tempfile.mkdtemp(prefix="aff-shape-"))
+        self.addCleanup(lambda: shutil.rmtree(self.folder, ignore_errors=True))
+
+    def _disk(self, files: dict) -> Path:
+        from app.disk_service import DiskService
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        service = DiskService(Path(work.name))
+        floppy = service.create_blank("ds-800k", "DIST")
+        service.make_directory(floppy, "NEODESK4")
+        for name, payload in files.items():
+            source = Path(work.name) / "payload"
+            source.write_bytes(payload)
+            service.put(floppy, name, source)
+        image = self.folder / "NeoDesk.st"
+        image.write_bytes(floppy.path.read_bytes())
+        return image
+
+    def test_a_program_is_read_off_a_distribution_floppy(self) -> None:
+        """Both desktops downloadable from their authors are ZIPs of floppies."""
+        self._disk({
+            "NEODESK4\\NEOLOAD.PRG": program(b"loader"),
+            "NEODESK4\\NEODESK.RSC": b"resource",
+        })
+        found = find_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], [self.folder])
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "NEOLOAD.PRG")
+        self.assertIn("NEODESK.RSC", [name for name, _ in found.companions])
+
+    def test_a_floppy_inside_a_zip_is_read_too(self) -> None:
+        import zipfile
+        image = self._disk({"NEODESK4\\NEOLOAD.PRG": program(b"loader")})
+        archive = self.folder / "NeoDesk-4.06.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.write(image, "NeoDesk.st")
+            bundle.writestr("README.TXT", b"read me")
+        image.unlink()
+        found = find_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], [archive])
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "NEOLOAD.PRG")
+
+    def test_a_floppy_holding_something_else_yields_nothing(self) -> None:
+        self._disk({"NEODESK4\\READ.ME": b"not a program"})
+        self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-thing"], [self.folder]))

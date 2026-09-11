@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import os
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -59,6 +60,10 @@ DESKTOP_DIR = Path(
 
 #: The git-ignored directory beside the source where they may also be kept.
 REPOSITORY_DESKTOP_DIR = REPOSITORY_ROOT / "firmware" / "desktops"
+
+#: Where XControl looks for control panel modules unless its own CPXPATH says
+#: otherwise. Every drive that has a control panel at all uses this.
+CPX_FOLDER = "CPX"
 
 #: Every machine in the range, for a desktop that suits all of them.
 EVERY_MACHINE = frozenset({"st", "megast", "ste", "megaste", "tt030", "falcon030"})
@@ -93,7 +98,15 @@ class Desktop:
     #: files, its own configuration, its help.
     companions: tuple[str, ...] = ()
     #: Programs that belong in ``AUTO`` rather than the desktop's own folder.
+    #: They run before GEM appears, in the order the directory holds them.
     auto_files: tuple[str, ...] = ()
+    #: Desk accessories. TOS loads these from the root of the boot drive and
+    #: nowhere else, so this is the one category that cannot go in a folder.
+    #: On these products the control panel is an accessory rather than a CPX.
+    accessories: tuple[str, ...] = ()
+    #: Control panel modules for XControl, which reads them from the folder
+    #: its own CPXPATH names. ``CPX`` is the conventional one.
+    control_panel: tuple[str, ...] = ()
     #: The folder on the drive it is installed into.
     folder: str = ""
     #: What its distribution folder is normally called, for reading the
@@ -148,14 +161,33 @@ DESKTOPS: tuple[Desktop, ...] = (
     Desktop(
         "desktop-neodesk",
         "NeoDesk 4",
-        ("NEODESK.PRG", "NEODESK4.PRG"),
-        companions=("NEODESK.RSC", "NEODESK.INF", "NEODESK4.RSC"),
-        folder="NEODESK",
+        # NEOLOAD.PRG is what starts NeoDesk. The desktop itself is
+        # NEODESK.EXE, which the loader brings in, and which TOS would not
+        # know how to run on its own.
+        ("NEOLOAD.PRG", "NEODESK.PRG"),
+        companions=(
+            "NEODESK.EXE", "NEODESK.RSC", "NEODESK.HLP", "NEOICONS.NIC",
+            "SETTINGS.RSC", "HELP.RSC", "ICONEDIT.RSC", "NEODESK.INF",
+        ),
+        # NeoDesk's control panel is an accessory rather than a CPX, and so is
+        # its command line. Both have to be in the root to be loaded.
+        accessories=("NEOCNTRL.ACC", "NEOQUEUE.ACC", "TRASHCAN.ACC", "NEO_CLI.ACC"),
+        folder="NEODESK4",
         folder_names=("NEODESK", "NEODESK4"),
         machines=frozenset({"st", "megast", "ste", "megaste", "tt030"}),
         resident_bytes=154 * KIB,
         memory_bytes=2 * MIB,
-        licence="Commercial, Gribnif Software. Supply your own copy.",
+        free=True,
+        sources=(
+            Source(
+                "Gribnif Software",
+                "https://gribnif.github.io/files/NeoDesk-4.06-with-CLI.zip",
+            ),
+        ),
+        licence=(
+            "Freeware. Gribnif released it under Apache 2.0 with the Commons "
+            "Clause, which allows use and redistribution but not sale."
+        ),
         note="The most complete of them: icons of your own, program groups, "
              "a file search, background patterns. It keeps about 154 KB "
              "resident and drops to roughly 24 KB while another program "
@@ -174,9 +206,10 @@ DESKTOPS: tuple[Desktop, ...] = (
         resident_bytes=120 * KIB,
         memory_bytes=2 * MIB,
         licence=(
-            "The source was released under the MIT licence, but no binary "
-            "distribution with a stated licence was found to download from. "
-            "Supply your own copy."
+            "Shareware, and freely passed around. The source was later "
+            "released under the MIT licence. No binary distribution was found "
+            "to download from, so supply your own copy or point at the folder "
+            "or disk image it is on."
         ),
         note="Carries Mupfel, a Unix-like shell built into the desktop, so a "
              "command line and a GEM window are the same environment. The "
@@ -208,12 +241,49 @@ DESKTOPS: tuple[Desktop, ...] = (
 
 DESKTOPS_BY_KEY = {desktop.key: desktop for desktop in DESKTOPS}
 
+#: Geneva is not a desktop. It is a cooperative multitasker that runs *under*
+#: one, giving the machine a dropdown menu bar and several programs at once.
+#: It is Gribnif's too, released on the same terms, and it is what NeoDesk was
+#: designed to sit on, so it is offered alongside rather than instead.
+GENEVA = Desktop(
+    "companion-geneva",
+    "Geneva",
+    ("GENEVA.PRG",),
+    companions=(
+        "GENEVA.CNF", "GEM.CNF", "GNVA_TOS.PRG", "GNVA_TOS.RSC", "TERMCAP",
+        "TASKMAN.RSC",
+    ),
+    # The task manager is how a person switches between the programs Geneva
+    # is running, so it is not optional, and being an accessory it belongs in
+    # the root rather than beside the program.
+    accessories=("TASKMAN.ACC", "GNVADESK.ACC"),
+    folder="GENEVA",
+    folder_names=("GENEVA",),
+    machines=frozenset({"st", "megast", "ste", "megaste", "tt030"}),
+    resident_bytes=190 * KIB,
+    memory_bytes=2 * MIB,
+    free=True,
+    sources=(
+        Source("Gribnif Software", "https://gribnif.github.io/files/Geneva-1.08.zip"),
+    ),
+    licence=(
+        "Freeware. Gribnif released it under Apache 2.0 with the Commons "
+        "Clause, which allows use and redistribution but not sale."
+    ),
+    note="Cooperative multitasking under the desktop: a dropdown menu bar, "
+         "and several programs running at once. It was written to pair with "
+         "NeoDesk and is the reason that pairing is worth having.",
+)
+
+DESKTOPS_BY_KEY[GENEVA.key] = GENEVA
+
 #: The choice that installs nothing, which is what a drive gets by default.
 NO_DESKTOP = "desktop-none"
 
 
-def describe_desktops() -> list[dict]:
+def describe_desktops(include_companions: bool = True) -> list[dict]:
     """The desktop choices, for an interface that has to explain them."""
+    listed = (*DESKTOPS, GENEVA) if include_companions else DESKTOPS
     return [
         {
             "id": desktop.key,
@@ -229,8 +299,11 @@ def describe_desktops() -> list[dict]:
             "free": desktop.free,
             "sources": [{"label": s.label, "url": s.url} for s in desktop.sources],
             "note": desktop.note,
+            # A companion runs under a desktop rather than being one, so an
+            # interface can offer it alongside instead of instead of.
+            "companion": desktop.key not in {item.key for item in DESKTOPS},
         }
-        for desktop in DESKTOPS
+        for desktop in listed
     ]
 
 
@@ -265,6 +338,10 @@ class DesktopDistribution:
     companions: tuple[tuple[str, bytes], ...] = ()
     #: Files that belong in ``AUTO``, by GEMDOS name.
     auto: tuple[tuple[str, bytes], ...] = ()
+    #: Desk accessories, for the root of the boot drive.
+    accessories: tuple[tuple[str, bytes], ...] = ()
+    #: Control panel modules, for the CPX folder.
+    control_panel: tuple[tuple[str, bytes], ...] = ()
     #: The release, read from the folder the distribution was found in.
     version: str = ""
 
@@ -272,9 +349,66 @@ class DesktopDistribution:
 def _wanted_names(desktop: Desktop) -> dict[str, str]:
     """Every filename this desktop needs, folded for case-blind matching."""
     wanted = {}
-    for name in (*desktop.files, *desktop.companions, *desktop.auto_files):
+    for name in (
+        *desktop.files,
+        *desktop.companions,
+        *desktop.auto_files,
+        *desktop.accessories,
+        *desktop.control_panel,
+    ):
         wanted[name.casefold()] = name
     return wanted
+
+
+#: The disk images a distribution arrives on. Atari software of this period is
+#: published as a floppy, and the two that can be downloaded from their authors
+#: today are still a ZIP with the original floppies inside it.
+DISK_SUFFIXES = (".st", ".msa", ".dim")
+
+#: How deep a distribution floppy is walked looking for the program. Two is
+#: enough for every one of these: a folder per product, and a folder inside it.
+MAX_DISK_DEPTH = 3
+
+
+def _volume_files(image: Path, wanted: dict[str, str]) -> dict[str, bytes]:
+    """Read the wanted files off a GEMDOS floppy, wherever they sit on it.
+
+    A distribution floppy puts its program in a folder named after the product,
+    sometimes with another folder inside. The files are matched on their own
+    names rather than on a path, because the path differs between products and
+    the name does not.
+    """
+    try:
+        from atarinut.filesystem import reader_for
+        from atarinut.filesystem.gemdos import GEMDOSVolume
+
+        volume = GEMDOSVolume(reader_for(image))
+    except Exception:
+        return {}
+    held: dict[str, bytes] = {}
+
+    def walk(folder: str, depth: int) -> None:
+        if depth > MAX_DISK_DEPTH:
+            return
+        try:
+            entries = list(volume.iter_entries(folder))
+        except Exception:
+            return
+        for entry in entries:
+            path = f"{folder}\\{entry.name}" if folder else entry.name
+            if entry.is_dir:
+                walk(path, depth + 1)
+                continue
+            proper = wanted.get(entry.name.casefold())
+            if proper is None or proper in held:
+                continue
+            try:
+                held[proper] = volume.read_bytes(path)
+            except Exception:
+                continue
+
+    walk("", 0)
+    return held
 
 
 def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None:
@@ -289,14 +423,29 @@ def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None
     try:
         with zipfile.ZipFile(archive) as bundle:
             held: dict[str, bytes] = {}
+            disks = []
             for entry in bundle.infolist():
                 if entry.is_dir():
                     continue
                 leaf = entry.filename.replace("\\", "/").rsplit("/", 1)[-1]
+                if Path(leaf).suffix.casefold() in DISK_SUFFIXES:
+                    disks.append(entry)
+                    continue
                 proper = wanted.get(leaf.casefold())
                 if proper is None or proper in held:
                     continue
                 held[proper] = bundle.read(entry)
+            # Both desktops that can be downloaded from their own authors are
+            # a ZIP with the original distribution floppies inside it, so the
+            # program is on a disk rather than loose in the archive.
+            for entry in disks:
+                if all(name in held for name in wanted.values()):
+                    break
+                with tempfile.TemporaryDirectory(prefix="aff-distribution-") as folder:
+                    image = Path(folder) / Path(entry.filename).name
+                    image.write_bytes(bundle.read(entry))
+                    for name, payload in _volume_files(image, wanted).items():
+                        held.setdefault(name, payload)
     except (OSError, zipfile.BadZipFile, RuntimeError):
         return None
     program = next((name for name in desktop.files if name in held), None)
@@ -311,8 +460,49 @@ def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None
             (name, held[name]) for name in desktop.companions if name in held
         ),
         auto=tuple((name, held[name]) for name in desktop.auto_files if name in held),
+        accessories=tuple(
+            (name, held[name]) for name in desktop.accessories if name in held
+        ),
+        control_panel=tuple(
+            (name, held[name]) for name in desktop.control_panel if name in held
+        ),
         version=_version_from(archive),
     )
+
+
+def _from_disk(desktop: Desktop, image: Path) -> DesktopDistribution | None:
+    """Read a distribution off one floppy image."""
+    held = _volume_files(image, _wanted_names(desktop))
+    program = next((name for name in desktop.files if name in held), None)
+    if program is None:
+        return None
+    return DesktopDistribution(
+        desktop=desktop,
+        name=program,
+        payload=held[program],
+        source=image,
+        companions=tuple(
+            (name, held[name]) for name in desktop.companions if name in held
+        ),
+        auto=tuple((name, held[name]) for name in desktop.auto_files if name in held),
+        accessories=tuple(
+            (name, held[name]) for name in desktop.accessories if name in held
+        ),
+        control_panel=tuple(
+            (name, held[name]) for name in desktop.control_panel if name in held
+        ),
+        version=_version_from(image),
+    )
+
+
+def _from_file(desktop: Desktop, path: Path) -> DesktopDistribution | None:
+    """Read a distribution out of whatever single file it arrived as."""
+    suffix = path.suffix.casefold()
+    if suffix == ".zip":
+        return _from_archive(desktop, path)
+    if suffix in DISK_SUFFIXES:
+        return _from_disk(desktop, path)
+    return None
 
 
 def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | None:
@@ -328,8 +518,8 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
     """
     for directory in (directories if directories is not None else desktop_directories()):
         root = Path(directory)
-        if root.is_file() and root.suffix.casefold() == ".zip":
-            found = _from_archive(desktop, root)
+        if root.is_file():
+            found = _from_file(desktop, root)
             if found is not None:
                 return found
             continue
@@ -347,6 +537,16 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
                 beside = _find(Path(directory), extra)
                 if beside is not None:
                     auto.append((extra, beside.read_bytes()))
+            accessories = []
+            for extra in desktop.accessories:
+                beside = _find(Path(directory), extra)
+                if beside is not None:
+                    accessories.append((extra, beside.read_bytes()))
+            control_panel = []
+            for extra in desktop.control_panel:
+                beside = _find(Path(directory), extra)
+                if beside is not None:
+                    control_panel.append((extra, beside.read_bytes()))
             return DesktopDistribution(
                 desktop=desktop,
                 name=name,
@@ -354,6 +554,8 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
                 source=found,
                 companions=tuple(companions),
                 auto=tuple(auto),
+                accessories=tuple(accessories),
+                control_panel=tuple(control_panel),
                 version=_version_from(found),
             )
         # Nothing unpacked, so try the archives sitting in the folder. This is
@@ -361,14 +563,15 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
         # went to.
         if root.is_dir():
             try:
-                archives = sorted(
+                bundles = sorted(
                     entry for entry in root.iterdir()
-                    if entry.is_file() and entry.suffix.casefold() == ".zip"
+                    if entry.is_file()
+                    and entry.suffix.casefold() in (".zip", *DISK_SUFFIXES)
                 )
             except OSError:
-                archives = []
-            for archive in archives:
-                found = _from_archive(desktop, archive)
+                bundles = []
+            for bundle in bundles:
+                found = _from_file(desktop, bundle)
                 if found is not None:
                     return found
     return None
@@ -511,7 +714,7 @@ class DesktopReplacementMixin:
             "version": "",
             "source": "",
         }]
-        for desktop in DESKTOPS:
+        for desktop in (*DESKTOPS, GENEVA):
             distribution = find_desktop(desktop, directories)
             here = distribution is not None
             found.append({
@@ -525,6 +728,34 @@ class DesktopReplacementMixin:
                 "source": str(distribution.source) if distribution else "",
             })
         return found
+
+    #: How many desk accessories TOS loads from the root of the boot drive.
+    #: The seventh and anything after it are ignored, silently, which is a
+    #: thing worth being told about rather than discovering on the machine.
+    MAX_ACCESSORIES = 6
+
+    def _accessory_warnings(self, session: ImageSession) -> list[str]:
+        """Say so when the root now holds more accessories than TOS will load."""
+        try:
+            entries = self.list_directory(session, "").get("entries", [])
+        except DiskError:
+            return []
+        accessories = [
+            str(entry.get("name") or "")
+            for entry in entries
+            if entry.get("type") != "dir"
+            and str(entry.get("name") or "").upper().endswith(".ACC")
+        ]
+        if len(accessories) <= self.MAX_ACCESSORIES:
+            return []
+        ignored = sorted(accessories)[self.MAX_ACCESSORIES:]
+        return [
+            f"This volume now has {len(accessories)} desk accessories in its "
+            f"root and TOS loads only the first {self.MAX_ACCESSORIES}. "
+            f"{', '.join(ignored)} will not be loaded. Rename the ones you "
+            "want to something earlier in the alphabet, or move the rest out "
+            "of the root until they are wanted."
+        ]
 
     def install_desktop_replacement(
         self,
@@ -578,10 +809,43 @@ class DesktopReplacementMixin:
             path = atari_paths.join(folder, name)
             volume_copy.write_file(self, session, path, payload)
             written.append(path)
+        # AUTO programs run before GEM appears, in the order the directory
+        # holds them, and that order is often the difference between a machine
+        # that starts and one that does not. A program already there is left
+        # exactly as it is, so a new one is added after it rather than taking
+        # its place in the sequence.
+        kept: list[str] = []
         for name, payload in distribution.auto:
             if not volume_copy.directory_exists(self, session, "AUTO"):
                 self.make_directory(session, "AUTO")
             path = atari_paths.join("AUTO", name)
+            if volume_copy.entry_exists(self, session, path):
+                kept.append(path)
+                continue
+            volume_copy.write_file(self, session, path, payload)
+            written.append(path)
+
+        # An accessory is loaded from the root of the boot drive and nowhere
+        # else, so it cannot go in the program's folder however tidy that
+        # would be. TOS loads only the first six it finds, which is why one
+        # already installed is never replaced by this.
+        for name, payload in distribution.accessories:
+            if volume_copy.entry_exists(self, session, name):
+                kept.append(name)
+                continue
+            volume_copy.write_file(self, session, name, payload)
+            written.append(name)
+
+        # Control panel modules belong in the folder XControl's own CPXPATH
+        # names. CPX is the conventional one, and is what is used when the
+        # volume has no XCONTROL.INF saying otherwise.
+        for name, payload in distribution.control_panel:
+            if not volume_copy.directory_exists(self, session, CPX_FOLDER):
+                self.make_directory(session, CPX_FOLDER)
+            path = atari_paths.join(CPX_FOLDER, name)
+            if volume_copy.entry_exists(self, session, path):
+                kept.append(path)
+                continue
             volume_copy.write_file(self, session, path, payload)
             written.append(path)
 
@@ -616,10 +880,14 @@ class DesktopReplacementMixin:
             "folder": folder,
             "program": program,
             "files": written,
+            # What was already on the drive and therefore left alone. An
+            # operator who has tuned an AUTO folder or an accessory wants to
+            # know it survived, and wants to know it was not installed.
+            "kept": kept,
             "desktopFile": name,
             "records": added,
             "applications": installed_applications(merged),
-            "warnings": [
+            "warnings": self._accessory_warnings(session) + [
                 f"{desktop.label} is installed and on the desktop, but the "
                 "built-in TOS desktop still starts first. Making a "
                 "replacement start in its place is arranged differently by "
