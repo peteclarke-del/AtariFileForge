@@ -155,62 +155,59 @@ window.AtariUI = (() => {
   //  because a column taller than the window hides its own beginning.
   const MAX_TOASTS = 6;
 
-  function dismissAllErrors(region) {
-    region.querySelectorAll(".toast.error, .toast-dismiss-all")
-      .forEach(node => node.remove());
+  //  Every message says how serious it is, in its colour as well as its
+  //  words: an error is something that failed, a warning is something to
+  //  act on or check, and anything else is information. `true` still means
+  //  an error, which is how most callers have always asked for one.
+  const TOAST_LEVELS = new Set(["error", "warning", "info"]);
+
+  function toastLevel(level) {
+    if (level === true) return "error";
+    return TOAST_LEVELS.has(level) ? level : "info";
   }
 
-  //  An error waits to be read and dismissed. It is the one kind of message
-  //  that carries something the operator has to act on, and a message that
-  //  removes itself after a few seconds is one they may never have seen:
-  //  several arriving together push each other along faster than anybody
-  //  reads. Anything else still goes on its own.
-  function toast(message, error = false) {
+  //  The one region every message goes into. A modal dialog sits in the
+  //  browser's top layer, above any z-index and behind a blurred backdrop, so
+  //  a message left in the page while one is open is under the blur. The
+  //  region therefore lives inside the open dialog and comes back out when
+  //  it closes, carrying whatever is still showing: an error raised just
+  //  before a dialog opened stays readable, and one raised inside a dialog
+  //  outlives it. It is fixed to the window, not to the dialog's scrolling
+  //  content, so it stays in the same corner wherever it is.
+  const toastRegion = document.querySelector("#toasts");
+
+  function placeToasts() {
+    const host = modal.open ? modal : document.body;
+    if (toastRegion.parentElement !== host) host.append(toastRegion);
+  }
+
+  //  An error or a warning waits to be read and dismissed, each with its own
+  //  dismiss: it carries something the operator has to act on, and a message
+  //  that removes itself after a few seconds is one they may never have
+  //  seen. Information still goes on its own.
+  function toast(message, level = "info") {
+    const kind = toastLevel(level);
     const item = document.createElement("div");
-    item.className = `toast${error ? " error" : ""}`;
+    item.className = `toast ${kind}`;
+    if (kind === "error") item.setAttribute("role", "alert");
     const text = document.createElement("span");
     text.textContent = message;
     item.append(text);
-    if (error) {
+    placeToasts();
+    toastRegion.append(item);
+    if (kind === "info") {
+      setTimeout(() => item.remove(), 3500);
+    } else {
       const dismiss = document.createElement("button");
       dismiss.type = "button";
       dismiss.className = "toast-dismiss";
       dismiss.textContent = "×";
-      dismiss.setAttribute("aria-label", "Dismiss this message");
+      dismiss.setAttribute("aria-label", `Dismiss this ${kind}`);
       dismiss.onclick = () => item.remove();
       item.append(dismiss);
     }
-    let region = document.querySelector("#toasts");
-    if (modal.open) {
-      const form = modal.querySelector(":scope > form");
-      region = form.querySelector(":scope > .modal-toast-region");
-      if (!region) {
-        region = document.createElement("div");
-        region.className = "toast-region modal-toast-region";
-        region.setAttribute("role", "status");
-        region.setAttribute("aria-live", error ? "assertive" : "polite");
-        form.append(region);
-      }
-      if (error) region.setAttribute("aria-live", "assertive");
-    }
-    region.append(item);
-    if (!error) {
-      setTimeout(() => item.remove(), 3500);
-      return;
-    }
-    //  A second error means there may be more, so offer to clear them
-    //  together rather than one at a time.
-    const errors = [...region.querySelectorAll(".toast.error")];
-    if (errors.length > 1 && !region.querySelector(".toast-dismiss-all")) {
-      const all = document.createElement("button");
-      all.type = "button";
-      all.className = "toast-dismiss-all";
-      all.textContent = "Dismiss all";
-      all.onclick = () => dismissAllErrors(region);
-      region.append(all);
-    }
-    while (region.querySelectorAll(".toast").length > MAX_TOASTS) {
-      region.querySelector(".toast").remove();
+    while (toastRegion.querySelectorAll(".toast").length > MAX_TOASTS) {
+      toastRegion.querySelector(".toast").remove();
     }
   }
 
@@ -331,7 +328,7 @@ window.AtariUI = (() => {
     setModalAbort(null);
     modalReturnFocus?.focus();
     modalReturnFocus = null;
-    modal.querySelector(".modal-toast-region")?.remove();
+    placeToasts();
   });
   modal.addEventListener("keydown", event => trapFocus(modal, event));
 
@@ -392,6 +389,7 @@ window.AtariUI = (() => {
       });
     };
     if (!replacing) modal.showModal();
+    placeToasts();
     setTimeout(() => {
       const preferred = modalContent.querySelector('[autofocus], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])')
         || modal.querySelector(".modal-close");

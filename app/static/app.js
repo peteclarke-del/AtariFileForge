@@ -593,7 +593,7 @@ async function showPhysicalFloppyDialog(index) {
   const pane = panes[index];
   if (!pane?.image) return;
   if (!hasHostCapability("physical-floppy-write")) {
-    return toast("Physical floppy access requires the native Linux host.", true);
+    return toast("Physical floppy access requires the native Linux host.", "warning");
   }
   const query = new URLSearchParams();
   showModal('<div class="analysis-loading compact"><span class="modal-progress-icon" aria-hidden="true">↻</span><h2>Checking Greaseweazle</h2><p>Finding the device and validating the selected image…</p></div>');
@@ -1416,13 +1416,13 @@ function wireDropZone(host, index) {
     event.preventDefault();
     host.classList.remove("drag-target");
     if (panes[index].loading || panes[index].actionPending) {
-      return toast("Wait for the current operation to finish.", true);
+      return toast("Wait for the current operation to finish.", "warning");
     }
     const openDisk = event.dataTransfer.getData("application/x-atari-disk");
     const diskSource = openDisk ? JSON.parse(openDisk) : null;
     if (diskSource && paneHoldsVolume(panes[index])) {
       if (diskSource.image === panes[index].image.id) {
-        return toast("Choose a different volume as the destination.", true);
+        return toast("Choose a different volume as the destination.", "warning");
       }
       return copyDiskImageToVolume(index, diskSource);
     }
@@ -1651,7 +1651,7 @@ async function reloadImageAfterRestore(image) {
 function undoLastChange(index) {
   const pane = panes[index];
   if (!pane.image?.checkpoints?.canUndo) {
-    return toast("There is no change to undo yet.", true);
+    return toast("There is no change to undo yet.", "warning");
   }
   // Renaming an image and applying a hardware profile take no undo point, so
   // the change Undo reverses may not be the last thing done. Naming it keeps
@@ -1886,7 +1886,7 @@ async function openFiles(index, files, targetHardware = null) {
   if (romFiles.length > 1) {
     const combinedSize = romFiles.reduce((total, file) => total + file.size, 0);
     if (combinedSize > 64 * 1024 * 1024) {
-      toast("That ROM set is larger than the 64 MiB workbench safety limit.", true);
+      toast("That ROM set is larger than the 64 MiB workbench safety limit.", "warning");
       return;
     }
     const equalSize = romFiles.every(file => file.size === romFiles[0].size);
@@ -2157,7 +2157,7 @@ async function closePane(index) {
   const pane = panes[index];
   if (!pane) return;
   if (panes.some(item => item.loading || item.actionPending)) {
-    return toast("Wait for current pane operations to finish before closing a pane.", true);
+    return toast("Wait for current pane operations to finish before closing a pane.", "warning");
   }
   if (!pane.image?.dirty) {
     removePane(index);
@@ -2769,7 +2769,7 @@ async function addSelectedHostFolder(index, records) {
   const relevant = reviewedRecords.filter(item => !ignoredFolderFile(item.relativePath));
   const ignoredCount = records.length - relevant.length;
   if (!relevant.length) {
-    return toast("That folder contains no importable files.", true);
+    return toast("That folder contains no importable files.", "warning");
   }
   if (!await reviewHostImport(
     index,
@@ -2830,7 +2830,7 @@ async function addSelectedHostFiles(index, files) {
   const pane = panes[index];
   if (pane.image?.kind === "rom") return addRomHostFiles(index, files);
   const preparedFiles = await prepareHostFileMetadata(files);
-  if (!preparedFiles.length) return toast("The selection contained metadata sidecars but no data files.", true);
+  if (!preparedFiles.length) return toast("The selection contained metadata sidecars but no data files.", "warning");
   // An importable floppy container has its own installation planner. It must
   // inspect the container before it can describe the real operation: extract
   // its contents, choose a destination and optional child folder, or retain
@@ -2884,7 +2884,7 @@ async function addRomHostFiles(index, files, firstBank = null) {
       continue;
     }
     if (file.size % bankSize) {
-      toast(`${file.name} is ${humanSize(file.size)} and is not a whole number of ${humanSize(bankSize)} banks. Change the ROM layout or split it explicitly.`, true);
+      toast(`${file.name} is ${humanSize(file.size)} and is not a whole number of ${humanSize(bankSize)} banks. Change the ROM layout or split it explicitly.`, "warning");
       return false;
     }
     const bytes = await file.arrayBuffer();
@@ -2896,7 +2896,7 @@ async function addRomHostFiles(index, files, firstBank = null) {
       });
     }
   }
-  if (!expanded.length) return toast("No ROM bytes were selected.", true);
+  if (!expanded.length) return toast("No ROM bytes were selected.", "warning");
   return showModal(`
     <h2>Add ${expanded.length} ROM bank${expanded.length === 1 ? "" : "s"}</h2>
     <p>Each input is fitted to a ${humanSize(bankSize)} bank and padded with &${Number(pane.image.rom?.eraseByte ?? 255).toString(16).toUpperCase().padStart(2, "0")}. Larger, exact-multiple images are split in file order.</p>
@@ -3112,7 +3112,7 @@ async function prepareHostFileMetadata(files) {
 
 async function importHostFile(index, file, forceRaw = false, batch = null) {
   const pane = panes[index];
-  if (!pane.image || (pane.image.kind === "hd" && pane.partition === null)) return toast("Open a volume first.", true);
+  if (!pane.image || (pane.image.kind === "hd" && pane.partition === null)) return toast("Open a volume first.", "warning");
   if (!forceRaw && paneHoldsVolume(pane) && formats.isImportableImage(file.name)) {
     return promptImageExtraction(index, file, batch);
   }
@@ -3728,9 +3728,9 @@ async function showPrepareDrive(index) {
       toast(`${installed.desktop.label} installed into ${installed.desktop.folder} on ${target}.`);
     }
     // The same caution comes back from each of them, so say it once.
-    [...new Set(warnings)].forEach(warning => toast(warning, true));
+    [...new Set(warnings)].forEach(warning => toast(warning, "warning"));
     await loadDirectory(index);
-    (result.warnings || []).forEach(warning => toast(warning, true));
+    (result.warnings || []).forEach(warning => toast(warning, "warning"));
     toast(result.driver.installed
       ? `${result.label} installed on ${target}.`
       : `${target} prepared to start driverless under EmuTOS.`);
@@ -3914,7 +3914,7 @@ function paneAcceptsInstall(pane) {
 
 async function performInstall(index, sourceImageId, sourceName, plan) {
   if (!INSTALL_SERVICE_AVAILABLE) {
-    toast("Installing a title onto a drive is not yet available in this build.", true);
+    toast("Installing a title onto a drive is not yet available in this build.", "warning");
     return null;
   }
   const pane = panes[index];
@@ -4026,7 +4026,7 @@ function hasObviousLaunchCandidate(metadata) {
 function setWorkspaceClipboard(index, mode) {
   const pane = panes[index];
   const items = clipboardItemsForPane(index);
-  if (!items.length) return toast("Select one or more files or folders first.", true);
+  if (!items.length) return toast("Select one or more files or folders first.", "warning");
   clearWorkspaceClipboard("", false);
   workspaceClipboard = {
     mode,
@@ -4093,7 +4093,7 @@ async function pasteWorkspaceClipboard(index) {
 
 async function transferFiles(targetIndex, sources, targetPath = null) {
   const target = panes[targetIndex];
-  if (!target.image || (target.image.kind === "hd" && target.partition === null)) return toast("Open a destination volume first.", true);
+  if (!target.image || (target.image.kind === "hd" && target.partition === null)) return toast("Open a destination volume first.", "warning");
   if (!Array.isArray(sources) || !sources.length) return;
   const destination = targetPath || target.path;
   const movingWithinRom = target.image.kind === "rom"
@@ -4124,7 +4124,7 @@ async function transferFiles(targetIndex, sources, targetPath = null) {
     return performVolumeMoves(targetIndex, sources, destination);
   }
   if (sources.some(source => source.pane === targetIndex) && target.image.kind !== "rom") {
-    return toast("Files can only be moved within the same GEMDOS volume.", true);
+    return toast("Files can only be moved within the same GEMDOS volume.", "warning");
   }
   const transfers = sources.map((source, index) => ({
     source,
@@ -4357,7 +4357,7 @@ async function performTransfers(targetIndex, transfers, destination = null) {
 async function setSelectedAccess(index, writable) {
   const pane = panes[index];
   const entries = selectedEntries(index);
-  if (!entries.length) return toast("Select one or more files or folders.", true);
+  if (!entries.length) return toast("Select one or more files or folders.", "warning");
   const paths = entries.map(entry => entryImagePath(pane, entry));
   const accessLabel = writable ? "writable" : "read-only";
   try {
@@ -4464,7 +4464,7 @@ function exportImageAs(index) {
   const pane = panes[index];
   const formats = pane.image.exportFormats || [];
   if (!formats.length) {
-    toast("This image has no compatible export formats.", true);
+    toast("This image has no compatible export formats.", "warning");
     return;
   }
   showModal(`
@@ -4742,7 +4742,7 @@ async function showOnlineLibrary(index) {
     <div class="online-compatibility-review" aria-live="polite"></div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary online-install" type="submit" disabled>Install selected</button></div>`, async form => {
       const itemIds = form.getAll("catalogItem");
-      if (!itemIds.length) { toast("Select one or more downloadable items first.", true); return false; }
+      if (!itemIds.length) { toast("Select one or more downloadable items first.", "warning"); return false; }
       const signature = JSON.stringify({
         itemIds,
         createDirectory: form.has("createDirectory"),
@@ -5509,7 +5509,7 @@ function showDriveSoftwareAudit(index) {
   const auditable = paneAcceptsInstall(pane)
     || (pane?.image?.kind === "gemdos" && Boolean(pane.image.hardDisk));
   if (!auditable) {
-    toast("Installed software auditing is available only for a volume on a hard drive.", true);
+    toast("Installed software auditing is available only for a volume on a hard drive.", "warning");
     return;
   }
   const driveLetter = pane.partitionName || pane.image.driveLetter || "";
@@ -5543,7 +5543,7 @@ function renderDriveSoftwareAudit(index, report) {
     <div class="modal-actions"><button class="button ghost" value="cancel">Close</button><button class="button primary" type="submit" ${report.repairable ? "" : "disabled"}>Repair the folders ticked</button></div>
   </div>`, async form => {
     const directories = form.getAll("repair").map(String);
-    if (!directories.length) return toast("Tick at least one folder to repair.", true) || false;
+    if (!directories.length) return toast("Tick at least one folder to repair.", "warning") || false;
     const result = await trackedPaneOperation(index, "Repairing installed drive software…", operationId =>
       api(`/api/images/${pane.image.id}/drive-software/repair`, {
         method: "POST",
@@ -5566,7 +5566,7 @@ async function showSelectionPreflight(index) {
     datestamp: entry.datestamp || "",
     filetype: entry.filetype || "",
   }));
-  if (!items.length) return toast("Select one or more items to dry-run.", true);
+  if (!items.length) return toast("Select one or more items to dry-run.", "warning");
   analysisLoading("Dry-run preflight", `Reviewing ${items.length} selected item${items.length === 1 ? "" : "s"}…`);
   try {
     const report = await api(`/api/images/${pane.image.id}/preflight`, {
@@ -5698,7 +5698,7 @@ function selectedInspectable(index) {
 
 async function showFileInspector(index) {
   const selected = selectedInspectable(index);
-  if (!selected) return toast("Select one file to inspect.", true);
+  if (!selected) return toast("Select one file to inspect.", "warning");
   return openFileEditor(index, selected.entry.name, null, selected.path);
 }
 
@@ -6606,7 +6606,7 @@ async function launchPaneEmulator(index, debug = false) {
 
 async function runFileInConfiguredEmulator(pane, entry, path, target = null, isBasic = false, source = "") {
   if (target) {
-    toast("Extract this archive member before handing it to an emulator.", true);
+    toast("Extract this archive member before handing it to an emulator.", "warning");
     return null;
   }
   try {
@@ -6873,21 +6873,21 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
     else if (action === "editor-history") intelligence?.showHistory();
     else if (action === "compare-saved") intelligence?.compareWith(editor.dataset.savedValue || "");
     else if (action === "project-notes") {
-      if (target) return toast("Archive-member project notes become available after extracting the member into an image.", true);
+      if (target) return toast("Archive-member project notes become available after extracting the member into an image.", "warning");
       const current = await ensureProject();
       const notes = await promptValue("Project notes", "Notes", { value: current.notes || "", message: "Notes are stored in the private recoverable session, not in the file bytes.", confirmLabel: "Save notes", required: false, trim: false });
       if (notes != null) { current.notes = notes; project = await saveEditorProject(pane, path, current); toast("Project notes saved."); }
     }
     else if (action === "project-bookmark") {
-      if (target) return toast("Extract this archive member before adding project bookmarks.", true);
+      if (target) return toast("Extract this archive member before adding project bookmarks.", "warning");
       const current = await ensureProject();
       const offset = await sourceByteOffset();
-      if (offset == null) return toast("Save this new or renumbered BASIC line before bookmarking its byte offset.", true);
+      if (offset == null) return toast("Save this new or renumbered BASIC line before bookmarking its byte offset.", "warning");
       const name = await promptValue("Add a bookmark", "Bookmark name", { value: isBasic ? `BASIC line ${editor.value.slice(0, editor.selectionStart).split("\n").at(-1)?.match(/^\s*(\d+)/)?.[1] || "cursor"}` : `Offset ${offset}`, message: `The bookmark points at saved-file offset ${offset}.`, confirmLabel: "Add bookmark" });
       if (name) { current.bookmarks = [...(current.bookmarks || []), { offset, name, note: "" }]; project = await saveEditorProject(pane, path, current); toast("Bookmark saved."); }
     }
     else if (action === "project-manage") {
-      if (target) return toast("Extract this archive member before managing project metadata.", true);
+      if (target) return toast("Extract this archive member before managing project metadata.", "warning");
       const current = await ensureProject();
       const edited = await editorProjectManager(current);
       if (edited) { project = await saveEditorProject(pane, path, edited); toast("Editor project metadata saved."); }
@@ -6897,7 +6897,7 @@ function installSourceEditorControls(index, pane, entry, path, report, canEdit, 
       if (result) { project = result.project; intelligence?.showCustom("Emulator result", editorTestResultsMarkup(project)); }
     }
     else if (action === "debugger-workspace") {
-      if (target) return toast("Extract this archive member before starting a debugger.", true);
+      if (target) return toast("Extract this archive member before starting a debugger.", "warning");
       // A GEMDOS program is relocatable and records no address, so the
       // debugger starts at the beginning of the extracted bytes.
       await openDebuggerWorkspace(pane, entry, path, pane.image?.targetHardware === "tos" ? "68040" : "68000", "0x0", isBasic, editor.value);
@@ -7000,7 +7000,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
     if (!needle) return;
     const line = [...root.querySelectorAll(".disassembly-source-line")].find(item => item.textContent.toLocaleLowerCase().includes(needle.toLocaleLowerCase()));
     root.querySelectorAll(".disassembly-source-line.found").forEach(item => item.classList.remove("found"));
-    if (!line) return toast(`“${needle}” was not found.`, true);
+    if (!line) return toast(`“${needle}” was not found.`, "warning");
     line.classList.add("found");
     line.scrollIntoView({ block: "center" });
     line.focus();
@@ -7046,7 +7046,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
   };
   const inspectSelectedData = async () => {
     const range = selectedRange();
-    if (!range) return toast("Select one or more disassembly lines first.", true);
+    if (!range) return toast("Select one or more disassembly lines first.", "warning");
     const length = Math.min(4096, Math.max(1, range.end - range.start));
     const endpoint = target?.hexEndpoint || `/api/images/${pane.image.id}/file-hex`;
     const context = target?.context || Object.fromEntries(fileContextQuery(pane, path));
@@ -7063,7 +7063,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
     intelligence?.showCustom("Selected data inspector", `<div class="code-data-inspector"><p>File offsets ${range.start.toLocaleString()} to ${(range.start + values.length - 1).toLocaleString()} · ${values.length.toLocaleString()} bytes${length < range.end - range.start ? " · preview bounded to 4 KiB" : ""}</p><details open><summary>Text and byte view</summary><code>${esc(ascii)}</code><code>${values.map(value => value.toString(16).toUpperCase().padStart(2, "0")).join(" ")}</code></details><details><summary>16-bit words</summary><h4>Little endian</h4><code>${littleWords.join(" ")}</code><h4>Big endian</h4><code>${bigWords.join(" ")}</code></details><details><summary>1 bit-per-pixel preview</summary><div class="code-bitmap-preview" style="--bitmap-columns:64">${pixels.map(value => `<i class="${value ? "set" : ""}"></i>`).join("")}</div><small>64 pixels wide, most-significant bit first. Mark the range as bitmap in the project when this interpretation is correct.</small></details></div>`);
   };
   const persistProject = async (action, detail = "") => {
-    if (target) return toast("Extract this archive member before saving disassembly project data.", true);
+    if (target) return toast("Extract this archive member before saving disassembly project data.", "warning");
     project.history = [...(project.history || []), { time: new Date().toISOString(), action, detail }];
     project = await saveEditorProject(pane, path, project);
   };
@@ -7074,7 +7074,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
   };
   const markRegion = async kind => {
     const range = selectedRange();
-    if (!range) return toast("Select one or more disassembly lines first.", true);
+    if (!range) return toast("Select one or more disassembly lines first.", "warning");
     const name = await promptValue(`Name this ${kind} region`, "Region name", { value: `${kind}_${range.start.toString(16).toUpperCase()}`, message: `Covers file offsets ${range.start} to ${range.end}.`, confirmLabel: "Mark region", required: false });
     if (name == null) return;
     project.regions = [...(project.regions || []).filter(row => Number(row.end) <= range.start || Number(row.start) >= range.end), { start: range.start, end: range.end, kind, name: name || kind, width: 8 }];
@@ -7106,13 +7106,13 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
     } else if (action === "find") findSource();
     else if (action === "find-references") {
       const row = reportRow(selectedLines[0]);
-      if (!row) return toast("Select a disassembly line first.", true);
+      if (!row) return toast("Select a disassembly line first.", "warning");
       const matches = report.rows.filter(item => Number(item.target) === Number(row.address) || (item.references || []).map(Number).includes(Number(row.address)));
       intelligence?.showCustom(`References to &${Number(row.address).toString(16).toUpperCase()}`, matches.length ? `<div class="code-reference-results">${matches.map(item => `<button type="button" data-disassembly-offset="${Number(item.offset)}"><b>&amp;${Number(item.address).toString(16).toUpperCase()}</b><code>${esc(`${item.mnemonic} ${item.operand || ""}`)}</code></button>`).join("")}</div>` : '<p class="code-empty-message">No direct references were decoded in this range.</p>');
     }
     else if (action === "rename-symbol") {
       const row = reportRow(selectedLines[0]);
-      if (!row) return toast("Select a disassembly line first.", true);
+      if (!row) return toast("Select a disassembly line first.", "warning");
       const name = await promptValue("Rename this symbol", "Symbol name", { value: row.label || `loc_${Number(row.address).toString(16).toUpperCase()}`, message: `The label used for address &${Number(row.address).toString(16).toUpperCase()} throughout the disassembly.`, confirmLabel: "Rename symbol" });
       if (name) { project.symbols = { ...(project.symbols || {}), [String(Number(row.address))]: name }; await persistProject("Renamed symbol", `&${Number(row.address).toString(16).toUpperCase()} = ${name}`); await refreshProjectListing(); }
     }
@@ -7121,9 +7121,9 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
     else if (action === "inspect-data") await inspectSelectedData();
     else if (action === "cheat-candidates") await showEditorCheatCandidates(root, intelligence, pane, path, false, target);
     else if (action === "assemble") {
-      if (target) return toast("Extract this archive member before replacing it with assembler output.", true);
+      if (target) return toast("Extract this archive member before replacing it with assembler output.", "warning");
       const status = await api(`/api/images/${pane.image.id}/editor-assembler`);
-      if (!status.available) return toast(status.message, true);
+      if (!status.available) return toast(status.message, "warning");
       const values = await assemblySourceEditor(entry, report);
       if (!values) return;
       analysisLoading("Assembling and validating binary", entry.name);
@@ -7139,14 +7139,14 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
       } catch (error) { toast(error.message, true); modal.close(); }
     }
     else if (action === "debug") {
-      if (target) return toast("Extract this archive member before starting a debugger.", true);
+      if (target) return toast("Extract this archive member before starting a debugger.", "warning");
       const row = reportRow(selectedLines[0]);
       await openDebuggerWorkspace(pane, entry, path, report.architecture, `0x${Number(row?.address ?? report.origin).toString(16).toUpperCase()}`);
       project = await loadEditorProject(pane, path);
     }
     else if (action.startsWith("mark-")) await markRegion(action.slice(5));
     else if (action === "bookmark") {
-      const range = selectedRange(); if (!range) return toast("Select a disassembly line first.", true);
+      const range = selectedRange(); if (!range) return toast("Select a disassembly line first.", "warning");
       const name = await promptValue("Add a bookmark", "Bookmark name", { value: `Offset ${range.start}`, message: `The bookmark points at file offset ${range.start}.`, confirmLabel: "Add bookmark" });
       if (name) {
         const note = await promptValue("Bookmark note", "Note", { message: `An optional note kept with “${name}”.`, confirmLabel: "Add bookmark", required: false, trim: false });
@@ -7155,7 +7155,7 @@ async function renderDisassemblyEditor(index, entry, path, inspection, architect
       }
     }
     else if (action === "comment") {
-      const range = selectedRange(); if (!range) return toast("Select a disassembly line first.", true);
+      const range = selectedRange(); if (!range) return toast("Select a disassembly line first.", "warning");
       const key = String(range.start);
       const comment = await promptValue("Comment this line", "Comment", { value: project.comments?.[key] || "", message: `Kept against file offset ${range.start}. Leave it empty to remove the comment.`, confirmLabel: "Save comment", required: false, trim: false });
       if (comment == null) return;
@@ -7370,7 +7370,7 @@ async function openFileEditor(index, name, target = null, pathOverride = null, f
 
 async function showDependencyReport(index) {
   const selected = selectedInspectable(index);
-  if (!selected) return toast("Select a launcher file first.", true);
+  if (!selected) return toast("Select a launcher file first.", "warning");
   const { pane, path } = selected;
   analysisLoading("Checking loader dependencies", path);
   const query = new URLSearchParams({ path, ...(pane.partition != null ? { partition: pane.partition } : {}), ...(pane.side != null ? { side: pane.side } : {}) });
@@ -7467,7 +7467,7 @@ function retainCheatPatch(patch) {
 }
 
 async function showGuardedCheatPatch(root, pane, path, report, finding, target = null) {
-  if (!finding?.navigation || !Number.isInteger(Number(finding.navigation.offset))) return toast("Select a machine-code candidate with an exact file offset first.", true);
+  if (!finding?.navigation || !Number.isInteger(Number(finding.navigation.offset))) return toast("Select a machine-code candidate with an exact file offset first.", "warning");
   const context = new URLSearchParams(target?.context || Object.fromEntries(fileContextQuery(pane, path)));
   context.set("offset", String(finding.navigation.offset));
   context.set("length", "1");
@@ -7800,7 +7800,7 @@ async function indexPaneInCollection(index, entries, options = {}) {
 
 async function showCollectionCatalogue(initialIndex = null) {
   if (!collectionCatalogue.available) {
-    return toast("This browser does not provide IndexedDB, so its private collection cannot be opened.", true);
+    return toast("This browser does not provide IndexedDB, so its private collection cannot be opened.", "warning");
   }
   try {
     const entries = (await collectionCatalogue.list()).sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }));
@@ -7875,7 +7875,7 @@ async function showCollectionCatalogue(initialIndex = null) {
     modalContent.querySelector("[data-backup-collection]").onclick = async () => downloadJson(await collectionCatalogue.exportBackup(), `atari-file-forge-collection-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
     modalContent.querySelector("[data-import-collection]").onchange = async event => {
       const file = event.target.files[0];
-      if (!file || file.size > 128 * 1024 * 1024) return toast("Collection backups are limited to 128 MiB.", true);
+      if (!file || file.size > 128 * 1024 * 1024) return toast("Collection backups are limited to 128 MiB.", "warning");
       try {
         const document = JSON.parse(await file.text());
         const choice = await overlayDialog(`<section class="editor-choice-card overlay-dialog">
@@ -7931,7 +7931,7 @@ function showImageComparison(index) {
   const candidates = panes
     .map((other, otherIndex) => ({ pane: other, index: otherIndex }))
     .filter(item => item.index !== index && item.pane.image?.id && item.pane.image.id !== pane.image.id);
-  if (!candidates.length) return toast("Open another image before comparing.", true);
+  if (!candidates.length) return toast("Open another image before comparing.", "warning");
   showModal(`<div class="analysis-dialog wide-analysis image-comparison-dialog">
     <header><div><small>FILESYSTEM-AWARE IMAGE COMPARISON</small><h2>Compare ${esc(pane.image.name)}</h2></div></header>
     <label>Compare against<select name="otherImage">${candidates.map(item => `<option value="${esc(item.pane.image.id)}">Pane ${item.index + 1} · ${esc(item.pane.image.name)} · ${esc(paneFormat(item.pane.image))}</option>`).join("")}</select></label>
@@ -8098,7 +8098,7 @@ function showWorkspaceSearch() {
     .map((pane, index) => ({ pane, index }))
     .filter(item => item.pane.image)
     .filter((item, position, all) => all.findIndex(candidate => candidate.pane.image.id === item.pane.image.id) === position);
-  if (!searchable.length) return toast("Open an image before searching the workspace.", true);
+  if (!searchable.length) return toast("Open an image before searching the workspace.", "warning");
   showModal(`<div class="analysis-dialog wide-analysis workspace-search-dialog">
     <header><div><small>ALL OPEN IMAGES</small><h2>Search workspace</h2></div></header>
     <div class="workspace-search-controls"><input type="search" name="workspaceQuery" placeholder="Name, metadata, SHA-256 or readable text" required autocomplete="off" autofocus><button class="button primary" type="button" data-run-workspace-search>Search ${searchable.length} image${searchable.length === 1 ? "" : "s"}</button></div>
@@ -8163,7 +8163,7 @@ async function showJobsPanel() {
     list.querySelectorAll("[data-resume-job]").forEach(button => button.onclick = async () => {
       const job = data.operations.find(item => item.id === button.dataset.resumeJob);
       const details = job?.details;
-      if (!details?.request?.items) return toast("This operation has no resumable item plan.", true);
+      if (!details?.request?.items) return toast("This operation has no resumable item plan.", "warning");
       // A completed or skipped item is identified by the source it names, so
       // a resume re-submits only what has not been dealt with.
       const done = new Set([...(details.completed || []), ...(details.skipped || [])].map(item => String(item.source ?? "")));
@@ -8184,7 +8184,7 @@ async function showJobsPanel() {
 
 async function exportWorkflowRecipe(index) {
   const pane = panes[index];
-  if (!pane?.image) return toast("Choose an open image for the workflow recipe.", true);
+  if (!pane?.image) return toast("Choose an open image for the workflow recipe.", "warning");
   modal.close();
   showModal('<div class="analysis-loading"><span class="modal-progress-icon" aria-hidden="true">↻</span><h2>Building deterministic workflow</h2><p>Cataloguing the retained base and current image…</p></div>');
   modal.classList.add("busy");
@@ -8342,7 +8342,7 @@ function wireProfileWorkbench(profiles, initialIndex = 0, catalogue) {
         const checked = group ? group.querySelectorAll('[name="profileAddon"]:checked').length : 0;
         if (limit && checked > limit) {
           input.checked = false;
-          toast(`Choose no more than ${limit} option${limit === 1 ? "" : "s"} from this hardware group.`, true);
+          toast(`Choose no more than ${limit} option${limit === 1 ? "" : "s"} from this hardware group.`, "warning");
           updateAddonSummary();
           return;
         }
