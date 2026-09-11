@@ -71,7 +71,7 @@
             <div class="help-task">
               <h4>Install and launch</h4>
               <ol>
-                <li>Stable releases provide separate Debian 13 and Ubuntu 24.04 packages for AMD64, ARM64 and ARMv7. Install the matching <code>.deb</code> with APT, for example <code>sudo apt install ./atari-file-forge_0.0.0-1~deb13_amd64.deb</code>. APT installs the required Python 3, GTK 4, Libadwaita, WebKitGTK 6 and GObject packages.</li>
+                <li>Stable releases provide separate Debian 13 and Ubuntu 24.04 packages for AMD64, ARM64 and ARMv7. Install the matching <code>.deb</code> with APT, for example <code>sudo apt install ./atari-file-forge_0.1.0-1~deb13_amd64.deb</code>. APT installs the required Python 3, GTK 4, Libadwaita, WebKitGTK 6 and GObject packages.</li>
                 <li>For development from a project checkout, install those system packages and run <code>tools/install-linux-desktop.sh</code> instead.</li>
                 <li>Launch <strong>Atari File Forge</strong> from the application menu. The package command is <code>atari-file-forge</code>; a checkout uses <code>tools/atari-file-forge-desktop</code>.</li>
                 <li>Use the native folder button, <strong>File &rarr; Open image</strong> in a pane or <kbd>Ctrl</kbd>+<kbd>O</kbd> to select one or several images with the GTK chooser. You can also drag image files from the Linux file manager onto a pane. Native selection and drag and drop pass local paths to the private desktop service, so image bytes are not uploaded through the embedded browser.</li>
