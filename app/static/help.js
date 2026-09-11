@@ -152,13 +152,13 @@
       title: "Undo and checkpoints",
       body: `
             <h3>Undo changes and create named checkpoints</h3>
-            <p class="help-lead">Every image-changing operation starts with an automatic restore point. This includes file and folder edits, transfers, compaction and save-time image finalisation.</p>
+            <p class="help-lead">Every image-changing operation starts with an automatic restore point. This includes file and folder edits, transfers, compaction and save-time image finalisation. Renaming an image and applying a hardware profile change none of its contents, so they take no restore point and Undo leaves them as they are.</p>
             <div class="help-task">
               <h4>Undo the latest operation</h4>
               <ol>
                 <li>Open <strong>Edit</strong> in the affected pane.</li>
                 <li>Select <strong>Undo last change</strong>. The button is disabled until an automatic restore point exists.</li>
-                <li>Confirm the undo. The most recent automatic point is restored and consumed.</li>
+                <li>The confirmation names the operation that will be reversed. Confirm the undo. The most recent automatic point is restored and consumed.</li>
                 <li>All panes showing that same image return to its root, or to a drive's partition table, and refresh from the restored bytes.</li>
                 <li>Repeat to step backwards through earlier operations. Up to 20 recent automatic points are retained per image.</li>
               </ol>

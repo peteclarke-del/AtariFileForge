@@ -160,7 +160,10 @@ def create_images_blueprint(
         return jsonify(partitionTable=service.partition_table(service.get(image_id)))
 
     @blueprint.patch("/api/images/<image_id>")
-    @image_mutation("renaming the image")
+    # A rename changes what the image is called, not a byte of it, so it is not
+    # worth copying a whole hard drive into an undo point for. The service
+    # carries the new name back through the existing checkpoints instead.
+    @request_effect("external", "renaming an image without changing its contents")
     def rename_image(image_id):
         data = payload()
         session = service.get(image_id)

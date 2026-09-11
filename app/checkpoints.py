@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import json
 import re
 import shutil
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
 
 CHECKPOINT_NAME_LIMIT = 60
 AUTOMATIC_CHECKPOINT_LIMIT = 20
+# A copy in progress is written to continuously, so one untouched for this
+# long belongs to a process that stopped.
+ABANDONED_COPY_AGE = 10 * 60
 
 
 class CheckpointError(RuntimeError):
@@ -205,8 +209,11 @@ class CheckpointStore:
             for path, name in (state.get("sourceNames") or {}).items()
         }
         session.distribution_name = state.get("distributionName")
-        session.target_hardware = str(state.get("targetHardware") or "auto")
-        session.hardware_profile = dict(state.get("hardwareProfile") or {})
+        # The hardware profile and target hardware are left as they are. They
+        # describe the machine the whole workspace is set up for, and applying
+        # a profile takes no checkpoint of its own, so rewinding them here
+        # would quietly return one image to an older machine whenever an edit
+        # made before the profile changed was undone.
         session.warnings = [str(warning) for warning in state.get("warnings") or []]
         session.rom_bank_size = int(state.get("romBankSize") or session.rom_bank_size)
         session.rom_erase_byte = int(state.get("romEraseByte", session.rom_erase_byte)) & 0xFF
@@ -229,3 +236,58 @@ class CheckpointStore:
 
     def latest_automatic(self, session: ImageSession) -> dict | None:
         return next((item for item in self.list(session) if item["automatic"]), None)
+
+    def relabel(self, session: ImageSession, old_name: str, new_name: str) -> None:
+        """Carry a rename back through the checkpoints taken under the old name.
+
+        A rename changes no byte of the image, so it takes no checkpoint of its
+        own. Each checkpoint still records the name it was taken under, and
+        restoring one puts that name back, so without this, undoing an edit
+        made before the rename would undo the rename as well. A checkpoint
+        taken under a different name belongs to an operation that changed the
+        name itself, such as replacing the image, and keeps the name it had.
+        """
+        root = self._root(session)
+        if not root.is_dir():
+            return
+        for folder in root.iterdir():
+            metadata = self._read_metadata(folder) if folder.is_dir() else None
+            if metadata is None or (metadata.get("state") or {}).get("name") != old_name:
+                continue
+            metadata["state"]["name"] = new_name
+            target = folder / "checkpoint.json"
+            temporary = folder / "checkpoint.json.tmp"
+            temporary.write_text(json.dumps(metadata, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(target)
+
+    def discard_abandoned(self, session: ImageSession) -> None:
+        """Remove the half-written copies a stopped process left behind.
+
+        A checkpoint is copied into a hidden folder and renamed into place only
+        once it is complete, and a restore copies into a hidden file beside the
+        image. Closing the application part way through leaves that copy, as
+        large as the image, with nothing referring to it. A copy written to in
+        the last few minutes is left alone in case another process is still
+        writing it.
+        """
+        cutoff = time.time() - ABANDONED_COPY_AGE
+        root = self._root(session)
+        folders = [
+            folder for folder in (root.iterdir() if root.is_dir() else ())
+            if re.fullmatch(r"\.[0-9a-f]{32}\.tmp", folder.name) and folder.is_dir()
+        ]
+        restores = [
+            path for path in session.path.parent.glob(f".{glob.escape(session.path.name)}.restore-*")
+            if re.fullmatch(r"[0-9a-f]{32}", path.name.rsplit("-", 1)[-1]) and path.is_file()
+        ]
+        for path in [*folders, *restores]:
+            try:
+                paths = [path, *path.iterdir()] if path.is_dir() else [path]
+                if max(item.stat().st_mtime for item in paths) >= cutoff:
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError:
+                continue

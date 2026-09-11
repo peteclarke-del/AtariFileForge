@@ -1653,10 +1653,14 @@ function undoLastChange(index) {
   if (!pane.image?.checkpoints?.canUndo) {
     return toast("There is no change to undo yet.", true);
   }
+  // Renaming an image and applying a hardware profile take no undo point, so
+  // the change Undo reverses may not be the last thing done. Naming it keeps
+  // Undo from quietly reversing an earlier edit someone thought was safe.
+  const reason = pane.image.checkpoints.undoReason;
   showModal(`
     <h2>Undo the last change?</h2>
-    <p>The image will return to its state immediately before the most recent image-changing operation.</p>
-    <div class="help-note"><strong>Named checkpoints are kept.</strong> Undo consumes only the latest automatic restore point. Any other pane showing this image will refresh too.</div>
+    <p>The image will return to its state immediately before ${reason ? `<strong>${esc(reason)}</strong>` : "the most recent image-changing operation"}.</p>
+    <div class="help-note"><strong>Named checkpoints are kept.</strong> Undo consumes only the latest automatic restore point. Renaming the image and applying a hardware profile change none of its contents, so Undo leaves them as they are. Any other pane showing this image will refresh too.</div>
     <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="undo">Undo last change</button></div>`,
   async () => {
     const data = await api(`/api/images/${pane.image.id}/undo`, { method: "POST" });

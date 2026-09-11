@@ -137,6 +137,9 @@ class SessionDiskMixin:
                 self.refresh_gemdos_capabilities(session)
         except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
             raise DiskError("That image session no longer exists.") from exc
+        # Loading from disk is the first this process knows of the session, so
+        # a copy left half-written by an earlier run can be cleared here.
+        self.checkpoints.discard_abandoned(session)
         with self._lock:
             self.sessions[image_id] = session
         return session
@@ -242,10 +245,17 @@ class SessionDiskMixin:
             return
 
         with session.lock:
+            previous_name = session.name
             session.name = safe_name
             session.hfe_export_path = None
             session.scp_export_path = None
             self._persist_session(session)
+            try:
+                self.checkpoints.relabel(session, previous_name, safe_name)
+            except OSError:
+                # The rename itself has succeeded. A checkpoint left with the
+                # old name only means undoing it brings that name back.
+                pass
 
     def list_checkpoints(self, session: ImageSession) -> list[dict]:
         with session.lock:
@@ -454,5 +464,10 @@ class SessionDiskMixin:
                 "total": len(checkpoints),
                 "named": sum(not item["automatic"] for item in checkpoints),
                 "canUndo": any(item["automatic"] for item in checkpoints),
+                # Not every change takes an undo point, so the most recent
+                # thing done may not be what Undo reverses. This names it.
+                "undoReason": next(
+                    (item["reason"] for item in checkpoints if item["automatic"]), None
+                ),
             },
         }
