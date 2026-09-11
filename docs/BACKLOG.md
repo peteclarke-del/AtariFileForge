@@ -6,8 +6,7 @@ repeatable validation gate, this page records product work that is not
 finished.
 
 A checked item is implemented and covered by the normal project documentation
-and tests. An unchecked item remains in scope. The first release that can be
-called usable is `0.1.0`.
+and tests. An unchecked item remains in scope.
 
 ## 1. Filing system and media
 
