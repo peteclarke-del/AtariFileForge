@@ -25,7 +25,11 @@ itself, so it is one double-click away, and the result says so plainly.
 from __future__ import annotations
 
 import dataclasses
+import io
 import os
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 
 from . import atari_paths, volume_copy
@@ -64,6 +68,19 @@ MIB = 1024 * KIB
 
 
 @dataclasses.dataclass(frozen=True)
+class Source:
+    """Where a freely licensed desktop can be obtained from.
+
+    Only a desktop whose licence allows it carries one of these. The rest are
+    somebody's property, and how easy they are to find elsewhere does not
+    change what this application may go and fetch on an operator's behalf.
+    """
+
+    label: str
+    url: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Desktop:
     """One replacement desktop, and what installing it involves."""
 
@@ -90,6 +107,12 @@ class Desktop:
     #: The smallest machine it is worth putting on.
     memory_bytes: int = MIB
     licence: str = ""
+    #: Whether the licence allows this to be fetched at all. A desktop that is
+    #: somebody's property is installed from the operator's own copy or not at
+    #: all.
+    free: bool = False
+    #: Where a free one can be downloaded from, in the order to try.
+    sources: tuple[Source, ...] = ()
     note: str = ""
 
 
@@ -98,13 +121,25 @@ DESKTOPS: tuple[Desktop, ...] = (
         "desktop-teradesk",
         "TeraDesk",
         ("TERADESK.PRG", "DESKTOP.PRG"),
-        companions=("TERADESK.RSC", "DESKTOP.RSC", "TERADESK.INF"),
+        companions=(
+            "TERADESK.RSC", "DESKTOP.RSC", "TERADESK.INF",
+            # Its icons live in their own resources, and without them it
+            # starts with nothing to draw.
+            "ICONS.RSC", "CICONS.RSC",
+        ),
         folder="TERADESK",
         folder_names=("TERADESK", "TERA"),
         machines=EVERY_MACHINE,
         resident_bytes=64 * KIB,
         memory_bytes=512 * KIB,
-        licence="Free software, GPL. The source is published by the FreeMiNT project.",
+        licence="Free software, GPL 2, published by the FreeMiNT project.",
+        free=True,
+        sources=(
+            Source(
+                "FreeMiNT snapshots",
+                "https://atari.joska.no/snapshots/teradesk/teradesk-latest.zip",
+            ),
+        ),
         note="The smallest of these by some way, and the least fussy about "
              "which TOS it finds. It is the one to choose on a 1 MB machine, "
              "or wherever the memory is wanted for the application rather "
@@ -138,7 +173,11 @@ DESKTOPS: tuple[Desktop, ...] = (
         machines=EVERY_MACHINE,
         resident_bytes=120 * KIB,
         memory_bytes=2 * MIB,
-        licence="Free to use. Supply your own copy.",
+        licence=(
+            "The source was released under the MIT licence, but no binary "
+            "distribution with a stated licence was found to download from. "
+            "Supply your own copy."
+        ),
         note="Carries Mupfel, a Unix-like shell built into the desktop, so a "
              "command line and a GEM window are the same environment. The "
              "one to choose if you spend time at a prompt.",
@@ -147,13 +186,20 @@ DESKTOPS: tuple[Desktop, ...] = (
         "desktop-thing",
         "Thing",
         ("THING.APP", "THING.PRG"),
-        companions=("THING.RSC", "THING.INF"),
+        companions=(
+            "THING.RSC", "THING.INF",
+            "ICONS.RSC", "ICONS.INF", "MONOICON.RSC", "MEDICON.RSC",
+        ),
         folder="THING",
         folder_names=("THING",),
         machines=frozenset({"ste", "megaste", "tt030", "falcon030"}),
         resident_bytes=110 * KIB,
         memory_bytes=2 * MIB,
-        licence="Free to use. Supply your own copy.",
+        licence="Released as open source by its author, Arno Welzel.",
+        free=True,
+        sources=(
+            Source("arnowelzel.de", "https://arnowelzel.de/download/thin109d.zip"),
+        ),
         note="Written to replace Gemini and built for high-resolution mono. "
              "It understands long filenames, so it is the one that still "
              "makes sense if the machine later runs MagiC or MiNT.",
@@ -180,6 +226,8 @@ def describe_desktops() -> list[dict]:
             "residentBytes": desktop.resident_bytes,
             "memoryBytes": desktop.memory_bytes,
             "licence": desktop.licence,
+            "free": desktop.free,
+            "sources": [{"label": s.label, "url": s.url} for s in desktop.sources],
             "note": desktop.note,
         }
         for desktop in DESKTOPS
@@ -221,15 +269,70 @@ class DesktopDistribution:
     version: str = ""
 
 
+def _wanted_names(desktop: Desktop) -> dict[str, str]:
+    """Every filename this desktop needs, folded for case-blind matching."""
+    wanted = {}
+    for name in (*desktop.files, *desktop.companions, *desktop.auto_files):
+        wanted[name.casefold()] = name
+    return wanted
+
+
+def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None:
+    """Read a distribution straight out of a ZIP, without unpacking it first.
+
+    A desktop arrives as an archive, and an operator who has just downloaded
+    one should not have to unpack it before it can be used. The files are
+    matched on their own names wherever they sit inside it, because every one
+    of these archives puts them in a folder of its own.
+    """
+    wanted = _wanted_names(desktop)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            held: dict[str, bytes] = {}
+            for entry in bundle.infolist():
+                if entry.is_dir():
+                    continue
+                leaf = entry.filename.replace("\\", "/").rsplit("/", 1)[-1]
+                proper = wanted.get(leaf.casefold())
+                if proper is None or proper in held:
+                    continue
+                held[proper] = bundle.read(entry)
+    except (OSError, zipfile.BadZipFile, RuntimeError):
+        return None
+    program = next((name for name in desktop.files if name in held), None)
+    if program is None:
+        return None
+    return DesktopDistribution(
+        desktop=desktop,
+        name=program,
+        payload=held[program],
+        source=archive,
+        companions=tuple(
+            (name, held[name]) for name in desktop.companions if name in held
+        ),
+        auto=tuple((name, held[name]) for name in desktop.auto_files if name in held),
+        version=_version_from(archive),
+    )
+
+
 def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | None:
     """Locate the operator's copy of one desktop, or report that it is absent.
 
-    Nothing is fetched. A desktop that is not in one of the directories is
-    simply not available, and saying so is the whole answer: three of these
-    four are somebody's property and this application has no lawful way of
-    producing them.
+    Nothing is fetched here. A desktop that is in none of the directories is
+    simply not available, and saying so is the whole answer for the ones that
+    are somebody's property.
+
+    Both shapes a copy arrives in are read: unpacked into a folder, which is
+    how a distribution is normally kept, and still inside the ZIP it was
+    downloaded as, which is how it looks ten seconds after downloading it.
     """
     for directory in (directories if directories is not None else desktop_directories()):
+        root = Path(directory)
+        if root.is_file() and root.suffix.casefold() == ".zip":
+            found = _from_archive(desktop, root)
+            if found is not None:
+                return found
+            continue
         for name in desktop.files:
             found = _find(Path(directory), name)
             if found is None:
@@ -253,7 +356,79 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
                 auto=tuple(auto),
                 version=_version_from(found),
             )
+        # Nothing unpacked, so try the archives sitting in the folder. This is
+        # the case an operator lands in by choosing the folder their downloads
+        # went to.
+        if root.is_dir():
+            try:
+                archives = sorted(
+                    entry for entry in root.iterdir()
+                    if entry.is_file() and entry.suffix.casefold() == ".zip"
+                )
+            except OSError:
+                archives = []
+            for archive in archives:
+                found = _from_archive(desktop, archive)
+                if found is not None:
+                    return found
     return None
+
+
+#: How much of a download is accepted before it is refused. A replacement
+#: desktop is a few hundred kilobytes; anything past this is not one.
+MAX_DOWNLOAD_BYTES = 32 * MIB
+
+
+def fetch_desktop(desktop: Desktop, destination: Path | None = None, opener=None) -> Path:
+    """Download a freely licensed desktop into the operator's own directory.
+
+    Only a desktop whose licence allows it is fetched, and the check is on the
+    catalogue rather than on the request, so no caller can ask for one that is
+    somebody's property.
+
+    What arrives is written into the same directory an operator would have put
+    their own copy in, under a folder naming the release. That means a
+    download and a copy the operator supplied are afterwards indistinguishable,
+    and the next install finds it without going near the network.
+    """
+    if not desktop.free or not desktop.sources:
+        raise DiskError(
+            f"{desktop.label} cannot be downloaded. {desktop.licence}"
+        )
+    directory = Path(destination) if destination is not None else DESKTOP_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    request_opener = opener or urllib.request.urlopen
+    failures = []
+    for source in desktop.sources:
+        try:
+            with request_opener(source.url, timeout=120) as response:
+                payload = response.read(MAX_DOWNLOAD_BYTES + 1)
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            failures.append(f"{source.label}: {exc}")
+            continue
+        if len(payload) > MAX_DOWNLOAD_BYTES:
+            failures.append(f"{source.label}: larger than {MAX_DOWNLOAD_BYTES // MIB} MB")
+            continue
+        if not zipfile.is_zipfile(io.BytesIO(payload)):
+            failures.append(f"{source.label}: what arrived is not a ZIP archive")
+            continue
+        archive = directory / f"{desktop.folder or desktop.key}.zip"
+        archive.write_bytes(payload)
+        if _from_archive(desktop, archive) is None:
+            archive.unlink(missing_ok=True)
+            failures.append(
+                f"{source.label}: the archive holds no "
+                + " or ".join(desktop.files)
+            )
+            continue
+        return archive
+    raise DiskError(
+        f"{desktop.label} could not be downloaded. "
+        + "; ".join(failures)
+        + ". Put your own copy in "
+        + str(directory)
+        + " instead."
+    )
 
 
 def recommended_desktop(machine: str, memory_bytes: int = 0) -> dict:
@@ -317,27 +492,48 @@ def _memory_text(memory_bytes: int) -> str:
 class DesktopReplacementMixin:
     """Installing a replacement desktop from the operator's own copy."""
 
-    def available_desktops(self) -> list[dict]:
-        """Which replacement desktops the operator has supplied a copy of.
+    def available_desktops(self, directories=None) -> list[dict]:
+        """Which replacement desktops can actually be installed, and why.
 
         A choice that cannot be carried out should not be offered as though it
-        could. Three of these four are somebody's property, so the reason one
-        is missing is always the same: the operator has to put their own copy
-        in one of these directories.
+        could, but "not here yet" and "not ours to fetch" are different
+        answers. A free desktop with a source is offered whether or not a copy
+        is present, because choosing it is what downloads it. One that is
+        somebody's property is offered only when the operator has supplied it.
+
+        ``directories`` overrides where copies are looked for, which is what a
+        folder the operator chose for this one install arrives as.
         """
-        found = [{"id": NO_DESKTOP, "available": True, "version": "", "source": ""}]
+        found = [{
+            "id": NO_DESKTOP,
+            "available": True,
+            "obtainable": True,
+            "version": "",
+            "source": "",
+        }]
         for desktop in DESKTOPS:
-            distribution = find_desktop(desktop)
+            distribution = find_desktop(desktop, directories)
+            here = distribution is not None
             found.append({
                 "id": desktop.key,
-                "available": distribution is not None,
+                "available": here,
+                # A free desktop with somewhere to download it from can be
+                # chosen even when there is no copy yet, because choosing it
+                # is what fetches it.
+                "obtainable": here or bool(desktop.free and desktop.sources),
                 "version": distribution.version if distribution else "",
                 "source": str(distribution.source) if distribution else "",
             })
         return found
 
     def install_desktop_replacement(
-        self, session: ImageSession, key: str, *, on_desktop: bool = True
+        self,
+        session: ImageSession,
+        key: str,
+        *,
+        on_desktop: bool = True,
+        directories=None,
+        download: bool = True,
     ) -> dict:
         """Copy a replacement desktop onto this volume and install it.
 
@@ -356,12 +552,19 @@ class DesktopReplacementMixin:
         desktop = desktop_for(key)
         self.require_mounted_volume(session)
         self.require_writable_geometry(session)
-        distribution = find_desktop(desktop)
+        distribution = find_desktop(desktop, directories)
+        downloaded = ""
+        if distribution is None and download and desktop.free and desktop.sources:
+            # Free, and somewhere to get it from, so get it. It lands in the
+            # same directory the operator would have put their own copy in.
+            archive = fetch_desktop(desktop)
+            downloaded = desktop.sources[0].url
+            distribution = find_desktop(desktop, [archive])
         if distribution is None:
             raise DiskError(
                 f"No copy of {desktop.label} was found. {desktop.licence} "
                 f"Put the files you own in {DESKTOP_DIR} or "
-                f"{REPOSITORY_DESKTOP_DIR}, unpacked as they were published."
+                f"{REPOSITORY_DESKTOP_DIR}, or choose the folder they are in."
             )
 
         folder = desktop.folder or atari_paths.leaf(distribution.name).split(".")[0]
@@ -409,6 +612,7 @@ class DesktopReplacementMixin:
             "installed": True,
             "version": distribution.version,
             "source": str(distribution.source),
+            "downloadedFrom": downloaded,
             "folder": folder,
             "program": program,
             "files": written,
@@ -432,7 +636,10 @@ __all__ = [
     "Desktop",
     "DesktopDistribution",
     "EVERY_MACHINE",
+    "MAX_DOWNLOAD_BYTES",
     "NO_DESKTOP",
+    "Source",
+    "fetch_desktop",
     "REPOSITORY_DESKTOP_DIR",
     "DesktopReplacementMixin",
     "describe_desktops",

@@ -162,7 +162,8 @@ DRIVERS: tuple[Driver, ...] = (
         "PP driver",
         ("PPDRIVER.SYS", "PPDRIVER.PRG"),
         folder_names=("PPDRIVER", "PPDRV", "PP"),
-        note="Peter Putnik's free driver for ACSI, SCSI and IDE drives.",
+        note="Pera Putnik's driver for ACSI, SCSI and IDE drives. It is sold "
+             "rather than given away, so supply your own copy.",
     ),
     Driver(
         "driver-icd",

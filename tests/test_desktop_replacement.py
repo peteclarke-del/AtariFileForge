@@ -200,3 +200,147 @@ class InstallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LicenceTests(unittest.TestCase):
+    """Which desktops this may go and fetch, and which it may not.
+
+    The rule is the licence, not how easy the file is to find. A desktop that
+    is somebody's property is installed from the operator's own copy or not at
+    all, and the catalogue is what decides, so no request can ask for one.
+    """
+
+    def test_only_a_free_desktop_carries_somewhere_to_download_it_from(self) -> None:
+        for desktop in DESKTOPS:
+            with self.subTest(desktop=desktop.key):
+                if not desktop.free:
+                    self.assertEqual(desktop.sources, (), desktop.key)
+
+    def test_every_free_desktop_says_where_it_comes_from(self) -> None:
+        free = [desktop for desktop in DESKTOPS if desktop.free]
+        self.assertTrue(free, "at least one desktop should be freely licensed")
+        for desktop in free:
+            with self.subTest(desktop=desktop.key):
+                self.assertTrue(desktop.sources, desktop.key)
+                for source in desktop.sources:
+                    self.assertTrue(source.url.startswith("https://"), source.url)
+                    self.assertTrue(source.label)
+
+    def test_a_proprietary_desktop_is_never_fetched(self) -> None:
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("a proprietary desktop must not be downloaded")
+
+        with self.assertRaises(DiskError) as caught:
+            desktops.fetch_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], opener=refuse)
+        self.assertIn("Gribnif", str(caught.exception))
+
+
+class DownloadTests(unittest.TestCase):
+    """Fetching a free desktop, without going near the network."""
+
+    def setUp(self) -> None:
+        import shutil
+        self.store = Path(tempfile.mkdtemp(prefix="aff-fetch-"))
+        self.addCleanup(lambda: shutil.rmtree(self.store, ignore_errors=True))
+
+    @staticmethod
+    def _archive(entries: dict) -> bytes:
+        import io
+        import zipfile
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            for name, payload in entries.items():
+                bundle.writestr(name, payload)
+        return buffer.getvalue()
+
+    def _opener(self, payload: bytes):
+        class Response:
+            def __enter__(inner):
+                return inner
+
+            def __exit__(inner, *_args):
+                return False
+
+            def read(inner, _limit=None):
+                return payload
+
+        def opener(_url, timeout=None):
+            return Response()
+
+        return opener
+
+    def test_a_download_lands_where_a_supplied_copy_would_have(self) -> None:
+        """Afterwards a download and the operator's own copy are the same thing."""
+        payload = self._archive({
+            "teradesk/DESKTOP.PRG": program(b"teradesk"),
+            "teradesk/DESKTOP.RSC": b"resource",
+        })
+        desktop = DESKTOPS_BY_KEY["desktop-teradesk"]
+        archive = desktops.fetch_desktop(desktop, self.store, opener=self._opener(payload))
+        self.assertTrue(archive.is_file())
+        self.assertEqual(archive.parent, self.store)
+        found = find_desktop(desktop, [self.store])
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "DESKTOP.PRG")
+
+    def test_something_that_is_not_an_archive_is_refused(self) -> None:
+        """A captive portal answering with a login page is not a desktop."""
+        desktop = DESKTOPS_BY_KEY["desktop-teradesk"]
+        with self.assertRaises(DiskError) as caught:
+            desktops.fetch_desktop(desktop, self.store, opener=self._opener(b"<html>login"))
+        self.assertIn("not a ZIP", str(caught.exception))
+        self.assertEqual(list(self.store.iterdir()), [])
+
+    def test_an_archive_without_the_program_is_refused_and_not_kept(self) -> None:
+        payload = self._archive({"README.TXT": b"nothing useful here"})
+        desktop = DESKTOPS_BY_KEY["desktop-thing"]
+        with self.assertRaises(DiskError) as caught:
+            desktops.fetch_desktop(desktop, self.store, opener=self._opener(payload))
+        self.assertIn("holds no", str(caught.exception))
+        self.assertEqual(list(self.store.iterdir()), [])
+
+    def test_an_oversized_download_is_refused(self) -> None:
+        """A desktop is a few hundred kilobytes. Anything vast is not one."""
+        desktop = DESKTOPS_BY_KEY["desktop-thing"]
+        huge = b"x" * (desktops.MAX_DOWNLOAD_BYTES + 1)
+        with self.assertRaises(DiskError) as caught:
+            desktops.fetch_desktop(desktop, self.store, opener=self._opener(huge))
+        self.assertIn("larger than", str(caught.exception))
+
+
+class ArchiveAndFolderTests(unittest.TestCase):
+    """Reading a copy the operator points at, however they keep it."""
+
+    def setUp(self) -> None:
+        import io
+        import shutil
+        import zipfile
+        self.folder = Path(tempfile.mkdtemp(prefix="aff-chosen-"))
+        self.addCleanup(lambda: shutil.rmtree(self.folder, ignore_errors=True))
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            bundle.writestr("THING/THING.APP", program(b"thing"))
+            bundle.writestr("THING/THING.RSC", b"resource")
+        (self.folder / "thin109d.zip").write_bytes(buffer.getvalue())
+
+    def test_a_distribution_is_read_straight_out_of_its_archive(self) -> None:
+        """Nobody unpacks a download before they want to use it."""
+        found = find_desktop(DESKTOPS_BY_KEY["desktop-thing"], [self.folder])
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "THING.APP")
+        self.assertEqual([name for name, _ in found.companions], ["THING.RSC"])
+
+    def test_the_archive_itself_can_be_named(self) -> None:
+        archive = self.folder / "thin109d.zip"
+        found = find_desktop(DESKTOPS_BY_KEY["desktop-thing"], [archive])
+        self.assertIsNotNone(found)
+        self.assertEqual(found.source, archive)
+
+    def test_a_folder_holding_somebody_elses_archives_finds_nothing(self) -> None:
+        import io
+        import zipfile
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            bundle.writestr("HOLIDAY.JPG", b"not an atari program")
+        (self.folder / "photos.zip").write_bytes(buffer.getvalue())
+        self.assertIsNone(find_desktop(DESKTOPS_BY_KEY["desktop-neodesk"], [self.folder]))

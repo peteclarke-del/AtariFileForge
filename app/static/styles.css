@@ -1075,6 +1075,10 @@ body:has(dialog[open].failed) .pane .loading { display: none; }
    styled by the browser instead of by this file is immediately obvious next
    to an input that is not, and several dialogs put the two side by side. */
 .field { display: grid; gap: 5px; margin: 10px 0; }
+/* Choosing where software is installed from: the button and the folder it is
+   currently looking in, on one line so the choice and its answer stay together. */
+.desktop-source-choice { display: flex; align-items: center; gap: 8px; }
+.desktop-source-choice small { color: var(--muted); overflow-wrap: anywhere; }
 .field label { font: 500 10px DM Mono, monospace; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
 .field input, .field select, .field textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--input-border); border-radius: 8px; padding: 11px; outline: none; background: var(--input-background); color: var(--ink); font: inherit; }
 .field textarea { resize: vertical; font: 11px/1.5 DM Mono, monospace; tab-size: 4; }
