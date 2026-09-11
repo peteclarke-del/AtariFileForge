@@ -33,7 +33,10 @@ Every machine needs a TOS. The lookup is:
    `~/.config/atari-file-forge/tos`), then in the repository's git-ignored
    `firmware/tos/`, matched by filename. A profile that names a release
    (`tos-104` and its relations) asks for exactly that release; otherwise every
-   release the machine shipped with is tried, newest first.
+   release the machine shipped with is tried, newest first. The Falcon's
+   `tos-4xx` takes the newest of 4.04, 4.02 and 4.00 it finds, and `tos-400`,
+   `tos-402` and `tos-404` each ask for that one release. A file that does not
+   decode as a ROM, such as a truncated or bad dump, is never offered.
 2. The bundled EmuTOS under `firmware/emutos/`: 192 KiB for the ST and Mega
    ST, 256 KiB for the STE and Mega STE, 512 KiB for the TT030 and Falcon030.
    The `tos-emutos` add-on forces this step, and a profile may ask for the
@@ -131,7 +134,7 @@ Add-ons change those values:
 | `drive-a-ss` | `--drive-a-heads 1`, the single-sided drive of an early 520ST. |
 | `drive-b-external` | Drive B: stays enabled. Without it, and with only one disc, `--drive-b false` is passed so the machine has the drives the profile says it has. |
 | storage add-ons | The hard-drive interface, as in the table above. |
-| `tos-100` to `tos-4xx`, `tos-emutos` | The firmware lookup above. |
+| `tos-100` to `tos-4xx`, `tos-400` to `tos-404`, `tos-emutos` | The firmware lookup above. |
 
 Add-ons marked "Validation only" in the interface (Gotek, hard-disk drivers,
 ports, loaders) inform compatibility checks and change nothing on the command
