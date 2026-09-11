@@ -151,10 +151,35 @@ window.AtariUI = (() => {
     });
   }
 
+  //  How many messages are worth showing at once. Past this the oldest go,
+  //  because a column taller than the window hides its own beginning.
+  const MAX_TOASTS = 6;
+
+  function dismissAllErrors(region) {
+    region.querySelectorAll(".toast.error, .toast-dismiss-all")
+      .forEach(node => node.remove());
+  }
+
+  //  An error waits to be read and dismissed. It is the one kind of message
+  //  that carries something the operator has to act on, and a message that
+  //  removes itself after a few seconds is one they may never have seen:
+  //  several arriving together push each other along faster than anybody
+  //  reads. Anything else still goes on its own.
   function toast(message, error = false) {
     const item = document.createElement("div");
     item.className = `toast${error ? " error" : ""}`;
-    item.textContent = message;
+    const text = document.createElement("span");
+    text.textContent = message;
+    item.append(text);
+    if (error) {
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "toast-dismiss";
+      dismiss.textContent = "×";
+      dismiss.setAttribute("aria-label", "Dismiss this message");
+      dismiss.onclick = () => item.remove();
+      item.append(dismiss);
+    }
     let region = document.querySelector("#toasts");
     if (modal.open) {
       const form = modal.querySelector(":scope > form");
@@ -169,7 +194,24 @@ window.AtariUI = (() => {
       if (error) region.setAttribute("aria-live", "assertive");
     }
     region.append(item);
-    setTimeout(() => item.remove(), error ? 6500 : 3500);
+    if (!error) {
+      setTimeout(() => item.remove(), 3500);
+      return;
+    }
+    //  A second error means there may be more, so offer to clear them
+    //  together rather than one at a time.
+    const errors = [...region.querySelectorAll(".toast.error")];
+    if (errors.length > 1 && !region.querySelector(".toast-dismiss-all")) {
+      const all = document.createElement("button");
+      all.type = "button";
+      all.className = "toast-dismiss-all";
+      all.textContent = "Dismiss all";
+      all.onclick = () => dismissAllErrors(region);
+      region.append(all);
+    }
+    while (region.querySelectorAll(".toast").length > MAX_TOASTS) {
+      region.querySelector(".toast").remove();
+    }
   }
 
   function trapFocus(container, event) {
