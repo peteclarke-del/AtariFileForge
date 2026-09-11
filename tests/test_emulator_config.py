@@ -471,11 +471,34 @@ class HardwareProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no more than 1 option"):
             normalise_hardware_profile({"machine": "st", "addons": ["tos-104", "tos-emutos"]})
 
+    def test_each_falcon_release_boots_its_own_rom(self):
+        """TOS 4.0x takes the newest it finds; each release can be asked for."""
+        with _firmware("tos400.img", "tos402.img", "tos404.img"):
+            for release in ("400", "402", "404"):
+                with self.subTest(release=release):
+                    self.assertEqual(tos_for("falcon030", {f"tos-{release}"}).name, f"tos{release}.img")
+            self.assertEqual(tos_for("falcon030", {"tos-4xx"}).name, "tos404.img")
+        with _firmware("tos400.img"):
+            self.assertEqual(tos_for("falcon030", {"tos-4xx"}).name, "tos400.img")
+            self.assertIsNone(tos_for("falcon030", {"tos-404"}))
+
+    def test_every_tos_release_offered_has_its_rom_names_and_partition_limit(self):
+        """A release the catalogue offers but nothing maps would boot the wrong ROM."""
+        from app.deployment_service import FIRMWARE_PARTITION_LIMITS
+        offered = {
+            row["id"] for row in hardware_catalogue()["addons"]
+            if row["group"] == "firmware" and row["id"] != "tos-emutos"
+        }
+        self.assertEqual(offered, set(emulator_config.TOS_ADDONS))
+        self.assertEqual(offered, set(FIRMWARE_PARTITION_LIMITS))
+
     def test_tos_releases_are_offered_only_to_the_machines_that_shipped_them(self):
         catalogue = {row["id"]: row for row in hardware_catalogue()["addons"]}
         self.assertEqual(catalogue["tos-100"]["machines"], ["st"])
         self.assertEqual(catalogue["tos-306"]["machines"], ["tt030"])
         self.assertEqual(catalogue["tos-4xx"]["machines"], ["falcon030"])
+        for release in ("tos-400", "tos-402", "tos-404"):
+            self.assertEqual(catalogue[release]["machines"], ["falcon030"])
         self.assertEqual(set(catalogue["tos-emutos"]["machines"]), set(ALL_MACHINES))
         with self.assertRaisesRegex(ValueError, "cannot be fitted to falcon030"):
             normalise_hardware_profile({"machine": "falcon030", "addons": ["tos-104"]})

@@ -135,6 +135,7 @@ TOS_ADDONS = {
     "tos-106": ("tos106",), "tos-162": ("tos162",), "tos-205": ("tos205",),
     "tos-206": ("tos206",), "tos-306": ("tos306",),
     "tos-4xx": ("tos404", "tos402", "tos400"),
+    "tos-400": ("tos400",), "tos-402": ("tos402",), "tos-404": ("tos404",),
 }
 
 #: The language variants tried first. A UK ROM is a PAL machine with an
