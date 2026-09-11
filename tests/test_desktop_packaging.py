@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -94,7 +95,14 @@ class DesktopPackagingTests(unittest.TestCase):
         self.assertIn('LD_LIBRARY_PATH="$project_root/native/lib', launcher)
         self.assertIn("tools/build-hxc-runtime.sh", builder)
         self.assertIn("dpkg-deb --build --root-owner-group", builder)
-        self.assertNotIn("firmware", builder)
+        # EmuTOS is bundled so the emulator starts without a ROM of the
+        # operator's own; nothing else under firmware/ may ever be packaged,
+        # because that is where an operator keeps TOS ROMs that are theirs.
+        self.assertIn('cp -a "$project_root/firmware/emutos" "$application/firmware/"', builder)
+        self.assertEqual(
+            re.findall(r"\$project_root/firmware[^\s\"]*", builder),
+            ["$project_root/firmware/emutos"],
+        )
         self.assertIn("ATARI_PACKAGE_REVISION", builder)
         self.assertIn("ATARI_PACKAGE_TARGET", builder)
         self.assertIn("X-Atari-Target", builder)
@@ -173,6 +181,11 @@ class DesktopPackagingTests(unittest.TestCase):
             "linux/arm64",
             "linux/arm/v7",
             "--verify-tag",
+            # Every package is opened and checked for the bundled EmuTOS, for
+            # the app resolving it with no ROM supplied, and for no TOS ROM.
+            "firmware/emutos/etos192uk.img",
+            'test ! -e "$stage/opt/atari-file-forge/firmware/tos"',
+            "EmuTOS gate passed",
             "SHA256SUMS",
         ):
             self.assertIn(required, workflow)

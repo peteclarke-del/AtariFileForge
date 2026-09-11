@@ -59,6 +59,12 @@ cp -a \
     "$project_root/app" \
     "$project_root/desktop" \
     "$application/"
+# EmuTOS is GPL and committed under firmware/emutos, and it is what boots the
+# emulator when no TOS ROM has been supplied. Only that folder is copied: the
+# rest of firmware/ is where an operator keeps TOS ROMs, drivers and desktops
+# that are theirs alone and must never end up in a package.
+mkdir -p "$application/firmware"
+cp -a "$project_root/firmware/emutos" "$application/firmware/"
 mkdir -p "$application/tools"
 cp "$project_root/tools/linux-desktop-environment.sh" "$application/tools/"
 cp "$project_root/VERSION" "$application/"
