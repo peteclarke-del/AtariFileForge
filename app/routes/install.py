@@ -13,6 +13,8 @@ nothing this application owns, so it lives with the other emulator routes.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flask import Blueprint, jsonify, request
 
 from ..disk_service import DiskError, DiskService
@@ -208,6 +210,23 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         )
         return jsonify(image=service.summary(session), desktop=result)
 
+    def _chosen_folder(value):
+        """A folder the operator picked for this one install, or the usual ones.
+
+        Someone who has just downloaded a desktop has it in their downloads
+        folder, not in the directory this application keeps copies in. Pointing
+        at that folder for one install is less trouble than moving files
+        about, so an absent or empty value means the usual directories and
+        anything else means search there instead.
+        """
+        text = str(value or "").strip()
+        if not text:
+            return None
+        folder = Path(text).expanduser()
+        if not folder.exists():
+            raise DiskError(f"{folder} is not a folder on this computer.")
+        return [folder]
+
     @blueprint.get("/api/install/desktops")
     def desktop_replacements():
         """The replacement desktops, and which one suits the machine asked about.
@@ -225,7 +244,7 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
             memory = 0
         return jsonify(
             desktops=describe_desktops(),
-            available=service.available_desktops(),
+            available=service.available_desktops(_chosen_folder(request.args.get("folder"))),
             recommended=recommended_desktop(machine, memory),
             default=NO_DESKTOP,
         )
@@ -241,6 +260,8 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
             session,
             str(data.get("desktop") or ""),
             on_desktop=data.get("onDesktop", True) is not False,
+            directories=_chosen_folder(data.get("folder")),
+            download=data.get("download", True) is not False,
         )
         return jsonify(image=service.summary(session), desktop=result)
 
