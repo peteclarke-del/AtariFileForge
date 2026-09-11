@@ -39,7 +39,12 @@ ADDONS = [
     _addon("tos-205", "TOS 2.05", "firmware", ["megaste"], "The first Mega STE ROM, with the NEWDESK desktop and cache support.", emulator="hatari"),
     _addon("tos-206", "TOS 2.06", "firmware", ["ste", "megaste"], "The final 256 KiB ROM, sold as an upgrade for the STE and fitted to late Mega STE machines.", emulator="hatari"),
     _addon("tos-306", "TOS 3.06", "firmware", ["tt030"], "The 512 KiB TT ROM with TT RAM, SCSI and the TT video modes.", emulator="hatari"),
-    _addon("tos-4xx", "TOS 4.0x", "firmware", ["falcon030"], "The Falcon ROM (4.00, 4.02 or 4.04) with VIDEL, DSP and IDE support.", emulator="hatari"),
+    _addon("tos-4xx", "TOS 4.0x, newest found", "firmware", ["falcon030"], "Whichever Falcon ROM is found, 4.04 before 4.02 before 4.00, with VIDEL, DSP and IDE support.", emulator="hatari"),
+    # Each Falcon release on its own as well, for software that wants one in
+    # particular: the choice above always takes the newest it finds.
+    _addon("tos-400", "TOS 4.00", "firmware", ["falcon030"], "The first Falcon ROM, from 1992.", emulator="hatari"),
+    _addon("tos-402", "TOS 4.02", "firmware", ["falcon030"], "The 1993 Falcon ROM, with the fixes that followed the launch.", emulator="hatari"),
+    _addon("tos-404", "TOS 4.04", "firmware", ["falcon030"], "The last Falcon ROM Atari released, from 1993.", emulator="hatari"),
     _addon("tos-emutos", "EmuTOS", "firmware", ALL_MACHINES, "The free GPL operating system bundled with this application, in the ROM size that fits the machine.", emulator="hatari"),
 
     # ---- ST RAM ----

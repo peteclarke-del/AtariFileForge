@@ -62,6 +62,9 @@ FIRMWARE_PARTITION_LIMITS = {
     "tos-206": 512 * MEBIBYTE,
     "tos-306": 512 * MEBIBYTE,
     "tos-4xx": 512 * MEBIBYTE,
+    "tos-400": 512 * MEBIBYTE,
+    "tos-402": 512 * MEBIBYTE,
+    "tos-404": 512 * MEBIBYTE,
 }
 
 #: The mass-storage options each target needs the profile to declare.
