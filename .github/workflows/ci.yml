@@ -125,7 +125,27 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      # Docker Hub answers the HEAD request for the base image's manifest
+      # with a 502 often enough to fail a run that has nothing wrong with it,
+      # and a failed run on main is a mail in somebody's inbox about a
+      # registry hiccup. The first attempt is allowed to fail so a second can
+      # decide the job; when the registry is healthy the retry never runs and
+      # this costs nothing.
       - name: Build without publishing
+        id: build
+        continue-on-error: true
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: atari-file-forge:matrix-${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Build without publishing, second attempt
+        if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v7
         with:
           context: .
