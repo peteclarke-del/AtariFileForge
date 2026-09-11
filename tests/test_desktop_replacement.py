@@ -297,7 +297,7 @@ class DownloadTests(unittest.TestCase):
         desktop = DESKTOPS_BY_KEY["desktop-thing"]
         with self.assertRaises(DiskError) as caught:
             desktops.fetch_desktop(desktop, self.store, opener=self._opener(payload))
-        self.assertIn("holds no", str(caught.exception))
+        self.assertIn("does not hold", str(caught.exception))
         self.assertEqual(list(self.store.iterdir()), [])
 
     def test_an_oversized_download_is_refused(self) -> None:

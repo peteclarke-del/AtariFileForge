@@ -24,13 +24,18 @@ and finds the partitions without help. A machine running its original TOS ROM
 will not see the drive at all, and this says so rather than leaving it to be
 discovered.
 
-**A driver the operator supplies** is copied into the boot partition's root,
-and where the distribution carries the boot code that belongs in the root
-sector, that code is written and the checksum word recomputed so the sector's
-sum is 0x1234, which is the only thing the ROM checks before it executes it.
-Nothing is downloaded and nothing is bundled: AHDI, HDDRIVER, the PP driver
-and the ICD driver are each somebody's copyright and none of them may be
-redistributed here. EmuTOS is the one exception, and it is not a driver.
+**A driver** is copied into the boot partition's root, and where the
+distribution carries the boot code that belongs in the root sector, that code
+is written and the checksum word recomputed so the sector's sum is 0x1234,
+which is the only thing the ROM checks before it executes it.
+
+Nothing is bundled. Whether a driver is fetched turns on its licence: HDDRIVER
+and the PP driver are sold by their authors, so those are installed from the
+operator's own copy or not at all. The ICD driver is downloaded, because ICD
+is long gone and their software has been mirrored freely for decades. AHDI is
+treated the same way by everyone but no source was found that is Atari's
+rather than somebody's copy, so it too comes from the operator. In every case
+the check is made against the catalogue rather than the request.
 
 **A desktop configuration** is written, or merged into the one already there,
 so an installed title has an icon and a program the desktop will start.
@@ -72,6 +77,10 @@ DRIVER_DIR = Path(
 #: The git-ignored directory beside the source where drivers may also be kept,
 #: which is the same arrangement ``firmware/tos`` already has for TOS ROMs.
 REPOSITORY_DRIVER_DIR = REPOSITORY_ROOT / "firmware" / "drivers"
+
+#: Where XControl reads control panel modules from unless its own CPXPATH
+#: says otherwise.
+CPX_FOLDER = "CPX"
 
 #: The folders a prepared drive is expected to have. ``AUTO`` runs what is in
 #: it before the desktop appears, ``GEMSYS`` is where GEM applications are
@@ -121,6 +130,16 @@ class Driver:
     folder_names: tuple[str, ...] = ()
     #: Whether this driver needs an executable root sector at all.
     boot_sector: bool = True
+    #: Control panel modules the distribution carries, for the CPX folder.
+    control_panel: tuple[str, ...] = ()
+    #: Whether the licence allows this to be fetched. A driver that is sold is
+    #: installed from the operator's own copy or not at all.
+    free: bool = False
+    #: Where a free one can be downloaded from, in the order to try.
+    sources: tuple[tuple[str, str], ...] = ()
+    #: What is known about the terms, said plainly. Where an owner has made no
+    #: statement this says so rather than implying one.
+    licence: str = ""
     note: str = ""
 
 
@@ -145,6 +164,14 @@ DRIVERS: tuple[Driver, ...] = (
         ("SHDRIVER.SYS", "AHDI.SYS"),
         auto_files=("AHDI.PRG",),
         folder_names=("AHDI", "SHDRIVER"),
+        free=True,
+        licence=(
+            "Atari never stated any terms and its software has never been "
+            "formally released, but AHDI is universally treated as free and "
+            "mirrored everywhere. No download is wired up because no source "
+            "was found that is the owner's rather than somebody's copy, so "
+            "supply your own or point at the folder or disk image it is on."
+        ),
         note="Atari's own driver. AHDI 6.0 loads SHDRIVER.SYS from the root "
              "sector; AHDI 3.0 is run from AUTO instead and is limited to "
              "16 MB partitions on TOS 1.x.",
@@ -154,6 +181,7 @@ DRIVERS: tuple[Driver, ...] = (
         "HDDRIVER",
         ("HDDRIVER.SYS",),
         folder_names=("HDDRIVER", "HDDRV"),
+        licence="Sold by its author, Uwe Seimet. Supply your own copy.",
         note="Uwe Seimet's driver, the usual choice for large partitions and "
              "for modern interfaces such as ACSI2STM and UltraSatan.",
     ),
@@ -162,16 +190,35 @@ DRIVERS: tuple[Driver, ...] = (
         "PP driver",
         ("PPDRIVER.SYS", "PPDRIVER.PRG"),
         folder_names=("PPDRIVER", "PPDRV", "PP"),
-        note="Pera Putnik's driver for ACSI, SCSI and IDE drives. It is sold "
-             "rather than given away, so supply your own copy.",
+        licence=(
+            "Sold by its author, Pera Putnik, who lists the prices on his own "
+            "pages and sends the build that matches your hardware. Supply "
+            "your own copy."
+        ),
+        note="Pera Putnik's driver for ACSI, SCSI and IDE drives.",
     ),
     Driver(
         "driver-icd",
         "ICD Pro driver",
-        ("ICDBOOT.SYS",),
+        # The distribution ships the driver as ICDBOOT.PRG in AUTO. Installing
+        # it in the partition root under the .SYS name is what the root sector
+        # loads, and is how the operator's own drive carries it.
+        ("ICDBOOT.SYS", "ICDBOOT.PRG"),
         folder_names=("ICDPRO", "ICD", "ICDBOOT"),
+        control_panel=("ADSCSI.CPX",),
+        free=True,
+        sources=(
+            ("ICD Pro 6.55A mirror", "https://joo.kie.sk/wp-content/uploads/2013/05/icdp655a.zip"),
+        ),
+        licence=(
+            "ICD published no terms and the company is long gone. It is "
+            "passed around freely and mirrored everywhere, which is not the "
+            "same as having been released, so the copy fetched is a mirror "
+            "rather than anything official."
+        ),
         note="Supplied with ICD host adapters, and it drives most other ACSI "
-             "hardware as well.",
+             "hardware as well. It carries a control panel module, ADSCSI.CPX, "
+             "which is installed into the CPX folder beside it.",
     ),
 )
 
@@ -208,6 +255,10 @@ def describe_drivers() -> list[dict]:
             "files": list(driver.files),
             "autoFiles": list(driver.auto_files),
             "bootSector": driver.boot_sector,
+            "controlPanel": list(driver.control_panel),
+            "free": driver.free,
+            "sources": [{"label": label, "url": url} for label, url in driver.sources],
+            "licence": driver.licence,
             "note": driver.note,
         }
         for driver in DRIVERS
@@ -244,8 +295,14 @@ class Distribution:
     payload: bytes
     #: Where it was found, so a report can say which copy was used.
     source: Path
+    #: The name it is installed under. ICD ships its driver as ICDBOOT.PRG in
+    #: AUTO, but what the root sector loads is ICDBOOT.SYS in the partition
+    #: root, so the name it arrives as and the name it is written as differ.
+    installed_name: str = ""
     #: Files that belong in ``AUTO``, by GEMDOS name.
     auto: tuple[tuple[str, bytes], ...] = ()
+    #: Control panel modules the distribution carries, for the CPX folder.
+    control_panel: tuple[tuple[str, bytes], ...] = ()
     #: The 512 bytes that belong in the root sector, when the distribution
     #: carries them. Most do not: the boot code lives inside the driver's own
     #: installer, which is Atari code this application does not run.
@@ -293,16 +350,74 @@ def _find(directory: Path, name: str) -> Path | None:
     return None
 
 
+def _driver_from_bundle(driver: Driver, bundle: Path) -> Distribution | None:
+    """Read a driver out of an archive or a distribution floppy.
+
+    A driver arrives as a ZIP, or on a floppy image, or as a ZIP of floppy
+    images. The files are matched on their own names wherever they sit inside
+    it, because every distribution arranges its folders differently and the
+    names do not change.
+    """
+    from .software_bundles import bundle_files
+
+    wanted = {
+        name.casefold(): name
+        for name in (
+            *driver.files,
+            *driver.auto_files,
+            *driver.control_panel,
+            *BOOT_CODE_NAMES,
+        )
+    }
+    held = bundle_files(bundle, wanted)
+    if not held:
+        return None
+    name = next((item for item in driver.files if item in held), None)
+    if name is None:
+        return None
+    boot_code = next(
+        (
+            held[candidate]
+            for candidate in BOOT_CODE_NAMES
+            if candidate in held and len(held[candidate]) == SECTOR_SIZE
+        ),
+        None,
+    )
+    return Distribution(
+        driver=driver,
+        name=name,
+        # The loader looks for the first name in the catalogue, whatever the
+        # distribution happens to call the file it ships.
+        installed_name=driver.files[0],
+        payload=held[name],
+        source=bundle,
+        auto=tuple((item, held[item]) for item in driver.auto_files if item in held),
+        control_panel=tuple(
+            (item, held[item]) for item in driver.control_panel if item in held
+        ),
+        boot_code=boot_code,
+        version=_version_from(bundle),
+    )
+
+
 def find_distribution(driver: Driver, directories=None) -> Distribution | None:
     """Locate the operator's copy of one driver, or report that it is absent.
 
-    Nothing is fetched. A driver that is not in one of the directories is
-    simply not available, and saying so is the whole answer: this application
-    has no lawful way of producing one.
+    Nothing is fetched here. Both shapes a copy arrives in are read: unpacked
+    into a folder, and still inside the archive or floppy image it was
+    published on, which is how it looks ten seconds after downloading it.
     """
+    from .software_bundles import BUNDLE_SUFFIXES
+
     if not driver.files and not driver.auto_files:
         return None
     for directory in (directories if directories is not None else driver_directories()):
+        root = Path(directory)
+        if root.is_file():
+            found = _driver_from_bundle(driver, root)
+            if found is not None:
+                return found
+            continue
         for name in driver.files:
             found = _find(Path(directory), name)
             if found is None:
@@ -318,16 +433,56 @@ def find_distribution(driver: Driver, directories=None) -> Distribution | None:
                 if sector is not None and sector.stat().st_size == SECTOR_SIZE:
                     boot_code = sector.read_bytes()
                     break
+            control_panel = []
+            for extra in driver.control_panel:
+                module = _find(Path(directory), extra)
+                if module is not None:
+                    control_panel.append((extra, module.read_bytes()))
             return Distribution(
                 driver=driver,
                 name=name,
+                installed_name=driver.files[0],
                 payload=found.read_bytes(),
                 source=found,
                 auto=tuple(auto),
+                control_panel=tuple(control_panel),
                 boot_code=boot_code,
                 version=_version_from(found),
             )
+        # Nothing unpacked, so try the archives and disk images in the folder.
+        if root.is_dir():
+            try:
+                bundles = sorted(
+                    entry for entry in root.iterdir()
+                    if entry.is_file() and entry.suffix.casefold() in BUNDLE_SUFFIXES
+                )
+            except OSError:
+                bundles = []
+            for bundle in bundles:
+                found = _driver_from_bundle(driver, bundle)
+                if found is not None:
+                    return found
     return None
+
+
+def fetch_driver(driver: Driver, destination: Path | None = None, opener=None) -> Path:
+    """Download a driver whose licence allows it, into the operator's directory.
+
+    The check is on the catalogue rather than on the request, so nothing a
+    caller sends can ask for one that is sold.
+    """
+    from .software_download import fetch_archive
+
+    if not driver.free or not driver.sources:
+        raise DiskError(f"{driver.label} cannot be downloaded. {driver.licence}")
+    return fetch_archive(
+        driver.label,
+        list(driver.sources),
+        Path(destination) if destination is not None else DRIVER_DIR,
+        driver.key,
+        accepts=lambda archive: _driver_from_bundle(driver, archive) is not None,
+        opener=opener,
+    )
 
 
 def installed_driver(names, folders=()) -> dict:
@@ -686,23 +841,31 @@ class DrivePreparationMixin:
                 self.select_partition(session, previous)
         return names, folders, boot
 
-    def available_drivers(self) -> list[dict]:
-        """Which drivers the operator has actually supplied a copy of.
+    def available_drivers(self, directories=None) -> list[dict]:
+        """Which drivers can actually be installed, and why.
 
         A choice that cannot be carried out should not be offered as though it
-        could, and the reason a driver is missing is always the same: it is
-        not redistributable, so the operator has to put their own copy in one
-        of these directories.
+        could, but "not here yet" and "sold, so not ours to fetch" are
+        different answers. A driver that may be downloaded is offered whether
+        or not a copy is present, because choosing it is what fetches it.
         """
         found = []
         for driver in DRIVERS:
             if driver.key == DRIVERLESS:
-                found.append({"id": driver.key, "available": True, "version": "", "source": ""})
+                found.append({
+                    "id": driver.key,
+                    "available": True,
+                    "obtainable": True,
+                    "version": "",
+                    "source": "",
+                })
                 continue
-            distribution = find_distribution(driver)
+            distribution = find_distribution(driver, directories)
+            here = distribution is not None
             found.append({
                 "id": driver.key,
-                "available": distribution is not None,
+                "available": here,
+                "obtainable": here or bool(driver.free and driver.sources),
                 "version": distribution.version if distribution else "",
                 "source": str(distribution.source) if distribution else "",
             })
@@ -716,6 +879,8 @@ class DrivePreparationMixin:
         driver: str = DRIVERLESS,
         create_folders: bool = True,
         desktop: bool = True,
+        directories=None,
+        download: bool = True,
         progress: progress_module.Progress | None = None,
     ) -> dict:
         """Prepare this drive to be booted, in whichever of the three ways.
@@ -739,7 +904,9 @@ class DrivePreparationMixin:
                 )
             index = session.partition if session.partition is not None else 0
             report("Preparing the drive", 0, 4)
-            installed = self._write_root_sector(reader, disk, chosen, report)
+            installed = self._write_root_sector(
+                reader, disk, chosen, report, directories, download,
+            )
         finally:
             reader.close()
 
@@ -776,7 +943,9 @@ class DrivePreparationMixin:
             "warnings": self._preparation_warnings(chosen, installed, state),
         }
 
-    def _write_root_sector(self, reader, disk, chosen: Driver, report) -> Distribution | None:
+    def _write_root_sector(
+        self, reader, disk, chosen: Driver, report, directories=None, download: bool = True,
+    ) -> Distribution | None:
         """Make the root sector executable, or leave it inert on purpose.
 
         The ROM executes a root sector when its 256 big-endian words sum to
@@ -807,13 +976,17 @@ class DrivePreparationMixin:
             reader.flush()
             return None
 
-        distribution = find_distribution(chosen)
+        distribution = find_distribution(chosen, directories)
+        if distribution is None and download and chosen.free and chosen.sources:
+            # It may be fetched and there is no copy here, so fetch it. It
+            # lands where the operator would have put their own.
+            distribution = _driver_from_bundle(chosen, fetch_driver(chosen))
         if distribution is None:
             raise DiskError(
-                f"No copy of {chosen.label} was found. Put the driver's own files in "
+                f"No copy of {chosen.label} was found. {chosen.licence} "
+                "Put the driver's own files in "
                 + " or ".join(str(path) for path in driver_directories())
-                + ". Atari File Forge cannot ship or fetch a hard-disk driver: only "
-                "EmuTOS may be redistributed here."
+                + ", or choose the folder or disk image it is on."
             )
         if distribution.boot_code:
             report(f"Writing the {chosen.label} boot loader", 0, 4)
@@ -830,12 +1003,27 @@ class DrivePreparationMixin:
         """Copy the driver into the boot partition's root, where it is looked for."""
         if distribution is None:
             return []
-        written = [distribution.name]
-        volume_copy.write_file(self, session, distribution.name, distribution.payload)
+        name = distribution.installed_name or distribution.name
+        written = [name]
+        volume_copy.write_file(self, session, name, distribution.payload)
         for name, payload in distribution.auto:
             if not volume_copy.directory_exists(self, session, "AUTO"):
                 self.make_directory(session, "AUTO")
             path = atari_paths.join("AUTO", name)
+            # An AUTO program already there holds a place in a sequence the
+            # operator may have arranged deliberately, so it is left alone.
+            if volume_copy.entry_exists(self, session, path):
+                continue
+            volume_copy.write_file(self, session, path, payload)
+            written.append(path)
+        # A driver's control panel module is how its settings are reached once
+        # the machine is running, and XControl reads those from the CPX folder.
+        for name, payload in distribution.control_panel:
+            if not volume_copy.directory_exists(self, session, CPX_FOLDER):
+                self.make_directory(session, CPX_FOLDER)
+            path = atari_paths.join(CPX_FOLDER, name)
+            if volume_copy.entry_exists(self, session, path):
+                continue
             volume_copy.write_file(self, session, path, payload)
             written.append(path)
         return written
