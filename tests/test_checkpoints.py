@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -126,6 +128,86 @@ class CheckpointTests(unittest.TestCase):
                 service.undo_last_change(session)
 
             self.assertEqual(service.list_checkpoints(session)[0]["id"], named["id"])
+
+    def test_undo_leaves_the_applied_hardware_profile_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, session = self.make_session(Path(directory))
+            token = service.begin_automatic_checkpoint(session, "adding a file")
+            session.path.write_bytes(b"edited")
+            service.finish_automatic_checkpoint(session, token)
+            # Applying a profile takes no checkpoint, so the one above still
+            # records the machine from before it.
+            session.hardware_profile = {"name": "Falcon030", "machine": "falcon030"}
+            session.target_hardware = "hd"
+
+            service.undo_last_change(session)
+
+            self.assertEqual(session.path.read_bytes(), b"original image")
+            self.assertEqual(session.hardware_profile["machine"], "falcon030")
+            self.assertEqual(session.target_hardware, "hd")
+
+    def test_a_rename_survives_undoing_an_earlier_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, session = self.make_session(Path(directory))
+            token = service.begin_automatic_checkpoint(session, "adding a file")
+            session.path.write_bytes(b"edited")
+            service.finish_automatic_checkpoint(session, token)
+
+            service.rename_session(session, "renamed.st")
+
+            self.assertEqual(len(service.list_checkpoints(session)), 1)
+            self.assertEqual(
+                service.summary(session)["checkpoints"]["undoReason"], "adding a file"
+            )
+            service.undo_last_change(session)
+            self.assertEqual(session.path.read_bytes(), b"original image")
+            self.assertEqual(session.name, "renamed.st")
+
+    def test_undoing_an_operation_that_renamed_the_image_restores_its_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, session = self.make_session(Path(directory))
+            # Replacing an image from the Online Library changes its bytes and
+            # its name together, so undoing it has to bring both back even
+            # after a later rename.
+            token = service.begin_automatic_checkpoint(session, "replacing the image")
+            session.path.write_bytes(b"replacement")
+            session.name = "replacement.st"
+            service.finish_automatic_checkpoint(session, token)
+            service.rename_session(session, "my copy.st")
+
+            service.undo_last_change(session)
+
+            self.assertEqual(session.path.read_bytes(), b"original image")
+            self.assertEqual(session.name, "games.st")
+
+    def test_copies_abandoned_part_way_are_cleared_when_a_session_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, session = self.make_session(Path(directory))
+            service._persist_session(session)
+            checkpoints = session.path.parent / "checkpoints"
+            checkpoints.mkdir()
+            stale = checkpoints / f".{'b' * 32}.tmp"
+            stale.mkdir()
+            (stale / "image.bin").write_bytes(b"half a copy")
+            in_progress = checkpoints / f".{'c' * 32}.tmp"
+            in_progress.mkdir()
+            (in_progress / "image.bin").write_bytes(b"still copying")
+            stale_restore = session.path.parent / f".{session.path.name}.restore-{'d' * 32}"
+            stale_restore.write_bytes(b"half a restore")
+            unrelated = checkpoints / ".notes.tmp"
+            unrelated.mkdir()
+            long_ago = time.time() - 3600
+            for path in (stale, stale / "image.bin", stale_restore, unrelated):
+                os.utime(path, (long_ago, long_ago))
+
+            service.sessions.clear()
+            service._restore_session(session.id)
+
+            self.assertFalse(stale.exists())
+            self.assertFalse(stale_restore.exists())
+            self.assertTrue(in_progress.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertEqual(session.path.read_bytes(), b"original image")
 
     def test_checkpoint_names_are_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

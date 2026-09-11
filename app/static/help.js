@@ -152,13 +152,13 @@
       title: "Undo and checkpoints",
       body: `
             <h3>Undo changes and create named checkpoints</h3>
-            <p class="help-lead">Every image-changing operation starts with an automatic restore point. This includes file and folder edits, transfers, compaction and save-time image finalisation.</p>
+            <p class="help-lead">Every image-changing operation starts with an automatic restore point. This includes file and folder edits, transfers, compaction and save-time image finalisation. Renaming an image and applying a hardware profile change none of its contents, so they take no restore point and Undo leaves them as they are.</p>
             <div class="help-task">
               <h4>Undo the latest operation</h4>
               <ol>
                 <li>Open <strong>Edit</strong> in the affected pane.</li>
                 <li>Select <strong>Undo last change</strong>. The button is disabled until an automatic restore point exists.</li>
-                <li>Confirm the undo. The most recent automatic point is restored and consumed.</li>
+                <li>The confirmation names the operation that will be reversed. Confirm the undo. The most recent automatic point is restored and consumed.</li>
                 <li>All panes showing that same image return to its root, or to a drive's partition table, and refresh from the restored bytes.</li>
                 <li>Repeat to step backwards through earlier operations. Up to 20 recent automatic points are retained per image.</li>
               </ol>
@@ -996,7 +996,7 @@
               <li>Select the base machine in the left column, then build its hardware in the wider right column. The groups are TOS firmware, ST RAM, TT RAM, floppy drives, mass storage, the hard disk driver, the processor and its options, the display, ports and peripherals, and software loaders. Each group has its own limit, so only one firmware and one processor can be fitted while several storage interfaces can.</li>
               <li>The list changes with the machine, and a choice that cannot coexist with another is refused with the pair named. A high-density floppy drive, for instance, is offered only on the Mega STE, TT030 and Falcon030.</li>
               <li>A profile also records the Library filter, the TOS release used for partition-size validation, the firmware the emulator boots, RAM and startup action. Hardware marked <strong>Validation only</strong> still affects analysis without pretending that Hatari implements it.</li>
-              <li>Save retains the profile in this host's private state. Apply attaches it to an image session. The active profile becomes the default for panes without their own profile and drives Online Library machine filtering.</li>
+              <li>Save retains the profile in this host's private state. Apply retains it too, then attaches it to every open image and makes it the active profile. The active profile becomes the default for images opened or created afterwards that have no profile of their own, and drives Online Library machine filtering. Applying a profile changes no byte of an image, so it creates no undo checkpoint.</li>
               <li>Choose <strong>Import recipes</strong> to save naming, group prefix, online metadata and compatibility choices. Saved recipes appear in the import planner.</li>
             </ol></div>
             <div class="help-task"><h4>Monitor, abort and resume jobs</h4><ol>
