@@ -160,7 +160,10 @@ def create_images_blueprint(
         return jsonify(partitionTable=service.partition_table(service.get(image_id)))
 
     @blueprint.patch("/api/images/<image_id>")
-    @image_mutation("renaming the image")
+    # A rename changes what the image is called, not a byte of it, so it is not
+    # worth copying a whole hard drive into an undo point for. The service
+    # carries the new name back through the existing checkpoints instead.
+    @request_effect("external", "renaming an image without changing its contents")
     def rename_image(image_id):
         data = payload()
         session = service.get(image_id)
@@ -182,12 +185,16 @@ def create_images_blueprint(
         return jsonify(image=service.summary(session))
 
     @blueprint.patch("/api/images/<image_id>/hardware-profile")
-    @image_mutation("changing the hardware profile")
+    # The profile describes the machine an image is used with; it changes no
+    # byte of the image. Declaring it an image mutation copied the whole image
+    # into an undo checkpoint first, which is seconds of disk work on a large
+    # hard drive, and Workbench -> Apply profile does it for every open image.
+    @request_effect("external", "recording the machine an image is used with")
     def set_hardware_profile(image_id):
         data = payload()
         session = service.get(image_id)
         allowed = {
-            "name", "machine", "filingSystem", "handlerBuild", "accelerated",
+            "name", "machine", "filingSystem", "driverBuild", "accelerated",
             "page", "menuType", "notes", "targetHardware", "catalogMachine",
             "emulator", "debugger", "emulatorRam", "emulatorBoot", "addons",
         }

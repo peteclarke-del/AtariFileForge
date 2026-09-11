@@ -41,7 +41,6 @@ class RouteEffectTests(unittest.TestCase):
             "files.transfer_image_to_directory", "hex_editor.write_file_hex",
             "hex_editor.write_hex", "images.compact", "images.configure_rom_layout",
             "images.prepare_image_download",
-            "images.rename_image", "images.set_hardware_profile",
             "rom_tools.rom_build", "rom_tools.rom_patch", "rom_tools.rom_project",
             "rom_tools.rom_repair",
             "tools.apply_image_patch",
@@ -81,6 +80,39 @@ class RouteEffectTests(unittest.TestCase):
             and effect_for(application.view_functions.get(rule.endpoint)) is None
         })
         self.assertEqual(missing, [])
+
+    @unittest.skipIf(create_app is None, "Flask is available in the application container")
+    def test_a_hardware_profile_is_recorded_without_copying_the_image(self) -> None:
+        # Workbench -> Apply profile sends this for every open image. When it
+        # was checkpointed, each one copied the whole image first, so a large
+        # hard drive kept the dialog waiting long enough to look broken and
+        # every repeated click queued another full copy.
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "app.server.WORK_DIR", Path(folder)
+        ):
+            application = create_app()
+            self.assertIsNone(
+                mutation_for(application.view_functions["images.set_hardware_profile"])
+            )
+            client = application.test_client()
+            created = client.post("/api/images/create", json={
+                "format": "hd", "title": "PROFILE", "capacity": "8M", "targetHardware": "hd",
+            })
+            self.assertEqual(created.status_code, 200, created.get_json())
+            image_id = created.get_json()["image"]["id"]
+
+            applied = client.patch(f"/api/images/{image_id}/hardware-profile", json={
+                "name": "Mega ST", "machine": "megast",
+                "addons": ["tos-104", "ram-2m", "acsi-megafile", "driver-ahdi"],
+                "filingSystem": "fat16", "driverBuild": "ahdi",
+            })
+
+            self.assertEqual(applied.status_code, 200, applied.get_json())
+            profile = applied.get_json()["image"]["hardwareProfile"]
+            self.assertEqual(profile["machine"], "megast")
+            self.assertEqual(profile["driverBuild"], "ahdi")
+            checkpoints = client.get(f"/api/images/{image_id}/checkpoints").get_json()
+            self.assertEqual(checkpoints["checkpoints"], [])
 
 
 if __name__ == "__main__":
