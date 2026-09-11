@@ -37,7 +37,10 @@ class PartitionedDriveTests(unittest.TestCase):
             table = service.partition_table(drive)
             self.assertEqual(table["scheme"], "ahdi")
             self.assertFalse(table["byteSwapped"])
-            self.assertTrue(table["bootable"])
+            # A blank drive carries no boot loader, so its root sector is not
+            # one the ROM will execute. Preparing the drive with a driver is
+            # what writes a loader and marks it.
+            self.assertFalse(table["bootable"])
             self.assertEqual(table["sizeBytes"], 32 * MIB)
             self.assertEqual(table["hdSize"], 32 * MIB // 512)
             self.assertEqual(len(table["partitions"]), 4)
