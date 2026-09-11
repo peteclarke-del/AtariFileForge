@@ -161,6 +161,9 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         session = service.get(image_id)
         apply_partition(service, session, request.args.get("partition"))
         state = service.drive_preparation(session)
+        state["available"] = service.available_drivers(
+            _chosen_folder(request.args.get("folder"))
+        )
         return jsonify(driver=state["driver"], preparation=state)
 
     @blueprint.post("/api/images/<image_id>/install/driver")
@@ -168,11 +171,10 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
     def prepare_driver(image_id):
         """Prepare this drive: a driver where one is wanted, and a desktop.
 
-        The licence position is the reason there is no download here. AHDI,
-        HDDRIVER, the PP driver and the ICD driver are each somebody's
-        copyright and none of them may be redistributed by this application,
-        so the operator's own copy is what gets installed. EmuTOS is the one
-        thing that may ship, and EmuTOS needs no driver.
+        A driver whose licence allows it is downloaded when there is no copy
+        here. HDDRIVER and the PP driver are sold by their authors and are
+        installed from the operator's own copy or not at all. That decision is
+        made against the catalogue rather than against this request.
         """
         data = payload()
         session = service.get(image_id)
@@ -186,6 +188,8 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
                 session,
                 driver=str(data.get("driver") or DRIVERLESS),
                 create_folders=data.get("createFolders", True) is not False,
+                directories=_chosen_folder(data.get("folder")),
+                download=data.get("download", True) is not False,
                 desktop=data.get("desktop", True) is not False,
                 progress=progress,
             )
