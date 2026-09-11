@@ -51,6 +51,9 @@ XVFB = ["timeout", "--signal=TERM", "--kill-after=2", "8", "env", "SDL_AUDIODRIV
 XVFB_DEBUG = ["timeout", "--signal=TERM", "--kill-after=2", "15", "env", "SDL_AUDIODRIVER=dummy", "xvfb-run", "-a", HATARI]
 SHARED_DISPLAY = ["timeout", "--signal=TERM", "--kill-after=2", "900", "env", "SDL_AUDIODRIVER=dummy", "DISPLAY=:99", HATARI]
 COMMON = ["--fast-boot", "true", "--confirm-quit", "false", "--statusbar", "false"]
+#: Booting a hard-drive image skips Hatari's fast boot, without which EmuTOS
+#: starts from A: and never runs the drive's AUTO folder.
+BOOTS_DRIVE = ["--fast-boot", "false", "--confirm-quit", "false", "--statusbar", "false"]
 
 
 @contextlib.contextmanager
@@ -165,7 +168,7 @@ class HatariCommandTests(unittest.TestCase):
             "--cpulevel", "0", "--cpuclock", "16",
             "--monitor", "rgb",
             "--acsi", "0=/work/megafile.img",
-            *COMMON,
+            *BOOTS_DRIVE,
             "--sound", "off",
             "--log-level", "warn",
             "--screenshot-dir", "/work",
@@ -186,10 +189,32 @@ class HatariCommandTests(unittest.TestCase):
             "--monitor", "vga",
             "--drive-b", "false",
             "--ide-master", "/work/falcon.img",
-            *COMMON,
+            *BOOTS_DRIVE,
             "--log-level", "warn",
             "--screenshot-dir", "/work",
         ])
+
+    def test_mount_only_keeps_the_fast_boot_that_leaves_the_drive_unstarted(self):
+        session = _session("st", "acsi2stm", emulatorBoot="catalogue")
+        with _hatari(), _firmware():
+            command, _cwd = emulator_command(session, "/work/drive.img", interactive=True)
+        self.assertEqual(command[command.index("--fast-boot") + 1], "true")
+
+    def test_booting_a_drive_skips_the_fast_boot_whichever_way_it_is_asked_for(self):
+        for boot in ("auto", "boot"):
+            with self.subTest(boot=boot), _hatari(), _firmware():
+                command, _cwd = emulator_command(
+                    _session("st", "acsi2stm", emulatorBoot=boot), "/work/drive.img",
+                    interactive=True,
+                )
+                self.assertEqual(command[command.index("--fast-boot") + 1], "false")
+
+    def test_a_floppy_still_boots_fast(self):
+        with _hatari(), _firmware():
+            command, _cwd = emulator_command(
+                _session("st", emulatorBoot="boot"), "/work/game.st", interactive=True,
+            )
+        self.assertEqual(command[command.index("--fast-boot") + 1], "true")
 
     def test_a_folder_is_handed_over_as_gemdos_drive_c(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -257,7 +282,7 @@ class HatariCommandTests(unittest.TestCase):
             "--drive-b", "false",
             "--scsi", "0=/work/tt.img",
             "--scsi", "1=/work/release.iso",
-            *COMMON,
+            *BOOTS_DRIVE,
             "--sound", "off",
             "--log-level", "warn",
             "--screenshot-dir", "/work",
