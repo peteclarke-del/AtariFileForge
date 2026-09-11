@@ -21,7 +21,7 @@ machine, and no automated result should be read as covering them.
 Record the intended version before starting:
 
 ```bash
-export RELEASE_VERSION=0.1.0
+export RELEASE_VERSION=0.2.0
 test "$(cat VERSION)" = "$RELEASE_VERSION"
 ```
 

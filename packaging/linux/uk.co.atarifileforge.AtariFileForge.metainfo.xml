@@ -42,6 +42,11 @@
   <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
   <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
   <releases>
+    <release version="0.2.0" date="2026-09-11">
+      <description>
+        <p>Ships the bundled EmuTOS in the native package, which 0.1.0 left out, so the emulator starts without a TOS ROM of your own. Adds presets for a 1040 STF, 1040 STE, Mega ST, 1040 STFM and 520 STFM with ACSI2STM, a Gotek or a BlueSCSI, and makes TOS 4.00, 4.02 and 4.04 separate choices for the Falcon030.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-11">
       <description>
         <p>The first usable release. Opens, edits and saves ST floppy images, MSA, DIM, STX, HFE and SCP containers and partitioned ACSI, SCSI and IDE hard drives with GEMDOS attributes and datestamps preserved; prepares a drive with a hard-disk driver, a desktop and NeoDesk or Geneva set up the way their own installers do; decodes TOS and cartridge ROMs; and boots any machine from the ST to the Falcon030 in Hatari, with EmuTOS bundled so the emulator always works.</p>
