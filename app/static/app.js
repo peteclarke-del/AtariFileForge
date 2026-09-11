@@ -3650,23 +3650,38 @@ async function showPrepareDrive(index) {
         }),
       }));
     pane.image = result.image;
-    const chosenDesktop = String(form.get("driveDesktop") || "desktop-none");
-    if (chosenDesktop !== "desktop-none") {
-      const installed = await trackedPaneOperation(index, "Installing the desktop…", operationId =>
-        api(`/api/images/${pane.image.id}/install/desktop-replacement`, {
+    // A desktop is installed before the multitasker that runs under it, so
+    // that the one which decides how the machine starts is in place first.
+    const catalogued = Object.fromEntries((desktops.desktops || []).map(row => [row.id, row]));
+    const chosen = form.getAll("driveDesktop")
+      .map(String)
+      .sort((left, right) => Number(catalogued[left]?.companion) - Number(catalogued[right]?.companion));
+    const warnings = [];
+    for (const desktop of chosen) {
+      const installed = await trackedPaneOperation(
+        index,
+        `Installing ${catalogued[desktop]?.label || "the desktop"}…`,
+        operationId => api(`/api/images/${pane.image.id}/install/desktop-replacement`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            desktop: chosenDesktop,
+            desktop,
             partition: pane.partition,
             folder: desktopFolder,
             operationId,
           }),
-        }));
+        }),
+      );
       pane.image = installed.image;
-      (installed.desktop.warnings || []).forEach(warning => toast(warning, true));
+      warnings.push(...(installed.desktop.warnings || []));
+      const kept = installed.desktop.kept || [];
+      if (kept.length) {
+        toast(`${installed.desktop.label}: ${kept.join(", ")} already on the drive, left alone.`);
+      }
       toast(`${installed.desktop.label} installed into ${installed.desktop.folder} on ${target}.`);
     }
+    // The same caution comes back from each of them, so say it once.
+    [...new Set(warnings)].forEach(warning => toast(warning, true));
     await loadDirectory(index);
     (result.warnings || []).forEach(warning => toast(warning, true));
     toast(result.driver.installed
@@ -3679,11 +3694,6 @@ async function showPrepareDrive(index) {
   const picker = modalContent.querySelector('[name="driveDriver"]');
   const detail = modalContent.querySelector("[data-driver-detail]");
   picker?.addEventListener("change", () => { detail.textContent = detailFor(picker.value); });
-  const desktopPicker = modalContent.querySelector('[name="driveDesktop"]');
-  const desktopDetail = modalContent.querySelector("[data-desktop-detail]");
-  desktopPicker?.addEventListener("change", () => {
-    desktopDetail.textContent = desktopReplacementDetail(desktops, desktopPicker.value);
-  });
   const folderButton = modalContent.querySelector("[data-choose-desktop-folder]");
   const folderNote = modalContent.querySelector("[data-desktop-folder]");
   folderButton?.addEventListener("click", async () => {
@@ -3692,15 +3702,19 @@ async function showPrepareDrive(index) {
     desktopFolder = folder;
     folderNote.textContent = `Looking in ${folder}`;
     // What is installable changes with the folder, so ask again and rebuild
-    // the choices rather than leaving a list describing somewhere else.
+    // the list rather than leaving one that describes somewhere else. What
+    // was ticked is put back wherever it is still available.
     try {
       const refreshed = await api(`/api/install/desktops?${new URLSearchParams({ folder })}`);
       desktops = { ...desktops, available: refreshed.available };
-      const chosen = desktopPicker.value;
-      desktopPicker.innerHTML = desktopReplacementOptions(desktops);
-      desktopPicker.value = [...desktopPicker.options].some(option => option.value === chosen && !option.disabled)
-        ? chosen : "desktop-none";
-      desktopDetail.textContent = desktopReplacementDetail(desktops, desktopPicker.value);
+      const ticked = new Set(
+        [...modalContent.querySelectorAll('[name="driveDesktop"]:checked')].map(box => box.value),
+      );
+      const list = modalContent.querySelector(".install-modes");
+      list.innerHTML = desktopReplacementOptions(desktops);
+      list.querySelectorAll('[name="driveDesktop"]').forEach(box => {
+        box.checked = ticked.has(box.value) && !box.disabled;
+      });
     } catch (error) { toast(error.message, true); }
   });
   return closed;
@@ -3726,60 +3740,53 @@ let desktopFolder = "";
 
 //: The replacement desktop. The built-in TOS desktop has no icons of your
 //: own, no program groups and no way to find a file, so every serious machine
-//: acquired a replacement. Three of the four belong to somebody, so what this
-//: offers is the operator's own copy, and the recommendation for the machine
-//: the drive is being built for.
-function desktopReplacementDetail(catalogue, id) {
-  if (!id || id === "desktop-none") {
-    return "The drive keeps the built-in TOS desktop. A replacement can be installed at any time afterwards.";
-  }
-  const desktop = (catalogue.desktops || []).find(item => item.id === id);
-  if (!desktop) return "";
-  const supplied = (catalogue.available || []).find(item => item.id === id);
-  const recommended = catalogue.recommended?.id === id ? `${catalogue.recommended.reason} ` : "";
-  const missing = supplied && !supplied.available
-    ? ` No copy of ${desktop.label} was found, so it cannot be installed yet. ${desktop.licence}`
-    : "";
-  return `${recommended}${desktop.note}${missing}`;
-}
-
+//: acquired a replacement. What this offers is the free ones, downloaded when
+//: they are wanted, your own copy of the rest, and the recommendation for the
+//: machine the drive is being built for.
+//:
+//: More than one of these can be wanted at once: Geneva is not a desktop but
+//: a multitasker that runs under one, and NeoDesk was written to sit on it.
+//: So the choice is a list to tick rather than one to pick, and ticking
+//: nothing leaves the built-in TOS desktop alone.
 function desktopReplacementField(catalogue) {
   if (!(catalogue.desktops || []).length) return "";
   return `<div class="field"><label>Replacement desktop</label>
-      <select name="driveDesktop">${desktopReplacementOptions(catalogue)}</select>
-      <small data-desktop-detail>${esc(desktopReplacementDetail(catalogue, desktopReplacementInitial(catalogue)))}</small>
+      <div class="install-modes">${desktopReplacementOptions(catalogue)}</div>
+      <small>Tick nothing to keep the built-in TOS desktop.</small>
       ${canChooseSourceFolder() ? `<div class="desktop-source-choice">
         <button type="button" class="button compact" data-choose-desktop-folder>Other…</button>
         <small data-desktop-folder>Looks in the usual places, and downloads a free desktop if it is not there.</small>
       </div>` : ""}</div>`;
 }
 
-function desktopReplacementInitial(catalogue) {
-  const supplied = Object.fromEntries((catalogue.available || []).map(row => [row.id, row]));
-  const preferred = catalogue.recommended?.id;
-  return supplied[preferred]?.obtainable !== false ? preferred : "desktop-none";
-}
-
 function desktopReplacementOptions(catalogue) {
   const desktops = catalogue.desktops || [];
   const supplied = Object.fromEntries((catalogue.available || []).map(row => [row.id, row]));
-  const preferred = desktopReplacementInitial(catalogue);
-  return [{ id: "desktop-none", label: "None, keep the built-in TOS desktop" }]
-    .concat(desktops.map(desktop => ({ id: desktop.id, label: desktop.label })))
-    .map(option => {
-      const copy = supplied[option.id];
-      const catalogued = desktops.find(item => item.id === option.id);
-      // A free desktop with somewhere to download it from is offered whether
-      // or not a copy is here, because choosing it is what fetches it. Only
-      // one that is somebody's property and has not been supplied is refused.
-      const obtainable = copy ? copy.obtainable !== false : true;
-      const version = copy?.version ? ` ${copy.version}` : "";
-      const suffix = copy && !copy.available
-        ? (catalogued?.free ? " · downloads when chosen" : " · not supplied")
-        : version;
-      const chosen = option.id === preferred && obtainable;
-      return `<option value="${esc(option.id)}"${obtainable ? "" : " disabled"}${chosen ? " selected" : ""}>${esc(option.label)}${esc(suffix)}</option>`;
-    }).join("");
+  const preferred = catalogue.recommended?.id;
+  return desktops.map(desktop => {
+    const copy = supplied[desktop.id];
+    // A free desktop with somewhere to download it from is offered whether or
+    // not a copy is here, because ticking it is what fetches it. Only one that
+    // is somebody's property and has not been supplied is refused.
+    const obtainable = copy ? copy.obtainable !== false : true;
+    const here = Boolean(copy?.available);
+    const state = here
+      ? (copy.version ? `Version ${copy.version} is ready to install.` : "A copy is ready to install.")
+      : desktop.free
+        ? "No copy here yet, so ticking this downloads one."
+        : `No copy here yet. ${desktop.licence}`;
+    // One sentence in a list somebody is scanning. The whole of it is in the
+    // firmware notes for anyone who wants the rest.
+    const summary = String(desktop.note || "").split(". ")[0];
+    const recommended = preferred === desktop.id && obtainable
+      ? `<b class="desktop-recommended">Recommended.</b> `
+      : "";
+    const kind = desktop.companion ? " · runs under a desktop" : "";
+    return `<label class="check-field install-mode">
+      <input type="checkbox" name="driveDesktop" value="${esc(desktop.id)}"${obtainable ? "" : " disabled"}${preferred === desktop.id && obtainable ? " checked" : ""}>
+      <span><b>${esc(desktop.label)}${esc(kind)}</b><small>${recommended}${esc(summary)}. ${esc(state)}</small></span>
+    </label>`;
+  }).join("");
 }
 
 //: Running a title's own installer. There is no tree to copy: the installer
