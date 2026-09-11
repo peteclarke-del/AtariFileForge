@@ -1077,6 +1077,11 @@ body:has(dialog[open].failed) .pane .loading { display: none; }
 .field { display: grid; gap: 5px; margin: 10px 0; }
 /* Choosing where software is installed from: the button and the folder it is
    currently looking in, on one line so the choice and its answer stay together. */
+/* A choice inside a field is a label too, and the field's own caption rule
+   would otherwise shout its whole description in upper case. */
+.field .install-mode { text-transform: none; letter-spacing: normal; font-weight: 400; }
+.field .install-mode b { text-transform: none; letter-spacing: normal; }
+.desktop-recommended { color: var(--teal); }
 .desktop-source-choice { display: flex; align-items: center; gap: 8px; }
 .desktop-source-choice small { color: var(--muted); overflow-wrap: anywhere; }
 .field label { font: 500 10px DM Mono, monospace; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
