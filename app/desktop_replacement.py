@@ -25,7 +25,9 @@ itself, so it is one double-click away, and the result says so plainly.
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import os
+import re
 from pathlib import Path
 
 from . import atari_paths, volume_copy
@@ -82,6 +84,34 @@ class Source:
     url: str
 
 
+#: Gribnif's cookie jar manager. NeoDesk and Geneva both depend on the cookie
+#: it creates and the call it adds, and Geneva stops at boot with "You must run
+#: JARxxx before Geneva" without it, on every TOS, EmuTOS included. Each of
+#: their master disks carries a copy, and each INSTALL.SCR copies it into AUTO
+#: as JAR10.PRG, the digits being how many new cookies to make room for.
+#: Geneva's copies it unless a JAR*.PRG is already there; NeoDesk's then runs
+#: AUTOFRST to put it ahead of every other AUTO program except XBOOT, because a
+#: program that looks for a cookie has to find the jar already made.
+COOKIE_JAR = "JARXXX.PRG"
+COOKIE_JAR_INSTALLED = "JAR10.PRG"
+#: AUTO programs that stay ahead of the cookie jar, as NeoDesk's installer
+#: arranges: a boot manager decides what else runs at all.
+AUTO_BOOT_MANAGERS = ("XBOOT.PRG",)
+#: A GEM.CNF line naming the program Geneva starts as its desktop, whether in
+#: force or commented out as it is on the master disk.
+_SHELL_LINE = re.compile(r"^\s*#?\s*shell\s+(?P<path>\S+)", re.IGNORECASE)
+
+
+def _is_cookie_jar(name: str) -> bool:
+    """Whether an AUTO program is a JARxxx, under whatever number it was given."""
+    return fnmatch.fnmatch(name.upper(), "JAR*.PRG")
+
+
+def _first_after_boot_managers(order: list[str]) -> str | None:
+    """The AUTO program that runs first once any boot manager has run."""
+    return next((name for name in order if name not in AUTO_BOOT_MANAGERS), None)
+
+
 @dataclasses.dataclass(frozen=True)
 class Desktop:
     """One replacement desktop, and what installing it involves."""
@@ -119,6 +149,9 @@ class Desktop:
     #: The smallest machine it is worth putting on.
     memory_bytes: int = MIB
     licence: str = ""
+    #: Whether it needs Gribnif's cookie jar manager running from AUTO before
+    #: it starts. See :data:`COOKIE_JAR`.
+    cookie_jar: bool = False
     #: Whether the licence allows this to be fetched at all. A desktop that is
     #: somebody's property is installed from the operator's own copy or not at
     #: all.
@@ -179,6 +212,7 @@ DESKTOPS: tuple[Desktop, ...] = (
             "NEO_CLI.ACC", "NEO_CLI.NIC",
         ),
         auto_files=("NEOLOAD.PRG",),
+        cookie_jar=True,
         folder="NEODESK4",
         folder_names=("NEODESK", "NEODESK4"),
         machines=frozenset({"st", "megast", "ste", "megaste", "tt030"}),
@@ -267,6 +301,7 @@ GENEVA = Desktop(
         "GNVADESK.ACC", "GNVADESK.RSC",
     ),
     auto_files=("GENEVA.PRG",),
+    cookie_jar=True,
     folder="GENEVA",
     folder_names=("GENEVA",),
     machines=frozenset({"st", "megast", "ste", "megaste", "tt030"}),
@@ -354,6 +389,9 @@ class DesktopDistribution:
     control_panel: tuple[tuple[str, bytes], ...] = ()
     #: The release, read from the folder the distribution was found in.
     version: str = ""
+    #: Gribnif's cookie jar manager, where the desktop needs it and the
+    #: distribution carries it.
+    cookie_jar: bytes = b""
 
 
 def _wanted_names(desktop: Desktop) -> dict[str, str]:
@@ -365,6 +403,7 @@ def _wanted_names(desktop: Desktop) -> dict[str, str]:
         *desktop.auto_files,
         *desktop.accessories,
         *desktop.control_panel,
+        *((COOKIE_JAR,) if desktop.cookie_jar else ()),
     ):
         wanted[name.casefold()] = name
     return wanted
@@ -397,6 +436,7 @@ def _from_archive(desktop: Desktop, archive: Path) -> DesktopDistribution | None
             (name, held[name]) for name in desktop.control_panel if name in held
         ),
         version=_version_from(archive),
+        cookie_jar=held.get(COOKIE_JAR, b"") if desktop.cookie_jar else b"",
     )
 
 
@@ -422,6 +462,7 @@ def _from_disk(desktop: Desktop, image: Path) -> DesktopDistribution | None:
             (name, held[name]) for name in desktop.control_panel if name in held
         ),
         version=_version_from(image),
+        cookie_jar=held.get(COOKIE_JAR, b"") if desktop.cookie_jar else b"",
     )
 
 
@@ -477,6 +518,7 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
                 beside = _find(Path(directory), extra)
                 if beside is not None:
                     control_panel.append((extra, beside.read_bytes()))
+            jar = _find(Path(directory), COOKIE_JAR) if desktop.cookie_jar else None
             return DesktopDistribution(
                 desktop=desktop,
                 name=name,
@@ -487,6 +529,7 @@ def find_desktop(desktop: Desktop, directories=None) -> DesktopDistribution | No
                 accessories=tuple(accessories),
                 control_panel=tuple(control_panel),
                 version=_version_from(found),
+                cookie_jar=jar.read_bytes() if jar is not None else b"",
             )
         # Nothing unpacked, so try the archives sitting in the folder. This is
         # the case an operator lands in by choosing the folder their downloads
@@ -749,7 +792,8 @@ class DesktopReplacementMixin:
         # holds them, and that order is often the difference between a machine
         # that starts and one that does not. A program already there is left
         # exactly as it is, so a new one is added after it rather than taking
-        # its place in the sequence.
+        # its place in the sequence. The one exception is the cookie jar
+        # below, which the vendors' own installers put first.
         kept: list[str] = []
         for name, payload in distribution.auto:
             if not volume_copy.directory_exists(self, session, "AUTO"):
@@ -760,6 +804,19 @@ class DesktopReplacementMixin:
                 continue
             volume_copy.write_file(self, session, path, payload)
             written.append(path)
+        cookie_jar_notes: list[str] = []
+        if distribution.cookie_jar:
+            jar, installed, cookie_jar_notes = self._install_cookie_jar(
+                session, distribution.cookie_jar
+            )
+            (written if installed else kept).append(jar)
+        elif desktop.cookie_jar:
+            cookie_jar_notes = [
+                f"The copy of {desktop.label} used has no {COOKIE_JAR}, which "
+                f"{desktop.label} needs in AUTO before it will start. It is on "
+                "Gribnif's master disk; supply the whole disk rather than the "
+                "program alone."
+            ]
 
         # An accessory is loaded from the root of the boot drive and nowhere
         # else, so it cannot go in the program's folder however tidy that
@@ -804,6 +861,7 @@ class DesktopReplacementMixin:
             records.append(desktop_icon_record(program, desktop.label, drive=drive))
         merged, added = merge_desktop(existing, records)
         volume_copy.write_file(self, session, name, merged.encode("latin-1"))
+        shell_notes = self._start_neodesk_under_geneva(session, drive)
         self._mark_mutated(session)
         self._persist_session(session)
         return {
@@ -829,8 +887,117 @@ class DesktopReplacementMixin:
             "applications": installed_applications(merged),
             "warnings": self._accessory_warnings(session) + _start_up_notes(
                 desktop, bool(distribution.auto)
-            ),
+            ) + cookie_jar_notes + shell_notes,
         }
+
+    def _install_cookie_jar(
+        self, session: ImageSession, payload: bytes
+    ) -> tuple[str, bool, list[str]]:
+        """Put Gribnif's cookie jar manager at the front of AUTO.
+
+        Both INSTALL.SCR scripts copy it in as JAR10.PRG, and NeoDesk's then
+        moves it ahead of everything but XBOOT. One the operator already has,
+        under whatever number, is left where it is: it may be where they want
+        it, and a second jar would only make a second, smaller jar.
+        """
+        if not volume_copy.directory_exists(self, session, "AUTO"):
+            self.make_directory(session, "AUTO")
+        order = self._auto_order(session)
+        present = next((name for name in order if _is_cookie_jar(name)), None)
+        if present is not None:
+            notes = []
+            if _first_after_boot_managers(order) != present:
+                notes.append(
+                    f"AUTO already had {present}, which was left where it is. "
+                    "NeoDesk and Geneva both expect the cookie jar to run before "
+                    "any other AUTO program except XBOOT, so move it to the "
+                    "front if either fails to start."
+                )
+            return atari_paths.join("AUTO", present), False, notes
+        path = atari_paths.join("AUTO", COOKIE_JAR_INSTALLED)
+        volume_copy.write_file(self, session, path, payload)
+        self._run_first_in_auto(session, COOKIE_JAR_INSTALLED)
+        return path, True, []
+
+    def _run_first_in_auto(self, session: ImageSession, name: str) -> None:
+        """Move one AUTO program ahead of the rest, as AUTOFRST does.
+
+        TOS runs AUTO in the order the directory holds its entries. The engine
+        has no call to reorder a directory, so the folder's programs are
+        written back in the new order, each with its own bytes, attributes and
+        datestamp; a rewritten entry takes the first free slot, so the order
+        written is the order stored. A boot manager stays in front.
+        """
+        from atarinut.file import FA_READONLY
+
+        with self.gemdos_mount(session, writable=True) as mount:
+            volume = mount.volume
+            names = [
+                entry.name for entry in volume.iter_entries("AUTO")
+                if not entry.is_dir and entry.name not in (".", "..")
+            ]
+            leading = [item for item in names if item in AUTO_BOOT_MANAGERS]
+            wanted = leading + [name] + [
+                item for item in names if item != name and item not in leading
+            ]
+            if wanted == names:
+                return
+            held = {}
+            for item in names:
+                path = f"AUTO\\{item}"
+                meta = volume.atari_meta(path)
+                held[item] = (volume.read_bytes(path), meta)
+                if meta.attributes & FA_READONLY:
+                    volume.set_access(path, meta.attributes & ~FA_READONLY)
+                volume.remove(path)
+            for item in wanted:
+                data, meta = held[item]
+                volume.write_bytes(f"AUTO\\{item}", data, meta)
+
+    def _start_neodesk_under_geneva(self, session: ImageSession, drive: str) -> list[str]:
+        """Have Geneva start NeoDesk as its desktop when both are on the drive.
+
+        Geneva's installer asks whether NeoDesk is there and, if it is, writes
+        ``shell`` and NeoDesk's path into GEM.CNF, which is how Geneva brings
+        NeoDesk up when the machine starts. The file on the master disk has
+        that line commented out. Installing either of the two second has to
+        make the same change, or the drive boots to Geneva's bare menu bar.
+        A shell line naming another program is somebody's choice and stays.
+        """
+        neodesk = DESKTOPS_BY_KEY["desktop-neodesk"]
+        settings = atari_paths.join(GENEVA.folder, "GEM.CNF")
+        program = atari_paths.join(neodesk.folder, "NEODESK.EXE")
+        if not (
+            volume_copy.entry_exists(self, session, settings)
+            and volume_copy.entry_exists(self, session, program)
+        ):
+            return []
+        target = f"{drive.rstrip(':') or 'C'}:\\{program}"
+        text = self.read_file(session, settings).decode("latin-1")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines()
+        active = [line for line in lines if _SHELL_LINE.match(line) and not line.lstrip().startswith("#")]
+        if any(_SHELL_LINE.match(line).group("path").upper() == target.upper() for line in active):
+            return []
+        if active:
+            return [
+                f"Geneva's {settings} already starts {_SHELL_LINE.match(active[0]).group('path')} "
+                "as its desktop, so it was left alone. Change that line to "
+                f"shell {target} to have Geneva start NeoDesk instead."
+            ]
+        line = f"shell {target}"
+        commented = next((index for index, item in enumerate(lines) if _SHELL_LINE.match(item)), None)
+        if commented is None:
+            lines.append(line)
+        else:
+            lines[commented] = line
+        volume_copy.write_file(
+            self, session, settings, (newline.join(lines) + newline).encode("latin-1")
+        )
+        return [
+            f"Geneva will start NeoDesk as its desktop: {settings} now reads "
+            f"\"{line}\", as Geneva's own installer writes it when NeoDesk is present."
+        ]
 
 
 __all__ = [
