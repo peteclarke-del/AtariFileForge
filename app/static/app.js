@@ -3647,7 +3647,10 @@ async function showPrepareDrive(index) {
     const driver = published.find(item => item.id === id);
     const copy = supplied[id];
     const note = driver?.note || DRIVE_DRIVERS.find(item => item.value === id)?.detail || "";
-    if (!copy || copy.available) return note;
+    // Loaders saved from a drive this driver prepared are written without
+    // another drive open, which is worth saying where the choice is made.
+    const saved = copy?.loaders ? ` ${copy.loaders[0].toUpperCase()}${copy.loaders.slice(1)} are written to this drive, so a machine running its original TOS finds it without another drive open.` : "";
+    if (!copy || copy.available) return `${note}${saved}`;
     // A driver that may be fetched is offered without a copy, because
     // choosing it is what fetches it. One that is sold says so instead.
     if (copy.obtainable !== false) {
@@ -3683,7 +3686,8 @@ async function showPrepareDrive(index) {
         <option value="">The driver's own files</option>
         ${loaderSources.map(([id, name]) => `<option value="${esc(id)}">Copy from ${esc(name)}</option>`).join("")}
       </select>
-      <small>AHDI and ICD Pro keep their loaders inside their own installers, so a drive they did not prepare is never found by a machine running its original TOS. ${loaderSources.length ? "Choose an open drive this driver has already prepared and its two loaders are copied here; nothing else of that drive is." : "Open a drive this driver has already prepared in another pane to copy its loaders here."}</small></div>
+      <small>AHDI and ICD Pro keep their loaders inside their own installers, so a drive they did not prepare is never found by a machine running its original TOS. The driver's own files include loaders saved in the boot loaders folder. ${loaderSources.length ? "Choose an open drive this driver has already prepared and its two loaders are copied here; nothing else of that drive is." : "Open a drive this driver has already prepared in another pane to copy its loaders here."}</small>
+      ${loaderSources.length ? '<label class="check-field"><input type="checkbox" name="saveLoaders" value="yes" checked> Keep a copy of the loaders in the boot loaders folder, so later drives need no other drive open</label>' : ""}</div>
     ${desktopReplacementField(desktops)}
     <label class="check-field"><input type="checkbox" name="createFolders" value="yes" checked> Create the folders a prepared drive expects (AUTO, GEMSYS, GAMES)</label>
     <label class="check-field"><input type="checkbox" name="writeDesktop" value="yes" checked> Write the desktop configuration this drive's TOS reads, DESKTOP.INF for TOS 1.x or NEWDESK.INF for TOS 2 and later, if the volume has none</label>
@@ -3704,6 +3708,7 @@ async function showPrepareDrive(index) {
           createFolders: form.get("createFolders") === "yes",
           desktop: form.get("writeDesktop") === "yes",
           loaderImage: form.get("loaderImage") || undefined,
+          saveLoaders: Boolean(form.get("loaderImage")) && form.get("saveLoaders") === "yes",
           operationId,
         }),
       }));
@@ -3745,6 +3750,7 @@ async function showPrepareDrive(index) {
     await loadDirectory(index);
     (result.warnings || []).forEach(warning => toast(warning, "warning"));
     (result.notes || []).forEach(note => toast(note));
+    if (result.savedLoaders) toast(`The ${result.label} boot loaders were saved in ${result.savedLoaders.folder}, so later drives need no other drive open.`);
     toast(result.driver.installed
       ? `${result.label} installed on ${target}.`
       : `${target} prepared to start driverless under EmuTOS.`);
