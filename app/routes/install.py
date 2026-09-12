@@ -179,6 +179,11 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
         data = payload()
         session = service.get(image_id)
         apply_partition(service, session, data.get("partition"))
+        # Another open drive the same driver prepared, whose loaders are
+        # copied. It is looked up like any image, so it has to be the
+        # operator's own session.
+        loader_image = str(data.get("loaderImage") or "").strip()
+        loader_from = service.get(loader_image) if loader_image else None
         with operations.tracked(
             data.get("operationId"),
             "Preparing the drive",
@@ -187,6 +192,7 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
             result = service.prepare_drive(
                 session,
                 driver=str(data.get("driver") or DRIVERLESS),
+                loader_from=loader_from,
                 create_folders=data.get("createFolders", True) is not False,
                 directories=_chosen_folder(data.get("folder")),
                 download=data.get("download", True) is not False,

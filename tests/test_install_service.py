@@ -365,6 +365,8 @@ class DriveSoftwareAuditTests(unittest.TestCase):
         self.addCleanup(self._temporary.cleanup)
         self.service = DiskService(self.root / "work")
         self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
+        # The audit reads NEWDESK.INF, the TOS 2 desktop this drive is for.
+        self.drive.hardware_profile = {"machine": "megaste", "addons": ["tos-206"]}
         self.service.select_partition(self.drive, 0)
         self.service.prepare_drive(self.drive)
         self.service.make_directory(self.drive, "GAMES\\CHUCK")

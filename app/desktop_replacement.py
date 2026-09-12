@@ -32,16 +32,9 @@ from pathlib import Path
 
 from . import atari_paths, volume_copy
 from .drive_preparation import (
-    DESKTOP_FILES,
-    NEWDESK,
     REPOSITORY_ROOT,
     _find,
     _version_from,
-    application_record,
-    default_desktop,
-    desktop_icon_record,
-    installed_applications,
-    merge_desktop,
 )
 from .image_session import ImageSession
 from .errors import DiskError
@@ -843,24 +836,10 @@ class DesktopReplacementMixin:
             written.append(path)
 
         drive = self.partition_label(session) or "C"
-        name = next(
-            (item for item in DESKTOP_FILES if volume_copy.entry_exists(self, session, item)),
-            "",
+        placed = self._install_on_desktop(
+            session, program, label=desktop.label, on_desktop=on_desktop,
         )
-        # A volume with no desktop configuration at all is given the default
-        # one to add to. Reading a file that is known not to be there raises
-        # out of the engine rather than returning nothing, so the existence
-        # check decides, not the exception.
-        existing = (
-            self.read_file(session, name).decode("latin-1")
-            if name else default_desktop(drive)
-        )
-        name = name or NEWDESK
-        records = [application_record(program, drive=drive)]
-        if on_desktop:
-            records.append(desktop_icon_record(program, desktop.label, drive=drive))
-        merged, added = merge_desktop(existing, records)
-        volume_copy.write_file(self, session, name, merged.encode("latin-1"))
+        name, added = placed["file"], placed["records"]
         shell_notes = self._start_neodesk_under_geneva(session, drive)
         self._mark_mutated(session)
         self._persist_session(session)
@@ -884,10 +863,10 @@ class DesktopReplacementMixin:
             "autoOrder": self._auto_order(session),
             "desktopFile": name,
             "records": added,
-            "applications": installed_applications(merged),
+            "applications": placed["applications"],
             "warnings": self._accessory_warnings(session) + _start_up_notes(
                 desktop, bool(distribution.auto)
-            ) + cookie_jar_notes + shell_notes,
+            ) + cookie_jar_notes + shell_notes + placed["notes"],
         }
 
     def _install_cookie_jar(

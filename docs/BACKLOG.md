@@ -66,12 +66,17 @@ and tests. An unchecked item remains in scope.
       distribution carries no 512-byte root-sector loader, and most do not
       because the loader lives inside the driver's own Atari installer, the
       root sector is left alone and the result says so.
+- [x] Copy a driver's root-sector and boot-sector loaders from a drive that
+      driver already prepared, keeping the target's partition table and BIOS
+      parameter block, so AHDI and ICD Pro drives boot on an original TOS ROM.
 - [x] Offer driverless booting under the bundled EmuTOS as the default, since
       it needs no third-party file.
 - [x] Stage a floppy onto a drive, install a staged title into its own folder,
       and run a title's own installer under the emulator.
 - [x] Write and merge `DESKTOP.INF` entries so an installed title appears on
       the desktop.
+- [x] Write `DESKTOP.INF` in TOS 1.x's own spelling for a TOS 1.x drive, and
+      `NEWDESK.INF` for TOS 2.05 and later.
 
 ## 5. Analysis, reports and deployment
 
