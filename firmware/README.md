@@ -142,6 +142,33 @@ You do not need a driver at all if you are booting the drive under EmuTOS,
 which mounts a partitioned drive without one. That is the default, and it is
 the only route that needs nothing you have to find first.
 
+## Hard-disk boot loaders
+
+A driver is only half of what a machine running its original TOS ROM needs.
+The ROM runs a loader in the drive's root sector, which runs a second loader in
+the boot partition's boot sector, which loads the driver file. AHDI and ICD
+Pro keep both loaders inside their own Atari installation programs rather than
+as files, so the place to get them is a drive that driver has already
+prepared.
+
+The prepare-drive dialog copies them from such a drive when it is open in the
+other pane, and keeps a copy here so that later drives do not need it open.
+Each driver release gets a folder of its own under `firmware/bootloaders/`, or
+under `~/.config/atari-file-forge/bootloaders`, which is where the application
+saves them:
+
+| File | Holds |
+| --- | --- |
+| `ROOTLOAD.BIN` | The root sector's loader, with the partition table below it cleared |
+| `BOOTLOAD.BIN` | The boot sector's loader, with its serial number and parameter block cleared |
+| `SOURCE.TXT` | Which drive the pair was saved from, and which file it loads |
+
+Both sectors keep a valid boot checksum. When a drive is prepared, the loaders
+go in and the drive keeps its own partition table and parameter block. The
+pair names the driver file it loads, `ICDBOOT.SYS` or `SHDRIVER.SYS`, and that
+decides which driver it is used for, not the folder's name. The loaders are
+the driver's own code, so this folder is ignored by Git like the drivers are.
+
 ## Replacement desktops
 
 The built-in TOS desktop has no icons of your own, no program groups and no

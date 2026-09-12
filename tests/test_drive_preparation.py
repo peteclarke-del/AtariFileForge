@@ -278,6 +278,12 @@ class DrivePreparationTests(unittest.TestCase):
         self.addCleanup(
             setattr, drive_preparation, "REPOSITORY_DRIVER_DIR", self._previous_repository,
         )
+        # Saved loaders are used without being asked for, so a developer's own
+        # would otherwise stand in for the ones a test means to supply.
+        self.bootloaders = self.root / "bootloaders"
+        for name in ("BOOTLOADER_DIR", "REPOSITORY_BOOTLOADER_DIR"):
+            self.addCleanup(setattr, drive_preparation, name, getattr(drive_preparation, name))
+            setattr(drive_preparation, name, self.bootloaders)
 
     def _drive(self, name: str = "SYSTEM", capacity: str = "40MB", profile=TOS_206):
         drive = self.service.create_blank("hd", name, capacity)
@@ -572,6 +578,97 @@ class DrivePreparationTests(unittest.TestCase):
     def test_a_driverless_drive_takes_no_loader(self) -> None:
         with self.assertRaises(DiskError):
             self.service.prepare_drive(self._drive("TARGET"), loader_from=self._prepared_by())
+
+    # -- loaders saved in the boot loaders folder --
+    def test_loaders_are_saved_without_the_drive_they_came_from(self) -> None:
+        """The table and parameter block describe that drive, so they stay behind."""
+        from atarinut.filesystem.blocks import is_executable_sector
+
+        reference = self._prepared_by()
+
+        saved = self.service.save_boot_chain(reference, "driver-icd")
+
+        folder = Path(saved["folder"])
+        self.assertEqual(folder, self.bootloaders / "ICDPRO")
+        root = (folder / drive_preparation.ROOT_LOADER_FILE).read_bytes()
+        boot = (folder / drive_preparation.BOOT_LOADER_FILE).read_bytes()
+        self.assertTrue(is_executable_sector(root))
+        self.assertTrue(is_executable_sector(boot))
+        self.assertEqual(root[:len(self.ROOT_LOADER)], self.ROOT_LOADER)
+        self.assertFalse(any(root[0x156:0x1FE]))
+        self.assertEqual(boot[0x08:0x1E], bytes(0x16))
+        self.assertEqual(boot[0x1E:0x29], b"ICDBOOT SYS")
+        self.assertIn(reference.name, (folder / drive_preparation.LOADER_SOURCE_FILE).read_text())
+        self.assertEqual(saved["loads"], "ICDBOOT.SYS")
+
+    def test_a_drive_is_prepared_from_saved_loaders_with_no_other_drive_open(self) -> None:
+        self.service.save_boot_chain(self._prepared_by(), "driver-icd")
+        drive = self._drive("TARGET")
+        start = self.service.list_partitions(drive)[0]["startSector"]
+        self._supply("ICDPRO_6.55A", "ICDBOOT.PRG")
+
+        result = self.service.prepare_drive(drive, driver="driver-icd")
+
+        root, boot = self._sector(drive, 0), self._sector(drive, start)
+        self.assertEqual(root[:len(self.ROOT_LOADER)], self.ROOT_LOADER)
+        self.assertEqual(boot[0x1E:0x29], b"ICDBOOT SYS")
+        self.assertEqual(root[0x1C6] & 0x80, 0x80)
+        self.assertEqual(result["loader"]["from"], "the loaders saved in ICDPRO")
+        self.assertEqual(result["files"][0], "ICDBOOT.SYS")
+        self.assertEqual(
+            next(row for row in self.service.available_drivers() if row["id"] == "driver-icd")["loaders"],
+            "the loaders saved in ICDPRO",
+        )
+
+    def test_saved_loaders_for_another_driver_are_not_used(self) -> None:
+        """The pair says which driver it loads, whatever its folder is called."""
+        self.service.save_boot_chain(self._prepared_by(b"SHDRIVERSYS"), "driver-ahdi")
+        drive = self._drive("TARGET")
+        self._supply("ICDPRO_6.55A", "ICDBOOT.PRG")
+
+        result = self.service.prepare_drive(drive, driver="driver-icd")
+
+        self.assertIsNone(result["loader"])
+        self.assertTrue(
+            any("no root-sector loader" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_a_loader_too_long_for_an_icd_table_is_refused(self) -> None:
+        """AHDI's loader runs over ICD's extra entries; cut short, it would crash."""
+        from types import SimpleNamespace
+
+        from atarinut.filesystem.blocks import apply_boot_checksum
+
+        class OneSector:
+            written = None
+
+            def read_block(self, _number):
+                return bytes(512)
+
+            def write_block(self, _number, data):
+                self.written = data
+
+            def flush(self):
+                pass
+
+        root = bytearray(512)
+        root[:0x1B6] = b"\x4e\x71" * (0x1B6 // 2)
+        apply_boot_checksum(root, True)
+        chain = drive_preparation.BootChain(
+            root=bytes(root), root_limit=0x1B6, boot=bytes(512),
+            loads="SHDRIVER.SYS", source="AHDIDISK.hd",
+        )
+        self._supply("AHDI_6.061", "SHDRIVER.SYS")
+        sectors = OneSector()
+
+        with self.assertRaises(DiskError) as raised:
+            self.service._write_root_sector(
+                sectors, SimpleNamespace(scheme="icd"), driver_for("driver-ahdi"),
+                lambda *_args: None, None, False, chain,
+            )
+        self.assertIn("ICD partition table", str(raised.exception))
+        self.assertIsNone(sectors.written)
 
     # -- the desktop configuration the drive's own TOS reads --
     def test_which_desktop_file_a_drive_gets_follows_its_tos(self) -> None:

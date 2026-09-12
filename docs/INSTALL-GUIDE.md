@@ -121,7 +121,26 @@ on the other drive is not one the ROM executes, and when its boot sector loads a
 different driver's file from the one chosen, since the loader would then look
 for a file that is not there. A partition further down an XGM chain has no
 entry in the root sector to flag, so preparing one says so; prepare `C:`
-instead.
+instead. AHDI's root loader is longer than ICD's and runs over the bytes where
+an ICD partition table keeps its extra entries, so it is refused on a drive
+partitioned for ICD rather than cut short into one that crashes at boot.
+
+**Loaders kept for next time.** The dialog keeps a copy of the two loaders it
+copies, unless you untick **Keep a copy**, in the boot loaders folder:
+`~/.config/atari-file-forge/bootloaders`, or the directory named by
+`ATARI_FILE_FORGE_BOOTLOADER_DIR`, and `firmware/bootloaders` beside the source
+is read too. Each driver release gets a folder of its own, `ICDPRO_6.55A` for
+instance, holding `ROOTLOAD.BIN`, the root sector's loader without the
+partition table, `BOOTLOAD.BIN`, the boot sector without its serial number and
+parameter block, and `SOURCE.TXT`, which says which drive they came from.
+
+From then on, preparing any drive with that driver writes the saved loaders
+without another drive open, and the driver's description in the dialog says
+they are saved. Which driver a pair belongs to is read from the file its boot
+sector loads, so a pair saved for AHDI is never used for ICD Pro, whatever its
+folder is called. A drive chosen under **Boot loader** is still used in
+preference to a saved pair. The loaders are the driver's own code, so the
+folder is ignored by Git in the same way the drivers are.
 
 **A drive with a PC partition table.** A drive prepared on a PC carries a master
 boot record, whose own bytes occupy the space an Atari loader would need. Such a

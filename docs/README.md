@@ -26,7 +26,7 @@ that match the running frontend.
 | Inspect, compare, build, patch or program TOS and cartridge ROMs | [ROM image handbook](ROM-GUIDE.md) |
 | Read a preservation capture that records the physical disk | [IPF and preservation captures](IPF-GUIDE.md) |
 | Build and validate a release | [Release checklist](RELEASE-CHECKLIST.md) |
-| Review the current release, 0.3.0 | [Atari File Forge 0.3.0 notes](releases/0.3.0.md) |
+| Review the current release, 0.4.0 | [Atari File Forge 0.4.0 notes](releases/0.4.0.md) |
 | Contribute code or documentation | [Contribution guide](../CONTRIBUTING.md) |
 | Understand maintainership and project decisions | [Project governance](../GOVERNANCE.md) |
 | Report a vulnerability | [Security policy](../SECURITY.md) |

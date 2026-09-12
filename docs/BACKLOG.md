@@ -69,6 +69,8 @@ and tests. An unchecked item remains in scope.
 - [x] Copy a driver's root-sector and boot-sector loaders from a drive that
       driver already prepared, keeping the target's partition table and BIOS
       parameter block, so AHDI and ICD Pro drives boot on an original TOS ROM.
+- [x] Keep copied loaders in a boot loaders folder, one folder per driver
+      release, and use them for every later drive prepared with that driver.
 - [x] Offer driverless booting under the bundled EmuTOS as the default, since
       it needs no third-party file.
 - [x] Stage a floppy onto a drive, install a staged title into its own folder,
