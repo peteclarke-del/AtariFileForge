@@ -199,6 +199,13 @@ def create_install_blueprint(service: DiskService, operations: OperationRegistry
                 desktop=data.get("desktop", True) is not False,
                 progress=progress,
             )
+        # Keeping a copy is what lets the next drive be prepared without this
+        # one open. It is done once the drive is prepared, so a copy that
+        # cannot be kept never costs the preparation itself.
+        if loader_from is not None and data.get("saveLoaders"):
+            result["savedLoaders"] = service.save_boot_chain(
+                loader_from, str(data.get("driver") or DRIVERLESS),
+            )
         return jsonify(image=service.summary(session), **result)
 
     @blueprint.post("/api/images/<image_id>/install/desktop")

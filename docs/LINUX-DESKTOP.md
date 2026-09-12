@@ -64,7 +64,7 @@ A release `.deb` installs the same desktop host without retaining a Git
 checkout or creating a per-checkout virtual environment:
 
 ```bash
-sudo apt install ./atari-file-forge_0.3.0-1~deb13_amd64.deb
+sudo apt install ./atari-file-forge_0.4.0-1~deb13_amd64.deb
 ```
 
 The package places the shared application in `/opt/atari-file-forge` and the
@@ -89,9 +89,10 @@ Python extensions are not assumed to be portable between different Python
 ABIs. The package bundles the GPL EmuTOS images, so the emulator starts
 without a TOS ROM of your own, and intentionally excludes TOS ROMs, commercial
 images and managed emulator binaries. An installed package looks for your own
-TOS ROMs in `~/.config/atari-file-forge/tos` and your hard-disk drivers in
-`~/.config/atari-file-forge/drivers`, not in a checkout's `firmware/` folder;
-link or copy them there. Configure installed emulators with the variables in
+TOS ROMs in `~/.config/atari-file-forge/tos`, your hard-disk drivers in
+`~/.config/atari-file-forge/drivers` and saved boot loaders in
+`~/.config/atari-file-forge/bootloaders`, not in a checkout's `firmware/`
+folder; link or copy them there. Configure installed emulators with the variables in
 the Emulator paths section below.
 
 Launch **Atari File Forge** from the desktop application menu, run

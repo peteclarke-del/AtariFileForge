@@ -78,6 +78,25 @@ DRIVER_DIR = Path(
 #: which is the same arrangement ``firmware/tos`` already has for TOS ROMs.
 REPOSITORY_DRIVER_DIR = REPOSITORY_ROOT / "firmware" / "drivers"
 
+#: Where a driver's two boot loaders are kept once they have been saved from a
+#: drive that driver prepared, one folder per driver release. They are the
+#: driver's own code, so like the drivers they are never committed, and this
+#: is the one firmware folder the application writes to.
+BOOTLOADER_DIR = Path(
+    os.environ.get(
+        "ATARI_FILE_FORGE_BOOTLOADER_DIR",
+        Path.home() / ".config" / "atari-file-forge" / "bootloaders",
+    )
+)
+REPOSITORY_BOOTLOADER_DIR = REPOSITORY_ROOT / "firmware" / "bootloaders"
+
+#: The two sectors a saved pair is kept as, and a note of where they came from.
+#: They are named apart from ``BOOT_CODE_NAMES`` because each is a whole
+#: sector of its own kind rather than code for the root sector alone.
+ROOT_LOADER_FILE = "ROOTLOAD.BIN"
+BOOT_LOADER_FILE = "BOOTLOAD.BIN"
+LOADER_SOURCE_FILE = "SOURCE.TXT"
+
 #: Where XControl reads control panel modules from unless its own CPXPATH
 #: says otherwise.
 CPX_FOLDER = "CPX"
@@ -305,6 +324,11 @@ def driver_directories() -> list[Path]:
     return [DRIVER_DIR, REPOSITORY_DRIVER_DIR]
 
 
+def bootloader_directories() -> list[Path]:
+    """Where saved boot loaders are looked for, in order."""
+    return [BOOTLOADER_DIR, REPOSITORY_BOOTLOADER_DIR]
+
+
 # ---------------------------------------------------------------------------
 # The operator's own copy of a driver
 # ---------------------------------------------------------------------------
@@ -358,6 +382,91 @@ def _padded_name(name: str) -> bytes:
     """A GEMDOS name as a boot sector stores it: eight and three, space padded."""
     stem, _, extension = name.upper().partition(".")
     return (stem.ljust(8) + extension.ljust(3)).encode("ascii")
+
+
+def _loader_limit(root: bytes, scheme: str = "ahdi") -> int:
+    """Where a root sector's loader ends and its partition fields begin.
+
+    ICD's loader stops short of the eight extra entries ICD keeps at 0x156.
+    AHDI's runs on to the drive geometry at 0x1B6, over the bytes those ICD
+    entries would use, so the sector's own contents decide which it is.
+    """
+    if scheme == "icd" or not any(root[ICD_BOOT_CODE_LIMIT:AHDI_LOADER_LIMIT]):
+        return ICD_BOOT_CODE_LIMIT
+    return AHDI_LOADER_LIMIT
+
+
+def _boot_chain(
+    root: bytes, boot: bytes, driver: Driver, source: str, *, root_limit: int,
+) -> BootChain:
+    """Check two sectors form a loader pair for ``driver``, and make one.
+
+    Both have to be ones the ROM executes, and the boot sector has to name a
+    file this driver installs, so a loader that starts another driver is
+    refused rather than copied onto a drive that will then not find its driver.
+    """
+    from atarinut.filesystem.blocks import is_executable_sector
+
+    if not (
+        len(root) == SECTOR_SIZE and len(boot) == SECTOR_SIZE
+        and is_executable_sector(root) and is_executable_sector(boot)
+    ):
+        raise DiskError(
+            f"{source} does not boot through a hard-disk driver: its root "
+            "sector and its boot partition's boot sector both have to be ones the "
+            "ROM executes, and they are not. Choose a drive the driver prepared."
+        )
+    named = [
+        (candidate, filename)
+        for candidate in DRIVERS
+        for filename in candidate.files
+        if filename.upper().endswith(".SYS") and _padded_name(filename) in boot.upper()
+    ]
+    if not named:
+        raise DiskError(
+            f"The boot sector of {source} names no driver file this "
+            "recognises, so there is no telling which driver its loader starts."
+        )
+    owner, loads = named[0]
+    if owner.key != driver.key:
+        raise DiskError(
+            f"The loader on {source} starts {loads}, which is the "
+            f"{owner.label} driver, not {driver.label}. Choose {owner.label}, or "
+            f"a drive {driver.label} prepared."
+        )
+    return BootChain(root=root, root_limit=root_limit, boot=boot, loads=loads, source=source)
+
+
+def saved_boot_chain(driver: Driver, directories=None) -> BootChain | None:
+    """The loaders saved for ``driver``, if a pair of them has been saved.
+
+    Each pair sits in a folder of its own, and the boot sector names the file
+    it loads, so which driver a pair belongs to is read from the pair rather
+    than from what the folder is called. A pair that fails the checks, or
+    belongs to another driver, is passed over.
+    """
+    if driver.key == DRIVERLESS:
+        return None
+    for directory in (directories if directories is not None else bootloader_directories()):
+        root_dir = Path(directory)
+        try:
+            folders = [root_dir, *sorted(item for item in root_dir.iterdir() if item.is_dir())]
+        except OSError:
+            continue
+        for folder in folders:
+            root_file, boot_file = folder / ROOT_LOADER_FILE, folder / BOOT_LOADER_FILE
+            try:
+                root, boot = root_file.read_bytes(), boot_file.read_bytes()
+            except OSError:
+                continue
+            try:
+                return _boot_chain(
+                    root, boot, driver, f"the loaders saved in {folder.name}",
+                    root_limit=_loader_limit(root),
+                )
+            except DiskError:
+                continue
+    return None
 
 
 def _version_from(path: Path) -> str:
@@ -912,15 +1021,7 @@ class DrivePreparationMixin:
         return reader_for(session.path, writable=writable), disk
 
     def boot_chain_from(self, reference: ImageSession, driver: Driver) -> BootChain:
-        """Read a driver's loaders off a drive that driver has already prepared.
-
-        Both sectors have to be ones the ROM executes, and the boot sector has
-        to name a file this driver installs, so a loader that starts another
-        driver is refused rather than copied onto a drive that will then not
-        find its driver.
-        """
-        from atarinut.filesystem.blocks import is_executable_sector
-
+        """Read a driver's loaders off a drive that driver has already prepared."""
         reader, disk = self._drive_sectors(reference)
         try:
             root = bytes(reader.read_block(0))
@@ -931,37 +1032,59 @@ class DrivePreparationMixin:
             boot = bytes(reader.read_block(partition.start_sector)) if partition else b""
         finally:
             reader.close()
-        if not (is_executable_sector(root) and boot and is_executable_sector(boot)):
-            raise DiskError(
-                f"{reference.name} does not boot through a hard-disk driver: its root "
-                "sector and its boot partition's boot sector both have to be ones the "
-                "ROM executes, and they are not. Choose a drive the driver prepared."
-            )
-        named = [
-            (candidate, filename)
-            for candidate in DRIVERS
-            for filename in candidate.files
-            if filename.upper().endswith(".SYS") and _padded_name(filename) in boot.upper()
-        ]
-        if not named:
-            raise DiskError(
-                f"The boot sector of {reference.name} names no driver file this "
-                "recognises, so there is no telling which driver its loader starts."
-            )
-        owner, loads = named[0]
-        if owner.key != driver.key:
-            raise DiskError(
-                f"The loader on {reference.name} starts {loads}, which is the "
-                f"{owner.label} driver, not {driver.label}. Choose {owner.label}, or "
-                f"a drive {driver.label} prepared."
-            )
-        return BootChain(
-            root=root,
-            root_limit=ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else AHDI_LOADER_LIMIT,
-            boot=boot,
-            loads=loads,
-            source=reference.name,
+        return _boot_chain(
+            root, boot, driver, reference.name, root_limit=_loader_limit(root, disk.scheme),
         )
+
+    def save_boot_chain(
+        self, reference: ImageSession, driver: str, *, directory: Path | None = None,
+    ) -> dict:
+        """Keep a driver's loaders from ``reference``, so later drives need no copy open.
+
+        Only the loaders are kept. The root sector is saved without the
+        partition table below it and the boot sector without its serial number
+        and parameter block, because those describe the drive they came from.
+        Both checksums are recomputed so each saved sector still reads as one
+        the ROM executes. The folder is named for the driver and the release
+        the drive itself records, ``ICDPRO_6.55A`` say.
+        """
+        from atarinut.filesystem.blocks import apply_boot_checksum
+
+        chosen = driver_for(driver)
+        chain = self.boot_chain_from(reference, chosen)
+        try:
+            version = self.drive_preparation(reference)["driver"].get("version") or ""
+        except DiskError:
+            version = ""
+        name = f"{chosen.folder_names[0]}_{version}" if version else chosen.folder_names[0]
+        folder = Path(directory or BOOTLOADER_DIR) / name
+        root = bytearray(chain.root)
+        root[chain.root_limit:] = bytes(SECTOR_SIZE - chain.root_limit)
+        apply_boot_checksum(root, True)
+        boot = bytearray(chain.boot)
+        boot[BOOT_SECTOR_OWN] = bytes(BOOT_SECTOR_OWN.stop - BOOT_SECTOR_OWN.start)
+        apply_boot_checksum(boot, True)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / ROOT_LOADER_FILE).write_bytes(bytes(root))
+            (folder / BOOT_LOADER_FILE).write_bytes(bytes(boot))
+            (folder / LOADER_SOURCE_FILE).write_text(
+                f"{chosen.label} boot loaders{f' {version}' if version else ''}\n"
+                f"Saved from {reference.name}, which loads {chain.loads}.\n"
+                f"{ROOT_LOADER_FILE}: the root sector's loader, below the partition table.\n"
+                f"{BOOT_LOADER_FILE}: the boot partition's boot sector, without its "
+                "serial number and parameter block.\n"
+                "The driver's own code: never commit or share these files.\n",
+                encoding="ascii",
+            )
+        except OSError as exc:
+            raise DiskError(f"The loaders could not be saved in {folder}: {exc.strerror}.") from exc
+        return {
+            "folder": str(folder),
+            "files": [ROOT_LOADER_FILE, BOOT_LOADER_FILE],
+            "loads": chain.loads,
+            "driver": chosen.key,
+        }
 
     def drive_preparation(self, session: ImageSession) -> dict:
         """What this drive has been prepared with, read off the drive itself.
@@ -1044,16 +1167,21 @@ class DrivePreparationMixin:
                     "obtainable": True,
                     "version": "",
                     "source": "",
+                    "loaders": "",
                 })
                 continue
             distribution = find_distribution(driver, directories)
             here = distribution is not None
+            saved = saved_boot_chain(driver)
             found.append({
                 "id": driver.key,
                 "available": here,
                 "obtainable": here or bool(driver.free and driver.sources),
                 "version": distribution.version if distribution else "",
                 "source": str(distribution.source) if distribution else "",
+                # Loaders saved from a drive this driver prepared, which
+                # preparation writes without another drive open.
+                "loaders": saved.source if saved else "",
             })
         return found
 
@@ -1079,7 +1207,8 @@ class DrivePreparationMixin:
         ``loader_from`` is a drive the chosen driver has already prepared. Its
         root-sector and boot-sector loaders are copied here, which is what a
         real TOS ROM needs to find the driver when the distribution carries no
-        loader of its own, as AHDI and ICD Pro do not.
+        loader of its own, as AHDI and ICD Pro do not. Without one, loaders
+        saved earlier with :meth:`save_boot_chain` are used when there are any.
         """
         report = progress_module.reporter(progress)
         chosen = driver_for(driver)
@@ -1091,6 +1220,8 @@ class DrivePreparationMixin:
                     "there is nothing to copy. Choose the driver the other drive uses."
                 )
             chain = self.boot_chain_from(loader_from, chosen)
+        else:
+            chain = saved_boot_chain(chosen)
         self.require_writable_geometry(session)
         if self.summary(session).get("readOnly"):
             raise DiskError(f"{session.name} is open read-only, so it cannot be prepared.")
@@ -1206,9 +1337,19 @@ class DrivePreparationMixin:
             )
         limit = ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else ROOT_BOOT_CODE_LIMIT
         if chain is not None:
-            # Only the loader's own bytes travel. Whichever of the two drives
-            # keeps more of its table low in the sector decides where it stops.
-            limit = min(chain.root_limit, ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else AHDI_LOADER_LIMIT)
+            # Only the loader's own bytes travel, and they have to fit below
+            # this drive's partition fields. AHDI's loader runs over the bytes
+            # an ICD table keeps its extra entries in, so cut short to fit
+            # one it would start and then crash; it is refused instead.
+            limit = ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else AHDI_LOADER_LIMIT
+            if any(chain.root[limit:chain.root_limit]):
+                raise DiskError(
+                    f"The {chosen.label} loader from {chain.source} runs into the bytes "
+                    "where this drive's ICD partition table keeps its extra entries, "
+                    "so it cannot be written here without breaking one or the other. "
+                    "Use ICD Pro on a drive partitioned for ICD."
+                )
+            limit = min(chain.root_limit, limit)
             report(f"Writing the {chosen.label} loader from {chain.source}", 0, 4)
             sector[:limit] = chain.root[:limit]
             apply_boot_checksum(sector, True)
@@ -1465,8 +1606,9 @@ class DrivePreparationMixin:
                 f"but the {chosen.label} distribution carries no root-sector loader "
                 "this application can write, so the root sector was left as it was. "
                 "Open a drive this driver has already prepared and choose it as the "
-                "boot loader to copy, or run the driver's own installation program "
-                "once on the machine or in the emulator."
+                "boot loader to copy, keeping a copy for next time, or run the "
+                "driver's own installation program once on the machine or in the "
+                "emulator."
             )
         if state.get("scheme") == "mbr":
             warnings.append(
@@ -1479,6 +1621,7 @@ class DrivePreparationMixin:
 
 __all__ = [
     "APPLICATION_RECORDS",
+    "BOOTLOADER_DIR",
     "BOOT_CODE_NAMES",
     "DEFAULT_FOLDERS",
     "DESKTOP",
@@ -1493,6 +1636,7 @@ __all__ = [
     "Driver",
     "DrivePreparationMixin",
     "application_record",
+    "bootloader_directories",
     "default_desktop",
     "describe_drivers",
     "desktop_icon_record",
@@ -1506,4 +1650,5 @@ __all__ = [
     "merge_desktop",
     "record_letter",
     "record_path",
+    "saved_boot_chain",
 ]
