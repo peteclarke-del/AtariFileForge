@@ -42,6 +42,11 @@
   <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
   <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
   <releases>
+    <release version="0.4.0" date="2026-09-12">
+      <description>
+        <p>Keeps a driver's boot loaders once they have been copied from a drive it prepared, in a boot loaders folder of their own, so every later drive prepared with AHDI or ICD Pro boots on a machine running its original TOS ROM without another drive open. AHDI's loader is refused on a drive partitioned for ICD rather than cut short.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-12">
       <description>
         <p>A drive prepared with AHDI or ICD Pro now boots on a machine running its original TOS ROM: both of the driver's loaders are copied from a drive it already prepared, and the prepared partition is flagged as the one to boot. A drive for TOS 1.x gets the DESKTOP.INF that TOS 1.x reads, in its own spelling, rather than a NEWDESK.INF it never opens.</p>
