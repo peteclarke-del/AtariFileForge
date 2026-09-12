@@ -22,12 +22,14 @@ from pathlib import Path
 from app.disk_service import DiskError, DiskService
 from app.drive_preparation import (
     DEFAULT_FOLDERS,
+    DESKTOP,
     DESKTOP_FILES,
     DRIVERLESS,
     NEWDESK,
     application_record,
     default_desktop,
     describe_drivers,
+    desktop_file_for,
     desktop_icon_record,
     desktop_records,
     driver_for,
@@ -53,6 +55,18 @@ def sample(name: str) -> Path | None:
         return None
     path = HDD / name
     return path if path.is_file() else None
+
+
+#: These tests are about the TOS 2 desktop, NEWDESK.INF with its desktop
+#: icons, so their drives are for a machine running TOS 2.06. A drive with no
+#: profile is taken for an ST, which reads DESKTOP.INF instead.
+TOS_206 = {"machine": "megaste", "addons": ["tos-206"]}
+
+#: A Mega ST running its original TOS 1.04, which reads only DESKTOP.INF.
+TOS_104 = {"machine": "megast", "addons": ["tos-104"]}
+
+#: The records TOS 1.x understands. It stops reading at one it does not.
+TOS1_LETTERS = set("abcdEWMTFDGP")
 
 
 class DriverCatalogueTests(unittest.TestCase):
@@ -265,8 +279,9 @@ class DrivePreparationTests(unittest.TestCase):
             setattr, drive_preparation, "REPOSITORY_DRIVER_DIR", self._previous_repository,
         )
 
-    def _drive(self, name: str = "SYSTEM", capacity: str = "40MB"):
+    def _drive(self, name: str = "SYSTEM", capacity: str = "40MB", profile=TOS_206):
         drive = self.service.create_blank("hd", name, capacity)
+        drive.hardware_profile = dict(profile)
         self.service.select_partition(drive, 0)
         return drive
 
@@ -458,6 +473,143 @@ class DrivePreparationTests(unittest.TestCase):
         with self.assertRaises(DiskError):
             self.service.prepare_drive(floppy)
 
+    # -- the loaders a genuine TOS ROM needs, copied from a prepared drive --
+    ROOT_LOADER = bytes([0x4E, 0x71]) * 0x80
+
+    def _prepared_by(self, loads: bytes = b"ICDBOOT SYS", name: str = "PREPARED"):
+        """A drive as a driver leaves it: both sectors executable, a file named.
+
+        The loader bytes are stand-ins. What matters here is where they are
+        copied from and to, and that both sectors are left ones the ROM runs.
+        """
+        from atarinut.filesystem.blocks import apply_boot_checksum
+
+        drive = self._drive(name)
+        start = self.service.list_partitions(drive)[0]["startSector"]
+        with drive.path.open("r+b") as image:
+            root = bytearray(image.read(512))
+            root[:len(self.ROOT_LOADER)] = self.ROOT_LOADER
+            apply_boot_checksum(root, True)
+            image.seek(start * 512)
+            boot = bytearray(image.read(512))
+            boot[0x1E:0x29] = loads
+            boot[0x2E:0x40] = bytes([0x4E, 0x75]) * 9
+            apply_boot_checksum(boot, True)
+            image.seek(0)
+            image.write(root)
+            image.seek(start * 512)
+            image.write(boot)
+        return drive
+
+    def _sector(self, drive, number: int) -> bytes:
+        with drive.path.open("rb") as image:
+            image.seek(number * 512)
+            return image.read(512)
+
+    def test_both_loaders_are_copied_from_a_drive_the_driver_prepared(self) -> None:
+        """What a Mega ST running TOS 1.04 needs to find ICDBOOT.SYS at all."""
+        from atarinut.filesystem.blocks import is_executable_sector
+
+        reference = self._prepared_by()
+        drive = self._drive("TARGET")
+        start = self.service.list_partitions(drive)[0]["startSector"]
+        own_parameters = self._sector(drive, start)[0x08:0x1E]
+        table = self._sector(drive, 0)[0x1C7:0x1FE]
+        self._supply("ICDPRO_6.55A", "ICDBOOT.PRG")
+
+        result = self.service.prepare_drive(drive, driver="driver-icd", loader_from=reference)
+
+        root, boot = self._sector(drive, 0), self._sector(drive, start)
+        self.assertTrue(is_executable_sector(root))
+        self.assertTrue(is_executable_sector(boot))
+        self.assertEqual(root[:len(self.ROOT_LOADER)], self.ROOT_LOADER)
+        self.assertEqual(boot[0x1E:0x29], b"ICDBOOT SYS")
+        self.assertEqual(boot[0x08:0x1E], own_parameters)
+        self.assertEqual(result["loader"], {"from": reference.name, "loads": "ICDBOOT.SYS"})
+        self.assertEqual(len(result["notes"]), 1)
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(result["files"][0], "ICDBOOT.SYS")
+        # The table is the target's own, with C: now flagged as the one to boot.
+        self.assertEqual(root[0x1C6] & 0x80, 0x80)
+        self.assertEqual(root[0x1C7:0x1FE], table)
+        self.assertIn("ICDBOOT.SYS", {
+            row["name"] for row in self.service.list_directory(drive, "")["entries"]
+        })
+
+    def test_the_boot_flag_moves_to_the_partition_prepared(self) -> None:
+        """The loader boots the first partition flagged, so only one may be."""
+        reference = self._prepared_by()
+        drive = self.service.create_blank("hd", "TWO", "40MB", options={"partitions": 2})
+        drive.hardware_profile = dict(TOS_104)
+        self.service.select_partition(drive, 1)
+        self._supply("ICDPRO_6.55A", "ICDBOOT.PRG")
+
+        self.service.prepare_drive(drive, driver="driver-icd", loader_from=reference)
+
+        flags = [row["bootable"] for row in self.service.list_partitions(drive)]
+        self.assertEqual(flags, [False, True])
+
+    def test_a_drive_that_does_not_boot_is_no_source_of_loaders(self) -> None:
+        drive = self._drive("TARGET")
+        self._supply("ICDPRO_6.55A", "ICDBOOT.PRG")
+        with self.assertRaises(DiskError) as raised:
+            self.service.prepare_drive(
+                drive, driver="driver-icd", loader_from=self._drive("BLANK"),
+            )
+        self.assertIn("does not boot", str(raised.exception))
+
+    def test_a_loader_that_starts_another_driver_is_refused(self) -> None:
+        """Copied across drivers, the loader would look for a file not there."""
+        drive = self._drive("TARGET")
+        self._supply("ICDPRO_6.55A", "ICDBOOT.PRG")
+        with self.assertRaises(DiskError) as raised:
+            self.service.prepare_drive(
+                drive, driver="driver-icd",
+                loader_from=self._prepared_by(b"SHDRIVERSYS", name="AHDIDISK"),
+            )
+        self.assertIn("Atari AHDI", str(raised.exception))
+
+    def test_a_driverless_drive_takes_no_loader(self) -> None:
+        with self.assertRaises(DiskError):
+            self.service.prepare_drive(self._drive("TARGET"), loader_from=self._prepared_by())
+
+    # -- the desktop configuration the drive's own TOS reads --
+    def test_which_desktop_file_a_drive_gets_follows_its_tos(self) -> None:
+        for profile, expected in (
+            (TOS_104, DESKTOP),
+            ({"machine": "ste", "addons": ["tos-162"]}, DESKTOP),
+            ({"machine": "st", "addons": []}, DESKTOP),
+            ({"machine": "megast", "addons": []}, DESKTOP),
+            ({"machine": "ste", "addons": []}, NEWDESK),
+            (TOS_206, NEWDESK),
+            ({"machine": "falcon", "addons": []}, NEWDESK),
+        ):
+            with self.subTest(profile=profile):
+                drive = self._drive("CHOICE", profile=profile)
+                self.assertEqual(desktop_file_for(drive), expected)
+
+    def test_a_tos_1_drive_gets_a_desktop_tos_1_can_read(self) -> None:
+        drive = self._drive(profile=TOS_104)
+
+        result = self.service.prepare_drive(drive)
+
+        self.assertEqual(result["desktop"], [DESKTOP])
+        text = self.service.read_file(drive, DESKTOP).decode("latin-1")
+        self.assertIn("#M 00 02 00 FF C HARD DISK@ @ ", text)
+        self.assertIn("#G 03 FF   *.PRG@ @ ", text)
+        self.assertLessEqual({record_letter(line) for line in desktop_records(text)}, TOS1_LETTERS)
+
+    def test_the_file_its_tos_reads_is_written_beside_the_other_spelling(self) -> None:
+        from app import volume_copy
+
+        drive = self._drive(profile=TOS_104)
+        volume_copy.write_file(self.service, drive, NEWDESK, default_desktop().encode("latin-1"))
+
+        result = self.service.prepare_drive(drive)
+
+        self.assertEqual(result["desktop"], [DESKTOP, NEWDESK])
+        self.assertEqual(self.service.read_file(drive, NEWDESK).decode("latin-1"), default_desktop())
+
 
 class DesktopInstallationTests(unittest.TestCase):
     """Installing a title on the desktop is what makes it startable."""
@@ -468,6 +620,7 @@ class DesktopInstallationTests(unittest.TestCase):
         self.addCleanup(self._temporary.cleanup)
         self.service = DiskService(self.root / "work")
         self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
+        self.drive.hardware_profile = dict(TOS_206)
         self.service.select_partition(self.drive, 0)
         self.service.prepare_drive(self.drive)
         self.service.make_directory(self.drive, "GAMES\\CHUCK")
@@ -511,6 +664,42 @@ class DesktopInstallationTests(unittest.TestCase):
         )
         # NEWDESK.INF is what a prepared drive is given, and TOS reads it first.
         self.assertEqual(result["file"], NEWDESK)
+
+    def test_tos_1_installs_the_program_in_its_own_spelling(self) -> None:
+        """TOS 1.x has no desktop icons for files and no ``#Y`` record."""
+        from app.gemdos_items import delete_gemdos_items
+
+        self.drive.hardware_profile = dict(TOS_104)
+        delete_gemdos_items(self.service, self.drive, [NEWDESK])
+
+        result = self.service.install_desktop_application(
+            self.drive, "GAMES\\CHUCK\\CHUCK.PRG", label="Chuck"
+        )
+
+        self.assertEqual(result["file"], DESKTOP)
+        self.assertEqual(result["files"], [DESKTOP])
+        text = self.service.read_file(self.drive, DESKTOP).decode("latin-1")
+        self.assertIn("#G 03 FF   C:\\GAMES\\CHUCK\\CHUCK.PRG@ @ ", text)
+        self.assertLessEqual({record_letter(line) for line in desktop_records(text)}, TOS1_LETTERS)
+        self.assertTrue(any("TOS 1.x" in note for note in result["notes"]), result["notes"])
+
+    def test_both_spellings_learn_the_program_when_both_are_there(self) -> None:
+        """A drive moved between a TOS 1 and a TOS 2 machine shows it on either."""
+        self.drive.hardware_profile = dict(TOS_104)
+
+        result = self.service.install_desktop_application(
+            self.drive, "GAMES\\CHUCK\\CHUCK.PRG", label="Chuck"
+        )
+
+        self.assertEqual(result["files"], [DESKTOP, NEWDESK])
+        newdesk = self.service.read_file(self.drive, NEWDESK).decode("latin-1")
+        self.assertIn("#G 03 FF 000 C:\\GAMES\\CHUCK\\CHUCK.PRG@", newdesk)
+        self.assertIn("#X ", newdesk)
+
+    def test_a_program_taking_parameters_is_a_gem_program_to_tos_1(self) -> None:
+        self.assertEqual(
+            application_record("APPS\\EDIT.GTP", name=DESKTOP), "#G 03 FF   C:\\APPS\\EDIT.GTP@ @ ",
+        )
 
 
 class OperatorDriveTests(unittest.TestCase):

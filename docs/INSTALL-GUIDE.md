@@ -37,8 +37,9 @@ three things, and you can have any of them on their own:
    from;
 2. it creates the folders a prepared drive is expected to have, `AUTO`,
    `GEMSYS` and `GAMES`;
-3. it writes a **desktop configuration**, `NEWDESK.INF`, if the volume does not
-   already have one.
+3. it writes a **desktop configuration**, if the volume does not already have
+   the one its TOS reads: `DESKTOP.INF` for TOS 1.x, `NEWDESK.INF` for TOS 2.05
+   and later.
 
 Files already on the volume are left alone. A drive you have been building is
 added to rather than replaced, and preparing it twice does not undo work you did
@@ -97,6 +98,31 @@ themselves are untouched.
 > write the loader. Atari File Forge will not fabricate a loader for a driver it
 > does not have.
 
+**The loaders copied from a drive the driver prepared.** AHDI and ICD Pro both
+keep their loaders inside their own installation programs, so the quickest way
+to a drive that boots on a machine running its original TOS ROM is to take them
+from a drive that driver has already prepared. Open that drive in the other
+pane, then choose it under **Boot loader** in the Prepare dialog. Two sectors
+are copied:
+
+* the **root sector's loader**, the code below the partition table. The table
+  itself, the drive size and the bad-sector list stay this drive's own;
+* the **boot sector's loader** on the partition being prepared, together with
+  the name of the file it loads. The serial number and the BIOS parameter block
+  stay this partition's own, because they describe its sectors and clusters.
+
+Both checksums are recomputed so that each sector sums to `0x1234`, the driver
+file is written under the name the copied loader asks for, `ICDBOOT.SYS` for
+ICD, and the partition being prepared is flagged as the one to boot, with the
+flag cleared from every other. The other drive is only read.
+
+The copy is refused rather than made when it could not work: when either sector
+on the other drive is not one the ROM executes, and when its boot sector loads a
+different driver's file from the one chosen, since the loader would then look
+for a file that is not there. A partition further down an XGM chain has no
+entry in the root sector to flag, so preparing one says so; prepare `C:`
+instead.
+
 **A drive with a PC partition table.** A drive prepared on a PC carries a master
 boot record, whose own bytes occupy the space an Atari loader would need. Such a
 drive is read by EmuTOS's built-in support, and by TOS 4 and MiNT, and no driver
@@ -120,9 +146,20 @@ written back through it, so nothing you see or do here has to know about it.
 
 ### The desktop configuration
 
-The desktop shows what `NEWDESK.INF` tells it to show, falling back to the older
-`DESKTOP.INF` on TOS 1.x. Preparing a drive writes one if there is none, with
-the records a working desktop needs: `#a`, `#b`, `#c` and `#d` for the video and
+TOS 1.x reads `DESKTOP.INF` and nothing else. TOS 2.05 and later read
+`NEWDESK.INF` first and fall back to `DESKTOP.INF`. Which one a drive is given
+follows its hardware profile: a TOS 1.x release, or an ST or Mega ST that names
+no release, gets `DESKTOP.INF`, and everything else gets `NEWDESK.INF`. A drive
+that already has the other spelling still gets the one its TOS reads, and the
+other is left as it was.
+
+`DESKTOP.INF` is written in TOS 1.x's own spelling, since the desktop stops
+reading at a record it does not know: the video and colour settings, the
+desktop preferences, window positions, the floppy, hard-disk and trash icons,
+and the `#D`, `#G`, `#P` and `#F` records for folders and programs, with no
+`#K`, `#N`, `#Y` or `#X`.
+
+`NEWDESK.INF` carries the records a TOS 2 desktop needs: `#a`, `#b`, `#c` and `#d` for the video and
 colour settings, `#K` for the keyboard table, `#E` for the desktop preferences,
 `#W` for a window position, the drive and trash icons, and the document-type
 records `#N`, `#D`, `#G`, `#Y`, `#P` and `#F` that make a folder open as a
@@ -134,7 +171,15 @@ Installing a title on the desktop adds two more records:
   naming the program in full. The extension is the whole of what the desktop
   reads, so it decides how the program runs: a `.TTP` is asked for a command
   line, a `.TOS` runs without GEM, a `.PRG` or `.APP` runs with it.
-* an `#X` record, which is what puts the icon on the desktop itself.
+* an `#X` record, which is what puts the icon on the desktop itself. Only
+  `NEWDESK.INF` has one. TOS 1.x cannot put a program on the desktop, so
+  there the program is installed as an application, a `.GTP` as the GEM
+  program it is, and you are told to open its folder and double-click it.
+
+The record goes into the file the drive's TOS reads, which is created if it is
+missing. When the drive also has the other spelling, that file learns the
+program too, so a drive moved between a TOS 1 and a TOS 2 machine shows it on
+either.
 
 The new records are inserted above the `*.PRG`-style associations of the same
 letter, because the desktop takes the first record that matches and a wildcard
