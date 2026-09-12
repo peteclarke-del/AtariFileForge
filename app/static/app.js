@@ -3655,6 +3655,12 @@ async function showPrepareDrive(index) {
     }
     return `${note} ${driver?.licence || "No copy of this driver was found, so it cannot be installed yet."}`;
   };
+  // Other open hard drives, any of which may have been prepared by the driver
+  // chosen here. AHDI and ICD Pro keep their loaders inside their own Atari
+  // installers, so a drive they prepared is where the loaders can be had.
+  const loaderSources = [...new Map(panes
+    .filter(other => other.image?.kind === "hd" && other.image.id !== pane.image.id)
+    .map(other => [other.image.id, other.image.name])).entries()];
   const closed = showModal(`
     <h2>Prepare this drive</h2>
     <p>Makes ${esc(target)} startable, either by installing a hard-disk driver on it or by declaring that EmuTOS will read the drive without one.</p>
@@ -3672,9 +3678,15 @@ async function showPrepareDrive(index) {
         }).join("")}
       </select>
       <small data-driver-detail>${esc(detailFor(published[0]?.id))}</small></div>
+    <div class="field"><label>Boot loader</label>
+      <select name="loaderImage">
+        <option value="">The driver's own files</option>
+        ${loaderSources.map(([id, name]) => `<option value="${esc(id)}">Copy from ${esc(name)}</option>`).join("")}
+      </select>
+      <small>AHDI and ICD Pro keep their loaders inside their own installers, so a drive they did not prepare is never found by a machine running its original TOS. ${loaderSources.length ? "Choose an open drive this driver has already prepared and its two loaders are copied here; nothing else of that drive is." : "Open a drive this driver has already prepared in another pane to copy its loaders here."}</small></div>
     ${desktopReplacementField(desktops)}
     <label class="check-field"><input type="checkbox" name="createFolders" value="yes" checked> Create the folders a prepared drive expects (AUTO, GEMSYS, GAMES)</label>
-    <label class="check-field"><input type="checkbox" name="writeDesktop" value="yes" checked> Write a desktop configuration if this volume has none</label>
+    <label class="check-field"><input type="checkbox" name="writeDesktop" value="yes" checked> Write the desktop configuration this drive's TOS reads, DESKTOP.INF for TOS 1.x or NEWDESK.INF for TOS 2 and later, if the volume has none</label>
     <div class="help-note">Files already on the volume are left alone, so an existing drive is added to rather than replaced, and preparing twice does not undo work done in between.</div>
     <div class="modal-actions">
       <button class="button ghost" value="cancel">Close</button>
@@ -3691,6 +3703,7 @@ async function showPrepareDrive(index) {
           folder: desktopFolder,
           createFolders: form.get("createFolders") === "yes",
           desktop: form.get("writeDesktop") === "yes",
+          loaderImage: form.get("loaderImage") || undefined,
           operationId,
         }),
       }));
@@ -3731,6 +3744,7 @@ async function showPrepareDrive(index) {
     [...new Set(warnings)].forEach(warning => toast(warning, "warning"));
     await loadDirectory(index);
     (result.warnings || []).forEach(warning => toast(warning, "warning"));
+    (result.notes || []).forEach(note => toast(note));
     toast(result.driver.installed
       ? `${result.label} installed on ${target}.`
       : `${target} prepared to start driverless under EmuTOS.`);

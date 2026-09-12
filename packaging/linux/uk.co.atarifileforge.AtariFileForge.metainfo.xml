@@ -42,6 +42,11 @@
   <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
   <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
   <releases>
+    <release version="0.3.0" date="2026-09-12">
+      <description>
+        <p>A drive prepared with AHDI or ICD Pro now boots on a machine running its original TOS ROM: both of the driver's loaders are copied from a drive it already prepared, and the prepared partition is flagged as the one to boot. A drive for TOS 1.x gets the DESKTOP.INF that TOS 1.x reads, in its own spelling, rather than a NEWDESK.INF it never opens.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-11">
       <description>
         <p>Ships the bundled EmuTOS in the native package, which 0.1.0 left out, so the emulator starts without a TOS ROM of your own. Adds presets for a 1040 STF, 1040 STE, Mega ST, 1040 STFM and 520 STFM with ACSI2STM, a Gotek or a BlueSCSI, and makes TOS 4.00, 4.02 and 4.04 separate choices for the Falcon030.</p>

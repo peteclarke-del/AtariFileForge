@@ -111,6 +111,25 @@ BOOT_CODE_NAMES = ("ROOTSECT.BIN", "BOOTSECT.BIN", "HDBOOT.BIN", "ROOTSECT.BOO")
 #: How large that file has to be to be believed: exactly one sector.
 SECTOR_SIZE = 512
 
+#: Where a root-sector loader ends when it is copied from one drive to
+#: another. AHDI keeps an MFM drive's geometry from 0x1B6 up to the drive
+#: size, and an ICD table keeps eight more partition entries from 0x156, so a
+#: copy stops there and the target keeps its own values.
+AHDI_LOADER_LIMIT = 0x1B6
+
+#: What a boot sector's loader leaves to its volume: the serial number and the
+#: BIOS parameter block, which describe that partition rather than the loader.
+BOOT_SECTOR_OWN = slice(0x08, 0x1E)
+
+#: Where the root sector's partition entries sit: the four AHDI ones, and the
+#: eight more ICD keeps below them. Each is twelve bytes, flags first.
+ROOT_ENTRY_OFFSETS = (
+    *(0x1C6 + 12 * slot for slot in range(4)),
+    *(0x156 + 12 * slot for slot in range(8)),
+)
+ENTRY_EXISTS = 0x01
+ENTRY_BOOTABLE = 0x80
+
 
 @dataclasses.dataclass(frozen=True)
 class Driver:
@@ -313,6 +332,32 @@ class Distribution:
     boot_code: bytes | None = None
     #: The release, read from the folder the distribution was found in.
     version: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class BootChain:
+    """A driver's two loaders, as a drive that driver prepared carries them.
+
+    AHDI and ICD Pro keep their loaders inside their own Atari installers
+    rather than as files, so a drive prepared on a real machine is where they
+    can be had. The root sector's loader reads the boot partition's boot
+    sector, and that sector's loader reads the driver file it names.
+    """
+
+    root: bytes
+    #: How far into the root sector the loader may be copied from.
+    root_limit: int
+    boot: bytes
+    #: The driver file the boot sector loads, as an ordinary GEMDOS name.
+    loads: str
+    #: The drive it was read from, for the report.
+    source: str
+
+
+def _padded_name(name: str) -> bytes:
+    """A GEMDOS name as a boot sector stores it: eight and three, space padded."""
+    stem, _, extension = name.upper().partition(".")
+    return (stem.ljust(8) + extension.ljust(3)).encode("ascii")
 
 
 def _version_from(path: Path) -> str:
@@ -589,13 +634,75 @@ DEFAULT_TYPES = (
 )
 
 
-def default_desktop(drive: str = "C") -> str:
-    """A desktop configuration for a drive that has none.
+#: The same defaults in the spelling TOS 1.x reads. ``DESKTOP.INF`` writes two
+#: numbers before a record's path where ``NEWDESK.INF`` writes three, has one
+#: fewer ``@``, keeps the drive and trash icons above the document types, and
+#: knows no ``#K``, ``#Q``, ``#N``, ``#Y`` or ``#X`` records. Taken from a drive
+#: the operator boots on TOS 1.04, with its labels in English.
+DEFAULT_TOS1_HEADER = (
+    "#a000000",
+    "#b000000",
+    "#c7770007000600070055200505552220770557075055507703111103",
+    "#d" + " " * 45,
+    "#E 98 12 ",
+    "#W 00 00 0A 04 1D 12 00 @",
+    "#W 00 00 02 01 1F 17 00 @",
+    "#W 00 00 0C 01 1F 17 00 @",
+    "#W 00 00 0E 01 34 09 00 @",
+)
+DEFAULT_TOS1_TYPES = (
+    "#F FF 04   @ *.*@ ",
+    "#D FF 01   @ *.*@ ",
+    "#G 03 FF   *.APP@ @ ",
+    "#G 03 FF   *.PRG@ @ ",
+    "#P 03 FF   *.TTP@ @ ",
+    "#F 03 04   *.TOS@ @ ",
+)
+
+#: The TOS releases that read ``DESKTOP.INF`` and nothing else. TOS 2.05
+#: onwards read ``NEWDESK.INF`` first and fall back to ``DESKTOP.INF``.
+TOS1_RELEASES = frozenset({"tos-100", "tos-102", "tos-104", "tos-106", "tos-162"})
+
+#: Machines that only ever shipped with TOS 1.x, for a profile that names no
+#: release of its own.
+TOS1_MACHINES = frozenset({"st", "megast"})
+
+
+def desktop_file_for(session) -> str:
+    """The desktop configuration the drive's own TOS will read.
+
+    Writing ``NEWDESK.INF`` for a Mega ST running TOS 1.04 produced a file the
+    machine never opens, so an installed program or a replacement desktop
+    simply was not there. A profile naming a TOS 1.x release, or a machine that
+    only ever had one, gets ``DESKTOP.INF``; everything later keeps
+    ``NEWDESK.INF``. EmuTOS reads a file of its own and is unchanged here.
+    """
+    from .emulator_config import profile_machine
+    from .hardware_profiles import profile_addons
+
+    addons = profile_addons(session)
+    if addons & TOS1_RELEASES:
+        return DESKTOP
+    if any(addon.startswith("tos-") for addon in addons):
+        return NEWDESK
+    return DESKTOP if profile_machine(session) in TOS1_MACHINES else NEWDESK
+
+
+def default_desktop(drive: str = "C", *, name: str = NEWDESK) -> str:
+    """A desktop configuration for a drive that has none, in ``name``'s spelling.
 
     The drive letter is the one the boot partition will answer to, which is
     ``C`` on every machine that boots from a hard disk.
     """
     letter = (str(drive or "C").strip().rstrip(":") or "C")[0].upper()
+    if name == DESKTOP:
+        icons = (
+            "#M 00 00 00 FF A FLOPPY DISK@ @ ",
+            "#M 00 01 00 FF B FLOPPY DISK@ @ ",
+            f"#M 00 02 00 FF {letter} HARD DISK@ @ ",
+            "#T 00 03 02 FF   TRASH@ @ ",
+        )
+        return "\r\n".join([*DEFAULT_TOS1_HEADER, *icons, *DEFAULT_TOS1_TYPES]) + "\r\n"
     icons = (
         f"#M 00 01 00 FF {letter} HARD DISK@ @ ",
         "#M 00 00 09 FF A FLOPPY@ @ ",
@@ -654,7 +761,9 @@ def is_installed_application(record: str) -> bool:
     return bool(path) and "*" not in path and "?" not in path
 
 
-def application_record(program: str, *, documents: str = "", drive: str = "C") -> str:
+def application_record(
+    program: str, *, documents: str = "", drive: str = "C", name: str = NEWDESK,
+) -> str:
     r"""The record that installs one program, chosen by its own extension.
 
     The desktop decides how to start a program from its extension: a ``.TTP``
@@ -675,6 +784,11 @@ def application_record(program: str, *, documents: str = "", drive: str = "C") -
         )
     full = _absolute(path, drive)
     mask = str(documents or "").strip().upper()
+    if name == DESKTOP:
+        # TOS 1.x has no ``#Y`` record, so a program that takes parameters
+        # under GEM is installed as the GEM program it is.
+        letter = "G" if letter == "Y" else letter
+        return f"#{letter} 03 FF   {full}@ {mask}@ "
     return f"#{letter} 03 FF 000 {full}@ {mask}@ @ "
 
 
@@ -698,7 +812,7 @@ def _absolute(path: str, drive: str) -> str:
     return f"{letter}:{atari_paths.SEPARATOR}{atari_paths.normalise(text).upper()}"
 
 
-def merge_desktop(existing: str, additions) -> tuple[str, list[str]]:
+def merge_desktop(existing: str, additions, *, name: str = NEWDESK) -> tuple[str, list[str]]:
     """Add records to a desktop configuration without disturbing the rest.
 
     A drive an operator has been using has a desktop they arranged: window
@@ -707,7 +821,7 @@ def merge_desktop(existing: str, additions) -> tuple[str, list[str]]:
     beside the records of its own kind, and a record naming the same program
     replaces the one already there rather than being added a second time.
     """
-    records = desktop_records(existing) or desktop_records(default_desktop())
+    records = desktop_records(existing) or desktop_records(default_desktop(name=name))
     added: list[str] = []
     for record in additions:
         letter = record_letter(record)
@@ -796,6 +910,58 @@ class DrivePreparationMixin:
         if disk.byte_swapped:
             return ByteSwappedReader(session.path, writable=writable), disk
         return reader_for(session.path, writable=writable), disk
+
+    def boot_chain_from(self, reference: ImageSession, driver: Driver) -> BootChain:
+        """Read a driver's loaders off a drive that driver has already prepared.
+
+        Both sectors have to be ones the ROM executes, and the boot sector has
+        to name a file this driver installs, so a loader that starts another
+        driver is refused rather than copied onto a drive that will then not
+        find its driver.
+        """
+        from atarinut.filesystem.blocks import is_executable_sector
+
+        reader, disk = self._drive_sectors(reference)
+        try:
+            root = bytes(reader.read_block(0))
+            partition = next(
+                (item for item in disk.partitions if item.bootable),
+                disk.partitions[0] if disk.partitions else None,
+            )
+            boot = bytes(reader.read_block(partition.start_sector)) if partition else b""
+        finally:
+            reader.close()
+        if not (is_executable_sector(root) and boot and is_executable_sector(boot)):
+            raise DiskError(
+                f"{reference.name} does not boot through a hard-disk driver: its root "
+                "sector and its boot partition's boot sector both have to be ones the "
+                "ROM executes, and they are not. Choose a drive the driver prepared."
+            )
+        named = [
+            (candidate, filename)
+            for candidate in DRIVERS
+            for filename in candidate.files
+            if filename.upper().endswith(".SYS") and _padded_name(filename) in boot.upper()
+        ]
+        if not named:
+            raise DiskError(
+                f"The boot sector of {reference.name} names no driver file this "
+                "recognises, so there is no telling which driver its loader starts."
+            )
+        owner, loads = named[0]
+        if owner.key != driver.key:
+            raise DiskError(
+                f"The loader on {reference.name} starts {loads}, which is the "
+                f"{owner.label} driver, not {driver.label}. Choose {owner.label}, or "
+                f"a drive {driver.label} prepared."
+            )
+        return BootChain(
+            root=root,
+            root_limit=ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else AHDI_LOADER_LIMIT,
+            boot=boot,
+            loads=loads,
+            source=reference.name,
+        )
 
     def drive_preparation(self, session: ImageSession) -> dict:
         """What this drive has been prepared with, read off the drive itself.
@@ -901,6 +1067,7 @@ class DrivePreparationMixin:
         desktop: bool = True,
         directories=None,
         download: bool = True,
+        loader_from: ImageSession | None = None,
         progress: progress_module.Progress | None = None,
     ) -> dict:
         """Prepare this drive to be booted, in whichever of the three ways.
@@ -908,9 +1075,22 @@ class DrivePreparationMixin:
         Files already on the volume are left alone. An operator who has been
         building a drive does not expect preparing it to throw work away, and
         preparing a drive twice should not undo what was done in between.
+
+        ``loader_from`` is a drive the chosen driver has already prepared. Its
+        root-sector and boot-sector loaders are copied here, which is what a
+        real TOS ROM needs to find the driver when the distribution carries no
+        loader of its own, as AHDI and ICD Pro do not.
         """
         report = progress_module.reporter(progress)
         chosen = driver_for(driver)
+        chain = None
+        if loader_from is not None:
+            if chosen.key == DRIVERLESS:
+                raise DiskError(
+                    "A driverless drive boots through EmuTOS and runs no loader, so "
+                    "there is nothing to copy. Choose the driver the other drive uses."
+                )
+            chain = self.boot_chain_from(loader_from, chosen)
         self.require_writable_geometry(session)
         if self.summary(session).get("readOnly"):
             raise DiskError(f"{session.name} is open read-only, so it cannot be prepared.")
@@ -923,10 +1103,14 @@ class DrivePreparationMixin:
                     "driver or a desktop. Partition and format it first."
                 )
             index = session.partition if session.partition is not None else 0
+            boots_prepared = True
             report("Preparing the drive", 0, 4)
             installed = self._write_root_sector(
-                reader, disk, chosen, report, directories, download,
+                reader, disk, chosen, report, directories, download, chain,
             )
+            if chain is not None:
+                self._write_boot_sector(reader, disk, index, chain, report)
+                boots_prepared = self._flag_boot_partition(reader, disk.partitions[index])
         finally:
             reader.close()
 
@@ -935,7 +1119,7 @@ class DrivePreparationMixin:
             self.select_partition(session, index)
         try:
             report("Installing the driver", 1, 4)
-            files = self._install_driver_files(session, chosen, installed)
+            files = self._install_driver_files(session, chosen, installed, chain)
             report("Creating the folders a prepared drive expects", 2, 4)
             folders = self._create_folders(session) if create_folders else []
             report("Writing the desktop configuration", 3, 4)
@@ -954,17 +1138,29 @@ class DrivePreparationMixin:
                 "installed": bool(files),
                 "version": installed.version if installed else "",
             },
+            "loader": (
+                {"from": chain.source, "loads": chain.loads} if chain is not None else None
+            ),
+            # What was done, as against what may still stop the drive starting.
+            "notes": [
+                f"The {chosen.label} loaders for the root sector and the boot sector "
+                f"were copied from {chain.source}, and {chain.loads} was written for "
+                "them to load, so a machine running its original TOS ROM finds the driver."
+            ] if chain is not None else [],
             "label": chosen.label,
             "files": files,
             "folders": folders,
             "desktop": desktop_written,
             "rootSectorExecutable": state["rootSectorExecutable"],
             "state": state,
-            "warnings": self._preparation_warnings(chosen, installed, state),
+            "warnings": self._preparation_warnings(
+                chosen, installed, state, chain, boots_prepared,
+            ),
         }
 
     def _write_root_sector(
         self, reader, disk, chosen: Driver, report, directories=None, download: bool = True,
+        chain: BootChain | None = None,
     ) -> Distribution | None:
         """Make the root sector executable, or leave it inert on purpose.
 
@@ -1009,7 +1205,16 @@ class DrivePreparationMixin:
                 + ", or choose the folder or disk image it is on."
             )
         limit = ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else ROOT_BOOT_CODE_LIMIT
-        if distribution.boot_code:
+        if chain is not None:
+            # Only the loader's own bytes travel. Whichever of the two drives
+            # keeps more of its table low in the sector decides where it stops.
+            limit = min(chain.root_limit, ICD_BOOT_CODE_LIMIT if disk.scheme == "icd" else AHDI_LOADER_LIMIT)
+            report(f"Writing the {chosen.label} loader from {chain.source}", 0, 4)
+            sector[:limit] = chain.root[:limit]
+            apply_boot_checksum(sector, True)
+            reader.write_block(0, bytes(sector))
+            reader.flush()
+        elif distribution.boot_code:
             report(f"Writing the {chosen.label} boot loader", 0, 4)
             sector[:limit] = distribution.boot_code[:limit]
             apply_boot_checksum(sector, True)
@@ -1028,13 +1233,71 @@ class DrivePreparationMixin:
             reader.flush()
         return distribution
 
+    def _write_boot_sector(self, reader, disk, index: int, chain: BootChain, report) -> None:
+        """Put the driver's boot-sector loader on the partition being prepared.
+
+        The loader and the name of the file it loads come from the other
+        drive; the serial number and the BIOS parameter block stay this
+        partition's own, because they describe its sectors and clusters.
+        """
+        from atarinut.filesystem.blocks import apply_boot_checksum
+
+        partition = disk.partitions[index]
+        report("Writing the boot sector's loader", 0, 4)
+        own = bytes(reader.read_block(partition.start_sector))
+        sector = bytearray(chain.boot)
+        sector[BOOT_SECTOR_OWN] = own[BOOT_SECTOR_OWN]
+        apply_boot_checksum(sector, True)
+        reader.write_block(partition.start_sector, bytes(sector))
+        reader.flush()
+
+    @staticmethod
+    def _flag_boot_partition(reader, partition) -> bool:
+        """Make the prepared partition the one the root sector's loader boots.
+
+        The loader starts the first partition whose entry is flagged bootable,
+        and a drive partitioned here has none flagged, so without this the
+        copied loaders run and then boot nothing. Only an entry in the root
+        sector itself can carry the flag; a partition further down an XGM
+        chain cannot be booted this way, which is reported, not worked round.
+        """
+        from atarinut.filesystem.blocks import apply_boot_checksum
+
+        sector = bytearray(reader.read_block(0))
+        present = [
+            offset for offset in ROOT_ENTRY_OFFSETS
+            if sector[offset] & ENTRY_EXISTS
+        ]
+        target = next(
+            (
+                offset for offset in present
+                if int.from_bytes(sector[offset + 4:offset + 8], "big") == partition.start_sector
+            ),
+            None,
+        )
+        if target is None or partition.extended:
+            return False
+        for offset in present:
+            if offset == target:
+                sector[offset] |= ENTRY_BOOTABLE
+            else:
+                sector[offset] &= ~ENTRY_BOOTABLE & 0xFF
+        apply_boot_checksum(sector, True)
+        reader.write_block(0, bytes(sector))
+        reader.flush()
+        return True
+
     def _install_driver_files(
-        self, session: ImageSession, chosen: Driver, distribution: Distribution | None
+        self, session: ImageSession, chosen: Driver, distribution: Distribution | None,
+        chain: BootChain | None = None,
     ) -> list[str]:
-        """Copy the driver into the boot partition's root, where it is looked for."""
+        """Copy the driver into the boot partition's root, where it is looked for.
+
+        With a copied loader the file goes under the name that loader asks for.
+        """
         if distribution is None:
             return []
-        name = distribution.installed_name or distribution.name
+        name = chain.loads if chain is not None else (distribution.installed_name or distribution.name)
         written = [name]
         volume_copy.write_file(self, session, name, distribution.payload)
         for name, payload in distribution.auto:
@@ -1072,21 +1335,80 @@ class DrivePreparationMixin:
         return created
 
     def _write_desktop(self, session: ImageSession) -> list[str]:
-        """Give the volume a desktop configuration if it has none.
+        """Give the volume the desktop configuration its TOS reads, if it has none.
 
-        A drive that already has one keeps it. The arrangement on a working
+        A file that is already there is kept: the arrangement on a working
         drive is the operator's own and replacing it would be a poor trade for
-        a file that only has to exist.
+        a file that only has to exist. The one the drive's TOS reads is written
+        when it is missing, even if the other spelling is present.
         """
+        wanted = desktop_file_for(session)
         present = [
             name for name in DESKTOP_FILES
             if volume_copy.entry_exists(self, session, name)
         ]
-        if present:
+        if wanted in present:
             return present
         drive = self.partition_label(session) or "C"
-        volume_copy.write_file(self, session, NEWDESK, default_desktop(drive).encode("latin-1"))
-        return [NEWDESK]
+        volume_copy.write_file(
+            self, session, wanted, default_desktop(drive, name=wanted).encode("latin-1")
+        )
+        return [wanted, *present]
+
+    def _install_on_desktop(
+        self,
+        session: ImageSession,
+        program: str,
+        *,
+        documents: str = "",
+        label: str = "",
+        on_desktop: bool = True,
+    ) -> dict:
+        """Install one program in the desktop configuration the drive's TOS reads.
+
+        The file that TOS reads gets the record, created from the default when
+        it is missing, and the other spelling is kept in step when the drive
+        already has it, so a drive used under both TOS 1.x and 2.x shows the
+        program under either. Only ``NEWDESK.INF`` can put a program's icon on
+        the desktop itself; TOS 1.x installs it as an application instead.
+        """
+        drive = self.partition_label(session) or "C"
+        wanted = desktop_file_for(session)
+        names = [wanted] + [
+            name for name in DESKTOP_FILES
+            if name != wanted and volume_copy.entry_exists(self, session, name)
+        ]
+        written = {}
+        for name in names:
+            # A file known not to be there is started from the default, since
+            # reading it would raise out of the engine rather than return
+            # nothing, so the existence check decides, not the exception.
+            existing = (
+                self.read_file(session, name).decode("latin-1")
+                if volume_copy.entry_exists(self, session, name)
+                else default_desktop(drive, name=name)
+            )
+            records = [application_record(program, documents=documents, drive=drive, name=name)]
+            if on_desktop and name == NEWDESK:
+                records.append(desktop_icon_record(program, label, drive=drive))
+            merged, added = merge_desktop(existing, records, name=name)
+            volume_copy.write_file(self, session, name, merged.encode("latin-1"))
+            written[name] = (merged, added)
+        merged, added = written[wanted]
+        notes = []
+        if on_desktop and wanted == DESKTOP:
+            notes.append(
+                f"TOS 1.x cannot put a program's icon on the desktop itself, so "
+                f"{atari_paths.display(program)} is installed as an application in "
+                "DESKTOP.INF: open its folder and double-click it."
+            )
+        return {
+            "file": wanted,
+            "files": names,
+            "records": added,
+            "applications": installed_applications(merged),
+            "notes": notes,
+        }
 
     def install_desktop_application(
         self,
@@ -1107,35 +1429,28 @@ class DrivePreparationMixin:
         self.require_writable_geometry(session)
         if not volume_copy.entry_exists(self, session, program):
             raise DiskError(f"{atari_paths.display(program)} is not on this volume.")
-        drive = self.partition_label(session) or "C"
-        name = next(
-            (item for item in DESKTOP_FILES if volume_copy.entry_exists(self, session, item)),
-            "",
+        result = self._install_on_desktop(
+            session, program, documents=documents, label=label, on_desktop=on_desktop,
         )
-        # A volume with no desktop configuration at all is given the default
-        # one to add to. Reading a file that is known not to be there raises
-        # out of the engine rather than returning nothing, so the existence
-        # check decides, not the exception.
-        existing = (
-            self.read_file(session, name).decode("latin-1")
-            if name else default_desktop(drive)
-        )
-        name = name or NEWDESK
-        records = [application_record(program, documents=documents, drive=drive)]
-        if on_desktop:
-            records.append(desktop_icon_record(program, label, drive=drive))
-        merged, added = merge_desktop(existing, records)
-        volume_copy.write_file(self, session, name, merged.encode("latin-1"))
         self._mark_mutated(session)
         self._persist_session(session)
-        return {"file": name, "records": added, "applications": installed_applications(merged)}
+        return result
 
     @staticmethod
     def _preparation_warnings(
-        chosen: Driver, distribution: Distribution | None, state: dict
+        chosen: Driver, distribution: Distribution | None, state: dict,
+        chain: BootChain | None = None, boots_prepared: bool = True,
     ) -> list[str]:
         """Reasons this drive may still not start, said plainly."""
         warnings: list[str] = []
+        if chain is not None:
+            if not boots_prepared:
+                warnings.append(
+                    "The root sector's loader boots only a partition listed in the "
+                    "root sector itself, and the one just prepared is further down "
+                    "the partition chain, so it cannot be the boot partition. "
+                    "Prepare C: or another partition the root sector lists instead."
+                )
         if chosen.key == DRIVERLESS:
             warnings.append(
                 "No driver was installed, so this drive boots only on a machine "
@@ -1143,14 +1458,15 @@ class DrivePreparationMixin:
                 "machine running its original TOS ROM needs a hard-disk driver "
                 "and will not see this drive without one."
             )
-        elif distribution is not None and not distribution.boot_code:
+        elif chain is None and distribution is not None and not distribution.boot_code:
             warnings.append(
                 f"{distribution.installed_name or distribution.name} was written "
                 "into the root of the boot partition, "
                 f"but the {chosen.label} distribution carries no root-sector loader "
                 "this application can write, so the root sector was left as it was. "
-                "Run the driver's own installation program once on the machine, or "
-                "in the emulator, to write the loader."
+                "Open a drive this driver has already prepared and choose it as the "
+                "boot loader to copy, or run the driver's own installation program "
+                "once on the machine or in the emulator."
             )
         if state.get("scheme") == "mbr":
             warnings.append(
