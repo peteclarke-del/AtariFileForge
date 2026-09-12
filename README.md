@@ -88,7 +88,7 @@ Release builds also provide a native-architecture Debian package. Install it
 on the Debian or Ubuntu release for which it was built:
 
 ```bash
-sudo apt install ./atari-file-forge_0.2.0-1~deb13_amd64.deb
+sudo apt install ./atari-file-forge_0.3.0-1~deb13_amd64.deb
 atari-file-forge
 ```
 
@@ -154,9 +154,9 @@ developing; they will not be committed or packaged.
 
 ## Current status
 
-The current release is `0.2.0`. It provides the editing, drive preparation,
+The current release is `0.3.0`. It provides the editing, drive preparation,
 analysis and deployment workflows for the whole ST range, in the browser and in
-the Linux desktop application. The [release notes](docs/releases/0.2.0.md)
+the Linux desktop application. The [release notes](docs/releases/0.3.0.md)
 describe what it does and what it does not yet do.
 
 What this release does:
@@ -176,8 +176,10 @@ What this release does:
   a container may be edited at all.
 - Preservation captures, when the optional decoder library is installed.
 - Preparing a drive: partitioning, formatting, the boot sector, a hard-disk
-  driver from your own copy or driverless booting under EmuTOS, the folders a
-  prepared drive expects, and the desktop configuration. A replacement desktop
+  driver from your own copy or driverless booting under EmuTOS, the driver's
+  root-sector and boot-sector loaders copied from a drive it already prepared,
+  the folders a prepared drive expects, and the desktop configuration its TOS
+  reads, `DESKTOP.INF` for TOS 1.x or `NEWDESK.INF` later. A replacement desktop
   can be installed at the same time, and NeoDesk and Geneva are set up the way
   Gribnif's own installers set them up, cookie jar and all.
 - Staging a floppy onto a drive, installing a staged title into its own
@@ -244,10 +246,11 @@ These are stated here rather than discovered later.
   HxC converter, which the Docker image and the native packages build. A bare
   checkout reports it as unavailable rather than writing an unverified image.
 - **Hard-disk driver loaders.** A driver whose distribution carries no
-  root-sector loader, AHDI and ICD Pro among them, has its files installed but
-  the loader left to its own installer, because the loader lives inside that
-  program. Run the driver's installer once, or boot the drive driverless under
-  EmuTOS. The preparation says which applies.
+  root-sector loader, AHDI and ICD Pro among them, keeps that loader inside its
+  own installer, which is Atari code this application does not run. Open a
+  drive the driver has already prepared and Prepare copies both its loaders
+  from there; otherwise run the driver's installer once, or boot the drive
+  driverless under EmuTOS. The preparation says which applies.
 - **Firmware.** No Atari TOS ROM is shipped or downloaded, and none can be:
   TOS is not free to redistribute. The bundled EmuTOS 1.4 boots every machine
   in the range, so the emulator works without one. Point a profile at a TOS ROM
@@ -2738,7 +2741,7 @@ curl http://localhost:8684/api/health
 A healthy response looks like:
 
 ```json
-{"engine":"atarinut","status":"ok","version":"0.2.0"}
+{"engine":"atarinut","status":"ok","version":"0.3.0"}
 ```
 
 The [release checklist](docs/RELEASE-CHECKLIST.md) defines the full gate. Its

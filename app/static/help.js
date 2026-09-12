@@ -71,7 +71,7 @@
             <div class="help-task">
               <h4>Install and launch</h4>
               <ol>
-                <li>Stable releases provide separate Debian 13 and Ubuntu 24.04 packages for AMD64, ARM64 and ARMv7. Install the matching <code>.deb</code> with APT, for example <code>sudo apt install ./atari-file-forge_0.2.0-1~deb13_amd64.deb</code>. APT installs the required Python 3, GTK 4, Libadwaita, WebKitGTK 6 and GObject packages.</li>
+                <li>Stable releases provide separate Debian 13 and Ubuntu 24.04 packages for AMD64, ARM64 and ARMv7. Install the matching <code>.deb</code> with APT, for example <code>sudo apt install ./atari-file-forge_0.3.0-1~deb13_amd64.deb</code>. APT installs the required Python 3, GTK 4, Libadwaita, WebKitGTK 6 and GObject packages.</li>
                 <li>For development from a project checkout, install those system packages and run <code>tools/install-linux-desktop.sh</code> instead.</li>
                 <li>Launch <strong>Atari File Forge</strong> from the application menu. The package command is <code>atari-file-forge</code>; a checkout uses <code>tools/atari-file-forge-desktop</code>.</li>
                 <li>Use the native folder button, <strong>File &rarr; Open image</strong> in a pane or <kbd>Ctrl</kbd>+<kbd>O</kbd> to select one or several images with the GTK chooser. You can also drag image files from the Linux file manager onto a pane. Native selection and drag and drop pass local paths to the private desktop service, so image bytes are not uploaded through the embedded browser.</li>
@@ -817,8 +817,9 @@
               <ol>
                 <li>Open the drive on its partition table and choose <strong>Tools &rarr; Prepare drive</strong>. It reports what a real machine still needs: a driver, a boot sector that loads it, and an <code>AUTO</code> folder on the boot partition.</li>
                 <li>Atari File Forge does not ship a hard disk driver and cannot fetch one. Supply the driver you own and are licensed to use, and it is written to the boot partition and, where the driver expects it, into the boot sector.</li>
+                <li>AHDI and ICD Pro keep their boot loaders inside their own installers. Open a drive that driver has already prepared in the other pane and choose it under <strong>Boot loader</strong>: its root-sector and boot-sector loaders are copied, this drive keeps its own partition table and parameter block, and the prepared partition becomes the one that boots. That is what a machine running its original TOS ROM needs to find the driver.</li>
                 <li>The <code>AUTO</code> folder runs before the desktop appears, in directory order, so the order programs were written into it is the order they run. The dialog lists that order and lets you change it, because a driver placed after the program that uses it never helps.</li>
-                <li>A desktop configuration file is written for the drive, named for the TOS release in the applied profile: <code>DESKTOP.INF</code> for TOS 1.x and 2.x, and the later name for TOS 3 and 4.</li>
+                <li>A desktop configuration file is written for the drive, named for the TOS release in the applied profile: <code>DESKTOP.INF</code>, in TOS 1.x's own spelling, for TOS 1.x, and <code>NEWDESK.INF</code> for TOS 2.05 and later. TOS 1.x cannot put a program on the desktop itself, so an installed program is opened from its folder there.</li>
                 <li>Every step takes a checkpoint before it writes, and each one reports what it changed.</li>
               </ol>
               <figure><img src="/help/drive-install.png" alt="Prepare drive dialog listing the boot sector, driver, AUTO folder order and desktop configuration file"><figcaption>Each requirement is listed with what the drive currently has and what will be written. Supplying a driver is a deliberate step; nothing is downloaded.</figcaption></figure>

@@ -144,6 +144,8 @@ class InstallTests(unittest.TestCase):
         self.addCleanup(self.work.cleanup)
         self.service = DiskService(Path(self.work.name))
         self.drive = self.service.create_blank("hd", "SYSTEM", "40MB")
+        # NEWDESK.INF and its desktop icons are a TOS 2 desktop's.
+        self.drive.hardware_profile = {"machine": "megaste", "addons": ["tos-206"]}
         self.service.select_partition(self.drive, 0)
 
     def test_the_program_lands_in_a_folder_of_its_own_with_its_resource(self) -> None:
