@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
+from app.disk_service import DiskService
 from app.msa import (
     HEADER_SIZE,
     MAGIC,
@@ -104,10 +107,35 @@ class HeaderTests(unittest.TestCase):
         with self.assertRaisesRegex(MSAError, "ends before track|holds only"):
             parse_msa(data[:-3])
 
-    def test_trailing_bytes_are_not_ignored(self) -> None:
-        data = st_to_msa(blank_image(DS_720K)) + b"\x00"
-        with self.assertRaisesRegex(MSAError, "follow the last track"):
-            parse_msa(data)
+    def test_trailing_bytes_are_counted_rather_than_refused(self) -> None:
+        image = blank_image(DS_720K)
+        parsed = parse_msa(st_to_msa(image) + b"\x00")
+        self.assertEqual(parsed.trailing, 1)
+        self.assertEqual(parsed.sectors(), image)
+        self.assertEqual(parse_msa(st_to_msa(image)).trailing, 0)
+
+    def test_an_extra_track_record_after_the_declared_tracks_is_left_out(self) -> None:
+        """Some archivers wrote one track record more than the header declares.
+
+        The declared tracks are the disk: on the Vectronix CD, images carrying
+        such a record match the TOSEC dumps of the same disks once the record
+        is left out.
+        """
+        image = patterned_image(DS_720K)
+        archive = st_to_msa(image)
+        extra = pack_track(b"\x5a" * 64 + bytes(range(256)) * 17 + bytes(192))
+        data = archive + len(extra).to_bytes(2, "big") + extra
+        parsed = parse_msa(data)
+        self.assertEqual(parsed.end_track, 79)
+        self.assertEqual(len(parsed.tracks), 160)
+        self.assertEqual(parsed.sectors(), image)
+        self.assertEqual(msa_to_st(data), image)
+        self.assertEqual(parsed.trailing, len(extra) + 2)
+        self.assertEqual(parsed.packed_size, len(archive))
+        self.assertEqual(
+            parsed.warnings,
+            [f"{len(extra) + 2:,} bytes follow the last track and are ignored."],
+        )
 
     def test_a_track_longer_than_its_raw_size_is_refused(self) -> None:
         data = header(9, 1, 0, 0) + (4609).to_bytes(2, "big") + bytes(4609)
@@ -184,11 +212,38 @@ class ProjectViewTests(unittest.TestCase):
         # The odd tracks of the fixture pack, and so does the blanked one.
         self.assertEqual(project["compressedTracks"], 81)
         self.assertEqual(project["size"], DS_720K.size)
+        self.assertEqual(project["trailingBytes"], 0)
+        self.assertEqual(project["warnings"], [])
+
+    def test_the_project_reports_bytes_after_the_last_track(self) -> None:
+        archive = st_to_msa(blank_image(DS_720K))
+        project = msa_project(archive + (4).to_bytes(2, "big") + bytes([0xE5, 0, 0x12, 0]))
+        self.assertEqual(project["trailingBytes"], 6)
+        self.assertEqual(project["packedSize"], len(archive))
+        self.assertEqual(project["warnings"], ["6 bytes follow the last track and are ignored."])
 
     def test_the_boot_sector_fixture_is_the_shape_it_claims(self) -> None:
         boot = boot_sector(DS_800K)
         self.assertEqual(int.from_bytes(boot[0x18:0x1A], "little"), 10)
         self.assertEqual(int.from_bytes(boot[0x13:0x15], "little"), 1600)
+
+
+class ContainerConversionTests(unittest.TestCase):
+    def test_converting_an_archive_with_an_extra_record_reports_what_was_left_out(self) -> None:
+        image = patterned_image(DS_720K)
+        extra = pack_track(bytes(4608))
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "Extra.msa"
+            source.write_bytes(st_to_msa(image) + len(extra).to_bytes(2, "big") + extra)
+            service = DiskService(Path(folder) / "work")
+            session = service.create_from_path(source)
+            converted, rows = service.convert_container(session, "st")
+            self.assertEqual(converted.path.read_bytes(), image)
+            self.assertEqual(len(rows), 160)
+            self.assertIn(
+                "Magic Shadow Archiver image: 6 bytes follow the last track and are ignored.",
+                converted.warnings,
+            )
 
 
 if __name__ == "__main__":
