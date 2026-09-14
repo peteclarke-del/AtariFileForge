@@ -210,6 +210,12 @@ and a missing executable is reported before launch. The
 
 ## Update and remove
 
+A release package updates itself from **About Atari File Forge**, in the
+**Help** menu, with **Check for Application Updates**, as the
+[installation guide](INSTALLATION.md#check-for-application-updates) describes.
+A checkout cannot: the button opens the release page, and the checkout is
+updated with Git.
+
 Pull the new source and rerun the installer after dependency changes:
 
 ```bash

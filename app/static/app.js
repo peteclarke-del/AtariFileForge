@@ -52,10 +52,20 @@ const { confirmPageOverride } = window.AtariSafetyDialogs.create({ esc, normalis
 let collectionCatalogue = window.AtariCollectionCatalogue.create({ uuid: newUuid });
 const collectionRevisionsSeen = new Map();
 const showHelp = window.AtariHelp.create({ showModal, modalContent });
+// The update's requests change nothing in the workspace, so they go straight
+// to the server rather than through api(), which clears the clipboard first.
+const appUpdate = window.AtariAppUpdate.create({
+  api: rawApi,
+  esc,
+  humanSize,
+  confirmChoice,
+  nativeHost: () => window.webkit?.messageHandlers?.atariDesktop || null,
+});
 const showAbout = window.AtariAbout.create({
   showModal,
   esc,
   context: () => ({ version: applicationVersion, engine: applicationEngine, host: platformContract.host }),
+  attachUpdates: () => appUpdate.attach(modalContent.querySelector("[data-app-update]")),
 });
 const formats = window.AtariFormats;
 let persistentStorageChanged = () => {};
