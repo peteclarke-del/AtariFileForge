@@ -327,7 +327,7 @@
               <li>Magic Shadow Archiver writes a ten-byte big-endian header: the identifier <code>$0E0F</code>, the sectors per track, the number of sides, and the first and last track it stored. Every track then follows as its own record with a length word in front of it.</li>
               <li>A track is stored either raw, or run-length encoded around the escape byte <code>$E5</code>. A run is encoded only when it repeats at least four times, and a literal <code>$E5</code> is always written as a run of one so it cannot be read back as an escape. A track whose encoded form would be no smaller is stored raw, and its length word says so.</li>
               <li>A track outside the stored range was never written. It is presented as an unformatted track rather than as zeroes, so an image with a short track range is not mistaken for a full disk.</li>
-              <li>Bytes after the last track are reported rather than ignored quietly, because they usually mean the file was truncated or concatenated.</li>
+              <li>Bytes after the last track the header declares are not part of the disk. Some archivers wrote one more track record than the header declares, and images carrying one match independent dumps of the same disks once that record is left out. Those bytes are left out of the decoded sectors and reported in the container project view and on the converted image. An MSA written back from such a file is shorter than the original by that many bytes.</li>
             </ul>
             <h4>DIM</h4>
             <ul>

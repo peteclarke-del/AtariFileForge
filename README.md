@@ -1742,6 +1742,15 @@ rules: a run of four or more identical bytes becomes a run record, a literal
 `0xE5` is always written as a run of one because it cannot appear bare, and a
 track is stored packed only when the packed form is actually shorter.
 
+The header decides how much of the file is the disk. Some archivers wrote one
+more track record after the tracks the header declares: 3 of 12 Vectronix
+images sampled from the Internet Archive's Vectronix CD carry one, and with
+that record left out their sectors match the TOSEC dumps of the same disks
+exactly. Bytes after the last declared track are therefore left out of the
+decoded sectors rather than refused. The container project view and the
+converted image both report how many there were, and an `.msa` written back
+from such a file is shorter than the original by that count.
+
 A `.dim` is the raw sectors FastCopy Pro read, track by track and side by side,
 behind a 32-byte header that records the shape. Unlike a plain `.st` the shape
 is therefore never in doubt. The full form holds every sector. The
