@@ -157,6 +157,7 @@ class ContainerDiskMixin:
                 parsed = parse_msa(data)
                 image = parsed.sectors()
                 geometry = parsed.geometry
+                warnings = parsed.warnings
             elif session.kind == "dim":
                 parsed = parse_dim(data)
                 image, warnings = decode_dim(data)
