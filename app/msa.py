@@ -67,6 +67,7 @@ class MSAImage:
     start_track: int
     end_track: int
     tracks: tuple[MSATrack, ...]
+    trailing: int = 0  # bytes after the last track, which are not part of the disk
 
     @property
     def track_count(self) -> int:
@@ -93,6 +94,13 @@ class MSAImage:
     @property
     def packed_size(self) -> int:
         return HEADER_SIZE + sum(2 + item.packed_length for item in self.tracks)
+
+    @property
+    def warnings(self) -> list[str]:
+        """What the disk rebuilt from this archive leaves out."""
+        if not self.trailing:
+            return []
+        return [f"{self.trailing:,} bytes follow the last track and are ignored."]
 
     def sectors(self) -> bytes:
         """The plain sector image, tracks from zero, sides interleaved."""
@@ -158,7 +166,11 @@ def pack_track(raw: bytes) -> bytes:
 
 
 def parse_msa(data: bytes) -> MSAImage:
-    """Read an archive completely, refusing anything that does not add up."""
+    """Read an archive completely, refusing anything that does not add up.
+
+    Bytes after the last declared track are left out and counted in
+    ``trailing``.
+    """
     if not is_msa(data):
         raise MSAError("The file does not start with the MSA identifier 0x0E0F.")
     sectors_per_track = int.from_bytes(data[2:4], "big")
@@ -200,11 +212,13 @@ def parse_msa(data: bytes) -> MSAImage:
             tracks.append(
                 MSATrack(track, side, length, track_size, compressed, bytes(unpacked))
             )
-    if index != len(data):
-        raise MSAError(
-            f"{len(data) - index:,} bytes follow the last track of the archive."
-        )
-    return MSAImage(sectors_per_track, sides, start_track, end_track, tuple(tracks))
+    # Some archivers wrote one more track record than the header declares,
+    # as on the Vectronix CD. The tracks the header declares are the disk:
+    # rebuilt without the extra record, those images match their TOSEC dumps.
+    trailing = len(data) - index
+    return MSAImage(
+        sectors_per_track, sides, start_track, end_track, tuple(tracks), trailing
+    )
 
 
 def msa_to_st(data: bytes) -> bytes:
@@ -276,7 +290,9 @@ def msa_project(data: bytes) -> dict:
         "size": parsed.size,
         "packedSize": parsed.packed_size,
         "compressedTracks": sum(1 for item in parsed.tracks if item.compressed),
+        "trailingBytes": parsed.trailing,
         "tracks": rows,
+        "warnings": parsed.warnings,
     }
 
 
