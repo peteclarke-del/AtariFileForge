@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from atarinut.filesystem.gemdos import tos_limit_notes
 
 from . import atari_paths
+from .branding import HOMEPAGE
 from .checksum import sha256_path
 from .floppy_geometry import resolve_geometry
 
@@ -285,7 +286,7 @@ def build_download_readme(
         f"# {session.name}",
         "",
         "This archive was prepared by Atari File Forge, the open-source Atari image workshop.",
-        "Project: https://github.com/peteclarke-del/AtariFileForge",
+        f"Project: {HOMEPAGE}",
         "",
         "## Image details",
         "",
@@ -420,7 +421,7 @@ def build_download_readme(
         "A GEMDOS directory entry records one attribute byte and one datestamp. Datestamps run from 1980 to 2107 and nothing outside that range can be stored.",
         "TOS runs every `.PRG` in the `AUTO` folder of the boot drive, in the order the directory holds the entries, before the desktop appears. Changing that order changes what the machine does at boot.",
         "A flux container can hold track-level information that is not representable once the image is edited as a filing system.",
-        "For current documentation, releases and issue reporting, visit https://github.com/peteclarke-del/AtariFileForge.",
+        f"For current documentation, releases and issue reporting, visit {HOMEPAGE}.",
         "",
     ))
     return "\n".join(lines)
