@@ -42,6 +42,11 @@
   <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
   <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
   <releases>
+    <release version="0.6.0" date="2026-10-02">
+      <description>
+        <p>Reads a real floppy disk as a source. Read floppy disk, on an empty pane and in the File menu, captures the disk in a Greaseweazle drive or a floppy controller as an ST, MSA, SCP or HFE image and opens it in the pane, with the geometry taken from the disk's own boot sector. A floppy controller can also be the destination of a physical write. The HDDRIVER distribution floppy is recognised as a driver source.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-09-14">
       <description>
         <p>Adds Check for Application Updates to the About box. A release package downloads the new package for its own distribution and architecture, checks it against the release's SHA256SUMS, installs it with APT after asking for your password and restarts. Reads an MSA that carries one track record more than its header declares, leaving those bytes out of the disk and reporting them, instead of refusing it.</p>
