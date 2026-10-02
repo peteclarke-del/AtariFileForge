@@ -599,70 +599,180 @@ function showPhysicalFloppyContextMenu(index, event, enabled) {
   setTimeout(() => document.addEventListener("pointerdown", close, { once: true }), 0);
 }
 
+//: The floppy controllers this host exposes, or none. A missing controller
+//: is the usual case, so a failed probe is an empty list rather than an error.
+async function floppyControllerStatus() {
+  if (!hasHostCapability("floppy-controller")) return { devices: [], geometries: [] };
+  return api("/api/desktop/floppy-drive").catch(() => ({ devices: [], geometries: [] }));
+}
+
 async function showPhysicalFloppyDialog(index) {
   const pane = panes[index];
   if (!pane?.image) return;
   if (!hasHostCapability("physical-floppy-write")) {
     return toast("Physical floppy access requires the native Linux host.", "warning");
   }
-  const query = new URLSearchParams();
-  showModal('<div class="analysis-loading compact"><span class="modal-progress-icon" aria-hidden="true">↻</span><h2>Checking Greaseweazle</h2><p>Finding the device and validating the selected image…</p></div>');
+  showModal('<div class="analysis-loading compact"><span class="modal-progress-icon" aria-hidden="true">↻</span><h2>Checking floppy drives</h2><p>Finding Greaseweazle and any floppy controller, and validating the selected image…</p></div>');
   try {
-    const status = await api(`/api/desktop/images/${pane.image.id}/physical-floppy?${query}`);
-    const verification = status.media.automaticVerification
-      ? "Every written sector will be read back and verified automatically."
-      : "This flux-level image cannot be verified with a sector read-back. Test the disk in suitable hardware afterwards.";
+    const [status, controller] = await Promise.all([
+      api(`/api/desktop/images/${pane.image.id}/physical-floppy`),
+      floppyControllerStatus(),
+    ]);
+    // A floppy controller writes plain sectors only; anything else goes
+    // through Greaseweazle.
+    const controllers = /\.st$/i.test(status.media.name) ? controller.devices : [];
+    const anyDrive = status.available || controllers.length > 0;
     const unavailable = status.available ? "" : `<div class="help-warning"><strong>Greaseweazle is not ready.</strong> ${esc(status.detail)}</div>`;
-    // The capture formats and the geometries are whatever the desktop
-    // endpoint reports, so a build that grows a format needs no change here.
-    const captureFormats = status.media.captureFormats || status.captureFormats || [];
-    const geometries = status.media.geometries || status.geometries || [];
+    const drives = `${status.available ? `<optgroup label="Greaseweazle">${status.drives.map(drive => `<option value="gw:${esc(drive.id)}">Greaseweazle · ${esc(drive.label)}</option>`).join("")}</optgroup>` : ""}
+      ${controllers.length ? `<optgroup label="Floppy controller">${controllers.map(device => `<option value="fd:${esc(device)}">Floppy controller · ${esc(device)}</option>`).join("")}</optgroup>` : ""}`;
     showModal(`<div class="analysis-dialog physical-floppy-dialog"><header><div><small>PHYSICAL MEDIA</small><h2>Write ${esc(status.media.name)}</h2></div></header>
       <p>This will write the current working image to a real floppy disk. Unsaved image changes are included.</p>
-      <dl class="physical-floppy-summary"><div><dt>Image type</dt><dd>${esc(status.media.format)}</dd></div><div><dt>Verification</dt><dd>${status.media.automaticVerification ? "Automatic sector verification" : "Not available for flux images"}</dd></div></dl>
+      <dl class="physical-floppy-summary"><div><dt>Image type</dt><dd>${esc(status.media.format)}</dd></div><div><dt>Verification</dt><dd data-verification></dd></div></dl>
       ${unavailable}
-      <label class="field"><span>Physical drive</span><select name="physicalDrive" ${status.available ? "" : "disabled"}>${status.drives.map(drive => `<option value="${esc(drive.id)}">${esc(drive.label)}</option>`).join("")}</select></label>
-      ${captureFormats.length ? `<label class="field"><span>Written as</span><select name="captureFormat" ${status.available ? "" : "disabled"}>${captureFormats.map(format => `<option value="${esc(format.id)}">${esc(format.label)}</option>`).join("")}</select></label>` : ""}
-      ${geometries.length ? `<label class="field" data-geometry-field><span>Geometry</span><select name="captureGeometry" ${status.available ? "" : "disabled"}>${geometries.map(geometry => `<option value="${esc(geometry.id)}">${esc(geometry.label)}</option>`).join("")}</select><small>A sector image carries no geometry of its own, so the tracks, sides and sectors have to be stated before the disk is cut.</small></label>` : ""}
-      <div class="help-warning"><strong>This is destructive.</strong> All existing data on the disk in the selected drive will be overwritten. ${esc(verification)}</div>
-      <label class="check-field physical-floppy-confirm"><input type="checkbox" name="physicalConfirmed" required ${status.available ? "" : "disabled"}> I understand that the physical disk will be overwritten.</label>
-      <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button danger" value="write" ${status.available ? "" : "disabled"}>Write and ${status.media.automaticVerification ? "verify" : "finish unverified"}</button></div></div>`, async form => {
+      <label class="field"><span>Physical drive</span><select name="physicalDrive" ${anyDrive ? "" : "disabled"}>${drives}</select></label>
+      <div class="help-warning"><strong>This is destructive.</strong> All existing data on the disk in the selected drive will be overwritten. <span data-verification-note></span></div>
+      <label class="check-field physical-floppy-confirm"><input type="checkbox" name="physicalConfirmed" required ${anyDrive ? "" : "disabled"}> I understand that the physical disk will be overwritten.</label>
+      <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button danger" value="write" ${anyDrive ? "" : "disabled"}></button></div></div>`, async form => {
+        const [kind, target] = String(form.get("physicalDrive") || "").split(/:(.*)/s);
+        const viaController = kind === "fd";
         const result = await trackedPaneOperation(
           index,
           `Writing ${status.media.name} to a physical floppy`,
-          operationId => api(`/api/desktop/images/${pane.image.id}/physical-floppy`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              drive: form.get("physicalDrive"),
-              format: form.get("captureFormat") || "",
-              geometry: form.get("captureGeometry") || "",
-              operationId,
+          operationId => viaController
+            ? api("/api/desktop/floppy-drive/write", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ image: pane.image.id, device: target, confirm: true, operationId }),
+            })
+            : api(`/api/desktop/images/${pane.image.id}/physical-floppy`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ drive: target, operationId }),
             }),
-          }),
           { abortMode: "physical" },
         );
-        const verified = result.result.verified;
+        const verified = Boolean(result.result.verified);
+        const where = viaController ? esc(result.result.device) : `drive ${esc(result.result.drive)}`;
+        const outcome = verified
+          ? '<div class="help-note"><strong>Verification passed.</strong> Greaseweazle confirmed every written track.</div>'
+          : viaController
+            ? '<div class="help-warning"><strong>The write was not verified.</strong> Read the disk back, or test it in an Atari, before relying on it.</div>'
+            : '<div class="help-warning"><strong>Verification was not available.</strong> Test this flux-derived disk in its target hardware before relying on it.</div>';
         showModal(`<div class="analysis-dialog physical-floppy-complete"><header><div><small>PHYSICAL MEDIA</small><h2>${verified ? "Disk written and verified" : "Disk written"}</h2></div></header>
-          <p>${esc(result.media.name)} was written to drive ${esc(result.result.drive)}.</p>
-          <div class="help-${verified ? "note" : "warning"}"><strong>${verified ? "Verification passed." : "Verification was not available."}</strong> ${verified ? "Greaseweazle confirmed every written track." : "Test this flux-derived disk in its target hardware before relying on it."}</div>
+          <p>${esc(result.media.name)} was written to ${where}.</p>
+          ${outcome}
           <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div></div>`, null, { replace: true });
         return false;
       }, { replace: true });
-    // A geometry only has to be stated for a sector image; a track or flux
-    // capture already carries its own.
-    const formatSelect = modalContent.querySelector('[name="captureFormat"]');
-    const geometryField = modalContent.querySelector("[data-geometry-field]");
-    if (formatSelect && geometryField) {
-      const refreshGeometry = () => {
-        geometryField.hidden = !["st", "msa"].includes(formatSelect.value);
-      };
-      formatSelect.addEventListener("change", refreshGeometry);
-      refreshGeometry();
-    }
+    // Only Greaseweazle reads a written disk back, so the verification
+    // promise follows the chosen drive.
+    const driveSelect = modalContent.querySelector('[name="physicalDrive"]');
+    const refreshVerification = () => {
+      const viaController = driveSelect.value.startsWith("fd:");
+      const automatic = !viaController && status.media.automaticVerification;
+      modalContent.querySelector("[data-verification]").textContent = automatic
+        ? "Automatic sector verification"
+        : viaController ? "Not available through a floppy controller" : "Not available for flux images";
+      modalContent.querySelector("[data-verification-note]").textContent = automatic
+        ? "Every written sector will be read back and verified automatically."
+        : viaController
+          ? "A floppy controller does not read the disk back, so test it afterwards."
+          : "This flux-level image cannot be verified with a sector read-back. Test the disk in suitable hardware afterwards.";
+      modalContent.querySelector('button[value="write"]').textContent = automatic ? "Write and verify" : "Write unverified";
+    };
+    driveSelect.addEventListener("change", refreshVerification);
+    refreshVerification();
   } catch (error) {
     modal.close();
     toast(`Could not prepare the physical write: ${error.message}`, true);
+  }
+}
+
+function canReadPhysicalFloppy() {
+  return hasHostCapability("physical-floppy-read") || hasHostCapability("floppy-controller");
+}
+
+//: A real disk is a source like any image file: it is captured once, opened
+//: in this pane, and from then on edited, saved and exported as the working
+//: image it became. Every Greaseweazle drive and every floppy controller the
+//: host exposes is offered, and the disk is left untouched.
+async function showPhysicalFloppyReadDialog(index) {
+  if (!panes[index] || panes[index].loading) return;
+  if (!canReadPhysicalFloppy()) {
+    return toast("Reading a physical floppy requires the native Linux host.", "warning");
+  }
+  showModal('<div class="analysis-loading compact"><span class="modal-progress-icon" aria-hidden="true">↻</span><h2>Checking floppy drives</h2><p>Finding Greaseweazle and any floppy controller…</p></div>');
+  try {
+    const [reader, controller] = await Promise.all([
+      hasHostCapability("physical-floppy-read")
+        ? api("/api/desktop/physical-floppy").catch(error => ({ available: false, detail: error.message, drives: [], captureFormats: [], geometries: [] }))
+        : Promise.resolve(null),
+      floppyControllerStatus(),
+    ]);
+    const greaseweazle = reader?.available ? reader : null;
+    const controllers = controller.devices || [];
+    const anyDrive = Boolean(greaseweazle) || controllers.length > 0;
+    const geometries = (greaseweazle?.geometries?.length ? greaseweazle.geometries : controller.geometries) || [];
+    const sources = `${greaseweazle ? `<optgroup label="Greaseweazle">${greaseweazle.drives.map(drive => `<option value="gw:${esc(drive.id)}">Greaseweazle · ${esc(drive.label)}</option>`).join("")}</optgroup>` : ""}
+      ${controllers.length ? `<optgroup label="Floppy controller">${controllers.map(device => `<option value="fd:${esc(device)}">Floppy controller · ${esc(device)}</option>`).join("")}</optgroup>` : ""}`;
+    const notReady = reader && !reader.available
+      ? `<div class="help-${controllers.length ? "note" : "warning"}"><strong>Greaseweazle is not ready.</strong> ${esc(reader.detail)}</div>`
+      : "";
+    const replacing = panes[index].image
+      ? `<div class="help-note">The disk opens in this pane in place of ${esc(panes[index].image.name)}. Save that image first if it has changes you want to keep.</div>`
+      : "";
+    showModal(`<div class="analysis-dialog physical-floppy-dialog"><header><div><small>PHYSICAL MEDIA</small><h2>Read a floppy disk</h2></div></header>
+      <p>Capture the disk in a real drive and open it here as a working image. The disk itself is only read, never written.</p>
+      ${notReady}
+      ${anyDrive ? "" : '<div class="help-warning"><strong>No floppy drive was found.</strong> Connect a Greaseweazle with the official <code>gw</code> tools installed, or use a host with a floppy controller.</div>'}
+      <label class="field"><span>Drive</span><select name="readSource" ${anyDrive ? "" : "disabled"}>${sources}</select></label>
+      <label class="field" data-read-format><span>Capture as</span><select name="readFormat">${(greaseweazle?.captureFormats || []).map(format => `<option value="${esc(format.id)}" data-sectors="${format.sectors ? "1" : "0"}">${esc(format.label)}</option>`).join("")}</select>
+        <small>A sector image is what an emulator or a Gotek runs and the workbench can edit. Flux keeps everything the head saw, including copy protection, for archiving.</small></label>
+      <label class="field" data-read-geometry><span>Geometry</span><select name="readGeometry"><option value="auto">Detect from the disk's boot sector</option>${geometries.map(geometry => `<option value="${esc(geometry.id)}">${esc(geometry.label)}</option>`).join("")}</select>
+        <small>TOS records the shape of a disk in its boot sector. Choose one only for a disk whose boot sector is missing or wrong.</small></label>
+      <label class="field" data-read-revolutions><span>Revolutions per track</span><input name="readRevolutions" type="number" min="1" max="10" step="1" placeholder="Greaseweazle default">
+        <small>More revolutions give a weak or marginal disk more chances to be read cleanly.</small></label>
+      <label class="field"><span>Image name</span><input name="readName" type="text" maxlength="64" placeholder="floppy" autocomplete="off"></label>
+      ${replacing}
+      <div class="modal-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="read" ${anyDrive ? "" : "disabled"}>Read disk</button></div></div>`, async form => {
+        const [kind, target] = String(form.get("readSource") || "").split(/:(.*)/s);
+        const viaController = kind === "fd";
+        const name = String(form.get("readName") || "").trim();
+        const geometry = form.get("readGeometry") || "auto";
+        const revolutions = String(form.get("readRevolutions") || "").trim();
+        const data = await trackedPaneOperation(
+          index,
+          viaController ? `Reading the disk in ${target}` : `Reading the disk in Greaseweazle drive ${target}`,
+          operationId => api(viaController ? "/api/desktop/floppy-drive/read" : "/api/desktop/physical-floppy/read", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(viaController
+              ? { device: target, geometry, name, operationId }
+              : { drive: target, format: form.get("readFormat") || "st", geometry, revolutions: revolutions || null, name, operationId }),
+          }),
+          { abortMode: "physical-read" },
+        );
+        await acceptImage(index, data.image);
+        const shape = data.geometry?.label || "";
+        toast(`${data.image.name} read from the floppy disk${shape ? ` · ${shape}` : ""}`);
+      }, { replace: true });
+    // The controls follow the drive: a floppy controller reads sectors only
+    // and has no revolutions, and a flux capture needs no geometry.
+    const sourceSelect = modalContent.querySelector('[name="readSource"]');
+    const formatSelect = modalContent.querySelector('[name="readFormat"]');
+    const refresh = () => {
+      const viaController = sourceSelect.value.startsWith("fd:");
+      const sectors = viaController || formatSelect.selectedOptions[0]?.dataset.sectors === "1";
+      modalContent.querySelector("[data-read-format]").hidden = viaController;
+      modalContent.querySelector("[data-read-revolutions]").hidden = viaController;
+      modalContent.querySelector("[data-read-geometry]").hidden = !sectors;
+    };
+    sourceSelect.addEventListener("change", refresh);
+    formatSelect.addEventListener("change", refresh);
+    refresh();
+  } catch (error) {
+    modal.close();
+    toast(`Could not check the floppy drives: ${error.message}`, true);
   }
 }
 
@@ -766,6 +876,9 @@ function renderPane(index, preserveScroll = false) {
     host.querySelector(".pane-open").onclick = () => chooseImage(index);
     host.querySelector(".pane-new").onclick = () => showCreateImageModal(index);
     host.querySelector(".pane-recover").onclick = () => recoverPreviousSession(index);
+    const readFloppy = host.querySelector(".pane-read-floppy");
+    readFloppy.hidden = !canReadPhysicalFloppy();
+    readFloppy.onclick = () => showPhysicalFloppyReadDialog(index);
     host.querySelector(".close-empty-pane").onclick = () => closePane(index);
     if (pane.loading) {
       host.querySelectorAll("button").forEach(button => {
@@ -934,6 +1047,7 @@ function renderPane(index, preserveScroll = false) {
     <div class="tool-menu-panel">
       ${newSubmenu}
       <button class="menu-command menu-load-image"><b>▤</b><span>Open image…</span></button>
+      ${canReadPhysicalFloppy() ? '<button class="menu-command menu-read-floppy"><b>▣</b><span>Read floppy disk…</span></button>' : ""}
       <button class="menu-command menu-save-image"><b>⇩</b><span>Save image</span></button>
       ${pane.image.exportFormats?.length ? `<button class="menu-command menu-export-image"><b>⇄</b><span>Export as…</span></button>` : ""}
       ${isContainer || pane.image.readOnly ? "" : `<span class="menu-separator" role="separator"></span>`}
@@ -1066,6 +1180,7 @@ function renderPane(index, preserveScroll = false) {
   host.querySelector(".refresh-image").onclick = () => refreshCurrentView(index);
   host.querySelector(".menu-new-matching-image")?.addEventListener("click", event => guardedPaneAction(index, () => newImageFromFileMenu(index, event.currentTarget.dataset.format)));
   host.querySelector(".menu-load-image")?.addEventListener("click", () => chooseImage(index));
+  host.querySelector(".menu-read-floppy")?.addEventListener("click", () => guardedPaneAction(index, () => showPhysicalFloppyReadDialog(index)));
   host.querySelector(".menu-save-image")?.addEventListener("click", () => guardedPaneAction(index, () => saveImage(index)));
   host.querySelector(".menu-export-image")?.addEventListener("click", () => guardedPaneAction(index, () => exportImageAs(index)));
   host.querySelector(".export-image")?.addEventListener("click", () => guardedPaneAction(index, () => exportImageAs(index)));

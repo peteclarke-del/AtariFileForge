@@ -396,6 +396,28 @@ class FloppyDriveRouteTests(unittest.TestCase):
         self.assertIn("Choose a floppy geometry", response.get_json()["error"])
         device.return_value.read.assert_not_called()
 
+    def test_without_a_geometry_the_boot_sector_decides_it(self) -> None:
+        from atari_floppy import FloppyReadResult
+
+        with patch("app.routes.desktop.FloppyDevice") as device:
+            device.return_value.boot_sector.return_value = blank_image(DS_720K)[:512]
+            device.return_value.read.return_value = FloppyReadResult(
+                device="/dev/fd0", image="capture.st", geometry="ds-80t-9s", size=737_280,
+            )
+            response = self.client.post("/api/desktop/floppy-drive/read", json={"device": "/dev/fd0"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(device.return_value.read.call_args[0][1], "ds-80t-9s")
+
+    def test_a_boot_sector_that_names_no_shape_is_refused(self) -> None:
+        with patch("app.routes.desktop.FloppyDevice") as device:
+            device.return_value.boot_sector.return_value = bytes(512)
+            response = self.client.post(
+                "/api/desktop/floppy-drive/read", json={"device": "/dev/fd0", "geometry": "auto"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Choose the geometry", response.get_json()["error"])
+        device.return_value.read.assert_not_called()
+
     def test_a_drive_failure_is_reported_and_opens_nothing(self) -> None:
         with patch("app.routes.desktop.FloppyDevice") as device:
             device.return_value.read.side_effect = FloppyError("The drive reported no disk.")
