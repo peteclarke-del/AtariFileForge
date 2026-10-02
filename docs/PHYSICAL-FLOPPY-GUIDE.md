@@ -1,7 +1,9 @@
 # Reading and writing physical floppy disks
 
-The native Linux edition of Atari File Forge can send an open floppy image to
-a Greaseweazle drive, and capture a physical disk back into a working image.
+The native Linux edition of Atari File Forge treats a real floppy drive as a
+source and a destination, like any image file. It can capture the disk in a
+Greaseweazle drive, or a floppy controller, into a working image, and send an
+open floppy image back to a real disk.
 The browser and Docker editions deliberately cannot access host USB hardware.
 Image editing remains shared between both editions; only the final hardware
 adapter is desktop-specific.
@@ -16,7 +18,7 @@ adapter is desktop-specific.
 | STX (`.stx`) | No | No, capture flux instead | Not applicable |
 | HFE | Yes | Yes | No |
 | SCP | Yes | Yes | No |
-| IPF | No | Yes | No |
+| IPF | No | No: Greaseweazle has no IPF writer, so capture SCP | No |
 | One partition of a hard-disk image | No | Not applicable | Not applicable |
 
 Greaseweazle reads a `.dim` as the PC-98 DIFC format, which is not the
@@ -45,14 +47,26 @@ An image with 81, 82 or 83 tracks has no Greaseweazle definition, and Atari
 File Forge refuses to write it rather than let the last tracks be dropped;
 export it as HFE or SCP flux instead.
 
+When a disk is read, the shape comes from the disk itself. Atari File Forge
+first reads only cylinder 0, side 0, which holds the boot sector wherever a
+disk's sectors per track put the rest, and takes the geometry from its BIOS
+parameter block. It then tells Greaseweazle that geometry for the full
+capture. A high-density disk is probed again at its own data rate. A disk
+with no usable boot sector, such as a game disk with its own loader, is
+refused with a request to choose the geometry or capture flux. It is never
+guessed.
+
 An MSA carries its own shape, so writing one needs no format. Reading a disk
 into an MSA still does, because Greaseweazle has no sectors to describe
 until a format tells it how to decode the flux.
 
 ## Reading a physical disk
 
-Select **Read physical floppy**, choose the connected drive, the capture
-format and, for a sector format, the geometry, then read. The capture is
+Select **Read floppy disk** on an empty pane, or **File → Read floppy disk…**
+in an open one. Choose the drive: every Greaseweazle drive and every floppy
+controller the host exposes is listed. Then choose the capture format, and
+read. The geometry is detected from the boot sector unless you choose one.
+The disk is only ever read. The capture is
 written to a private temporary file first and is only opened as an image
 pane once Greaseweazle has exited cleanly and left a usable file behind, so
 an empty drive or a failed read never becomes a pane you might mistake for
@@ -64,16 +78,14 @@ Choose the capture format to match the intent:
 | --- | --- | --- |
 | `st` | Decoded sectors | The disk is a standard TOS-formatted floppy of known shape |
 | `msa` | Decoded sectors, packed | The same, when the result is for distribution |
-| `ipf` | Preserved flux | The disk is being kept in the SPS preservation format |
 | `hfe` | Bitcell image | The disk has non-standard tracks worth keeping |
 | `scp` | Raw flux | Preservation, copy protection, or a disk that will not decode |
 
 A sector format decodes while reading and fails on an unreadable track. A flux
 capture keeps everything the drive produced, including tracks no filesystem
 decoder accepts, so it is the safer choice for a disk of unknown condition or
-one you may only get one chance to read. Use `--revs` through the API, or the
-revolutions control, to capture several revolutions per track when a disk is
-marginal.
+one you may only get one chance to read. Use the revolutions control to
+capture several revolutions per track when a disk is marginal.
 
 Greaseweazle describes HFE and SCP as flux or raw bitcell data, so it cannot
 perform its usual sector read-back verification. Atari File Forge calls this
@@ -90,8 +102,10 @@ workflow and its byte-comparison save check.
 
 A host with an actual floppy controller, such as a Raspberry Pi or a PC with a
 drive attached, can read and write disks directly through `/dev/fd0` with no
-Greaseweazle hardware. Select the drive and the disk's geometry, then read or
-write.
+Greaseweazle hardware. Its drives appear beside the Greaseweazle ones in both
+the read and the write dialogs. A read takes the geometry from the boot
+sector as Greaseweazle does. A write is offered for a plain `.st` only and is
+not read back, so test the disk afterwards.
 
 This path is not equivalent to Greaseweazle, and the difference decides which
 you should use:
@@ -151,7 +165,8 @@ Atari File Forge reports the same diagnostic and does not start a write.
    hard drive, open the partition you want to write.
 2. Open **Tools** and choose **Write physical floppy**, or right-click the
    image title or coloured format badge and choose the same command.
-3. Select Greaseweazle drive A, B, 0, 1, 2 or 3.
+3. Select Greaseweazle drive A, B, 0, 1, 2 or 3, or, for a plain `.st`, a
+   floppy controller.
 4. Insert the destination disk. Confirm that all existing data on it may be
    overwritten.
 5. Select **Write and verify**. HFE and SCP instead say **finish unverified**.

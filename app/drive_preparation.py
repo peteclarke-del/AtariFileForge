@@ -221,7 +221,10 @@ DRIVERS: tuple[Driver, ...] = (
     Driver(
         "driver-hddriver",
         "HDDRIVER",
-        ("HDDRIVER.SYS",),
+        # The distribution floppy carries the driver as HDDRIVER.PRG in AUTO,
+        # which boots it from the floppy; HDDRUTIL installs the same file as
+        # HDDRIVER.SYS in the partition root, which is what its loader reads.
+        ("HDDRIVER.SYS", "HDDRIVER.PRG"),
         folder_names=("HDDRIVER", "HDDRV"),
         licence="Sold by its author, Uwe Seimet. Supply your own copy.",
         note="Uwe Seimet's driver, the usual choice for large partitions and "
