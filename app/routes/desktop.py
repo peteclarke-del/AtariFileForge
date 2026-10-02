@@ -28,6 +28,7 @@ from atari_greaseweazle import (
 )
 
 from ..app_update import Activity
+from ..floppy_geometry import FloppyGeometry, geometry_for_boot_sector
 from ..disk_service import DiskError, DiskService
 from ..desktop_state import DesktopClientState
 from ..image_opening import open_image_path, open_rom_component_paths
@@ -81,18 +82,6 @@ def _physical_media_details(service: DiskService, session) -> dict:
         "name": name,
         "format": media_format.label,
         "automaticVerification": media_format.automatic_verification,
-        # What a capture from this drive can be written as, and the shapes a
-        # sector capture can be told to decode. Both are listed here so the
-        # pane offers exactly what this build supports rather than a fixed
-        # menu that may not match.
-        "captureFormats": [
-            {"id": name, "label": image_format(f"{CAPTURE_STEM}{suffix}").label}
-            for name, suffix in PHYSICAL_READ_FORMATS.items()
-        ],
-        "geometries": [
-            {"id": item.identifier, "label": item.label}
-            for item in sorted(ATARI_GEOMETRIES.values(), key=lambda row: row.size)
-        ],
     }
 
 
@@ -154,15 +143,36 @@ def _physical_media(service: DiskService, session, details: dict, progress):
 # rather than from the request, keeping the caller's text out of the path.
 #
 # Only formats Greaseweazle itself writes appear here: sectors as a ``.st`` or
-# an MSA, and flux as HFE, SCP or IPF. A Pasti capture is made by Pasti and a
-# DIM by FastCopy Pro, so neither is a capture target.
+# an MSA, and flux as HFE or SCP. gw reads IPF but has no writer for it, a
+# Pasti capture is made by Pasti and a DIM by FastCopy Pro, so none of those
+# is a capture target.
 PHYSICAL_READ_FORMATS: dict[str, str] = {
     "st": ".st",
     "msa": ".msa",
     "hfe": ".hfe",
     "scp": ".scp",
-    "ipf": ".ipf",
 }
+
+#: The geometry a read request names when the disk should describe itself.
+AUTO_GEOMETRY = "auto"
+
+
+def _geometry_choices() -> list[dict]:
+    return [
+        {"id": item.identifier, "label": item.label}
+        for item in sorted(ATARI_GEOMETRIES.values(), key=lambda row: row.size)
+    ]
+
+
+def _boot_sector_geometry(boot: bytes, source: str) -> FloppyGeometry:
+    """The shape a disk's own boot sector declares, or a refusal to guess."""
+    layout = geometry_for_boot_sector(boot)
+    if layout is None:
+        raise DiskError(
+            f"The disk in {source} has no usable TOS boot sector, so its geometry cannot be "
+            "detected. Choose the geometry, or capture it as SCP or HFE flux."
+        )
+    return layout
 
 
 # A capture is written under a fixed name inside a private scratch directory,
@@ -291,6 +301,32 @@ def create_desktop_blueprint(
             raise DiskError(str(exc)) from exc
         return jsonify(result=asdict(result), media=details)
 
+    @blueprint.get("/api/desktop/physical-floppy")
+    @request_effect("external", "probing Greaseweazle for a physical-floppy read")
+    def physical_floppy_reader_status():
+        """Describe what a disk in a Greaseweazle drive can be captured as.
+
+        Reading needs no open image, so this is the source-side twin of the
+        per-image write status: the formats and shapes are whatever this
+        build supports, so the dialog never offers a menu the route refuses.
+        """
+        probe = GreaseweazleClient().probe()
+        return jsonify(
+            available=probe.available,
+            command=probe.command,
+            detail=probe.detail,
+            drives=[{"id": drive, "label": f"Drive {drive}"} for drive in DRIVE_CHOICES],
+            captureFormats=[
+                {
+                    "id": name,
+                    "label": image_format(f"{CAPTURE_STEM}{suffix}").label,
+                    "sectors": image_format(f"{CAPTURE_STEM}{suffix}").format_on_read,
+                }
+                for name, suffix in PHYSICAL_READ_FORMATS.items()
+            ],
+            geometries=_geometry_choices(),
+        )
+
     @blueprint.post("/api/desktop/physical-floppy/read")
     @request_effect("external", "reading a physical floppy through Greaseweazle")
     @media_activity.guard
@@ -315,20 +351,22 @@ def create_desktop_blueprint(
         # layout it was not asked for. Flux needs nothing: it records what
         # the head saw.
         disk_format = None
+        shape = None
         # ``image_format`` reads a suffix off a filename, and a bare ".st" has
         # no suffix of its own, so it is asked about the file that will
         # actually be written.
-        if image_format(f"{CAPTURE_STEM}{suffix}").format_on_read:
-            layout = data.get("geometry") or "ds-720k"
+        sector_capture = image_format(f"{CAPTURE_STEM}{suffix}").format_on_read
+        requested_geometry = str(data.get("geometry") or AUTO_GEOMETRY).strip().lower()
+        if sector_capture and requested_geometry != AUTO_GEOMETRY:
             try:
-                shape = floppy_geometry(str(layout))
+                shape = floppy_geometry(requested_geometry)
             except FloppyError as exc:
                 raise DiskError(str(exc)) from exc
-            try:
-                disk_format = gw_format(shape.tracks, shape.sides, shape.sectors)
-            except GreaseweazleError as exc:
-                raise DiskError(str(exc)) from exc
         revolutions = data.get("revolutions")
+        try:
+            revolutions = int(revolutions) if revolutions not in (None, "") else None
+        except (TypeError, ValueError) as exc:
+            raise DiskError("Choose between 1 and 10 revolutions per track.") from exc
         operation_id = str(data.get("operationId") or "") or None
         with tempfile.TemporaryDirectory(dir=service.work_dir, prefix="gw-read-") as folder:
             destination = Path(folder) / f"{CAPTURE_STEM}{suffix}"
@@ -338,11 +376,19 @@ def create_desktop_blueprint(
                     f"Reading physical drive {drive}",
                     "Physical floppy captured",
                 ) as progress:
-                    result = GreaseweazleClient().read(
+                    client = GreaseweazleClient()
+                    if sector_capture:
+                        if shape is None:
+                            shape = _boot_sector_geometry(
+                                client.boot_sector(drive, progress, directory=folder),
+                                f"drive {drive}",
+                            )
+                        disk_format = gw_format(shape.tracks, shape.sides, shape.sectors)
+                    result = client.read(
                         destination,
                         drive,
                         progress,
-                        revolutions=int(revolutions) if revolutions is not None else None,
+                        revolutions=revolutions,
                         disk_format=disk_format,
                     )
                     progress("Opening the captured image", None, None)
@@ -350,7 +396,13 @@ def create_desktop_blueprint(
                     _name_captured_session(service, session, data.get("name"))
             except GreaseweazleError as exc:
                 raise DiskError(str(exc)) from exc
-        return jsonify(image=service.summary(session), result=asdict(result))
+        return jsonify(
+            image=service.summary(session),
+            result=asdict(result),
+            geometry=(
+                {"id": shape.identifier, "label": shape.label} if shape is not None else None
+            ),
+        )
 
     @blueprint.get("/api/desktop/floppy-drive")
     @request_effect("external", "probing a floppy controller")
@@ -381,11 +433,20 @@ def create_desktop_blueprint(
     def read_floppy_drive():
         """Capture a disk from a real drive and open it as a new image."""
         data = payload()
-        geometry_id = str(data.get("geometry") or "")
+        geometry_id = str(data.get("geometry") or AUTO_GEOMETRY).strip().lower()
         operation_id = str(data.get("operationId") or "") or None
         try:
             device = validated_device(data.get("device") or "/dev/fd0")
-            layout = floppy_geometry(geometry_id)
+            if geometry_id == AUTO_GEOMETRY:
+                layout = _boot_sector_geometry(FloppyDevice(device).boot_sector(), device)
+                if layout.identifier not in ATARI_GEOMETRIES:
+                    raise DiskError(
+                        f"The boot sector describes {layout.label}, which a floppy controller "
+                        "cannot be told to read. Capture this disk with Greaseweazle instead."
+                    )
+                geometry_id = layout.identifier
+            else:
+                layout = floppy_geometry(geometry_id)
         except FloppyError as exc:
             raise DiskError(str(exc)) from exc
         with tempfile.TemporaryDirectory(dir=service.work_dir, prefix="fd-read-") as folder:

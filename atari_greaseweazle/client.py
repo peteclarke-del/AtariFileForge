@@ -132,6 +132,7 @@ DRIVE_CHOICES = ("A", "B", "0", "1", "2", "3")
 _DRIVE_PATTERN = re.compile(r"[A-Za-z0-9]+")
 _TRACK_PATTERN = re.compile(r"^\s*T(\d+)\.(\d+):")
 _GEOMETRY_PATTERN = re.compile(r"(?:Writing|Reading) c=(\d+)-(\d+):h=(\d+)-(\d+)", re.I)
+_FOUND_PATTERN = re.compile(r"Found (\d+) sectors of (\d+)", re.I)
 
 
 def image_format(path_or_name: str | Path) -> ImageFormat:
@@ -405,6 +406,60 @@ class GreaseweazleClient:
             tracks_read=len(tracks),
             size=size,
             output_tail=tuple(output[-12:]),
+        )
+
+    #: Definitions tried, in order, when only the boot sector is wanted.
+    #: Sector 1 of cylinder 0, side 0 is in the same place whatever the
+    #: disk's sectors per track, so the double-density ST definition finds it
+    #: on any ST disk, and the high-density one covers a 1.44M disk, whose
+    #: data rate the first cannot decode.
+    BOOT_PROBE_FORMATS = ("atarist.720", "ibm.1440")
+
+    def boot_sector(
+        self,
+        drive: str,
+        progress: Callable[[str, int | None, int | None], None] | None = None,
+        *,
+        directory: str | Path | None = None,
+    ) -> bytes:
+        """Read just the boot sector of the disk in a drive.
+
+        A sector capture has to name its geometry before gw starts, and the
+        disk's own BIOS parameter block is the best evidence of it, so one
+        track is read first and the caller decides the shape from it. Nothing
+        is written to the disk. An empty result is never returned: a track
+        gw could find no sectors on is reported as unreadable.
+        """
+        selected_drive = self._drive(drive)
+        command = self._ready_command()
+        report = progress or (lambda _message, _current=None, _total=None: None)
+        report(f"Reading the boot sector on drive {selected_drive}", None, None)
+        output: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="gw-boot-", dir=directory) as folder:
+            path = Path(folder) / "boot.st"
+            for format_name in self.BOOT_PROBE_FORMATS:
+                path.unlink(missing_ok=True)
+                return_code, output, _tracks, _total = self._stream(
+                    [
+                        command, "read", f"--drive={selected_drive}",
+                        f"--format={format_name}", "--tracks=c=0:h=0", "--revs=2",
+                        str(path),
+                    ],
+                    report,
+                    activity="Reading the boot sector",
+                    limit_message="Greaseweazle took too long to read the boot sector.",
+                )
+                found = _FOUND_PATTERN.search("\n".join(output))
+                if return_code or not found or not int(found.group(1)):
+                    continue
+                if path.is_file() and path.stat().st_size >= 512:
+                    with path.open("rb") as handle:
+                        return handle.read(512)
+        tail = "\n".join(output[-6:])
+        raise GreaseweazleError(
+            f"Greaseweazle could not read the boot sector of the disk in drive {selected_drive}. "
+            "Check that a disk is inserted, or capture it as SCP or HFE flux, which needs no geometry."
+            + (f"\n\n{tail}" if tail else "")
         )
 
     def write(

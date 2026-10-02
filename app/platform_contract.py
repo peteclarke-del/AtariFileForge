@@ -53,6 +53,7 @@ HOST_EXCLUSIVE_ENDPOINTS = {
         "desktop.put_client_state",
         "desktop.physical_floppy_status",
         "desktop.write_physical_floppy",
+        "desktop.physical_floppy_reader_status",
         "desktop.read_physical_floppy",
         "desktop.floppy_drive_status",
         "desktop.read_floppy_drive",
