@@ -87,8 +87,15 @@
               <li>A stable private owner recovers this Linux user's working sessions. Workspace settings, hardware profiles and the private collection catalogue are stored atomically under the XDG configuration directory, so a new random-port launch does not lose them.</li>
               <li>Saved ZIPs use the normal Linux Downloads directory and contain the same image, sidecars and README as the web edition.</li>
               <li>Hatari appears as a native window. In Docker it continues to appear in the browser display.</li>
-              <li>Install the optional official Greaseweazle tools to write sector and HFE images to real disks.</li>
+              <li>Install the optional official Greaseweazle tools to read real disks into images, and write sector and HFE images back to them.</li>
             </ul>
+            <div class="help-task"><h4>Read a physical floppy</h4><ol>
+              <li>Insert the disk in a Greaseweazle drive, or in a drive on the host's own floppy controller.</li>
+              <li>Choose <strong>Read floppy disk</strong> on an empty pane, or <strong>File &rarr; Read floppy disk…</strong> in an open one.</li>
+              <li>Pick the drive and what to capture: a sector image to edit, run or put on a Gotek, or SCP or HFE flux to archive a damaged or copy-protected disk.</li>
+              <li>Leave the geometry on <strong>Detect from the disk's boot sector</strong> unless the disk has no TOS boot sector.</li>
+              <li>The disk is only read. The capture opens in the pane as a working image once the read has finished cleanly.</li>
+            </ol></div>
             <div class="help-task"><h4>Write a physical floppy with Greaseweazle</h4><ol>
               <li>Confirm <code>gw info</code> can see the connected device and that the Linux udev rules permit access.</li>
               <li>Open a supported floppy image.</li>

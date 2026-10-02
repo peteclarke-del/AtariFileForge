@@ -253,6 +253,24 @@ class FloppyDevice:
             return FloppyProbe(False, str(self.device), f"Could not read {self.device}: {exc}")
         return FloppyProbe(True, str(self.device), "Floppy drive ready.", size or None)
 
+    def boot_sector(self) -> bytes:
+        """Read the first sector of the disk, where TOS records its shape.
+
+        Sector 1 sits at the start of the disk whatever its sectors per
+        track, so the kernel's current geometry is good enough to fetch it.
+        """
+        probe = self.probe()
+        if not probe.available:
+            raise FloppyError(probe.detail)
+        try:
+            with self.device.open("rb") as handle:
+                boot = handle.read(512)
+        except OSError as exc:
+            raise FloppyError(f"Could not read the boot sector from {self.device}: {exc}") from exc
+        if len(boot) < 512:
+            raise FloppyError(f"{self.device} returned no boot sector. Insert a disk and try again.")
+        return boot
+
     def read(
         self,
         destination: str | Path,

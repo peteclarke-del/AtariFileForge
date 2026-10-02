@@ -141,6 +141,18 @@ class DriverCatalogueTests(unittest.TestCase):
         self.assertEqual(found.version, "6.55A")
         self.assertIsNone(found.boot_code)
 
+    def test_hddriver_is_found_on_its_own_distribution_floppy(self) -> None:
+        """The floppy boots HDDRIVER.PRG from AUTO; a drive loads HDDRIVER.SYS."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "HDDRIVER_7.12" / "AUTO").mkdir(parents=True)
+            (root / "HDDRIVER_7.12" / "AUTO" / "HDDRIVER.PRG").write_bytes(b"driver")
+            found = find_distribution(driver_for("driver-hddriver"), [root])
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "HDDRIVER.PRG")
+        self.assertEqual(found.installed_name, "HDDRIVER.SYS")
+        self.assertEqual(found.version, "7.12")
+
     def test_a_driver_that_was_never_supplied_is_simply_absent(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             self.assertIsNone(find_distribution(driver_for("driver-icd"), [Path(folder)]))

@@ -2,12 +2,20 @@ window.AtariOperationUI = (() => {
   function create({ panes, api, setLoading, renderPane, modal, setModalAbort, setModalProgress, newUuid }) {
     function abortPresentation(mode) {
       if (mode === "physical") return {
-        message: "Stopping Greaseweazle and leaving the drive idle. The disk currently in the drive may be incomplete.",
+        message: "Stopping the drive and leaving it idle. The disk currently in the drive may be incomplete.",
         details: [
           { label: "Physical disk", value: "Do not rely on it until it has been written and verified again" },
           { label: "Image state", value: "The source image remains unchanged" },
         ],
         error: "Physical write aborted. The source image is unchanged, but the disk in the drive may be incomplete.",
+      };
+      if (mode === "physical-read") return {
+        message: "Stopping the drive. Nothing is opened and the disk in the drive is unchanged.",
+        details: [
+          { label: "Physical disk", value: "Only read, so it is exactly as it was" },
+          { label: "Workbench", value: "The partial capture is discarded" },
+        ],
+        error: "Floppy read aborted. The disk in the drive is unchanged and nothing was opened.",
       };
       if (mode === "read-only") return {
         message: "Stopping at the next safe read boundary. No image data is being changed.",

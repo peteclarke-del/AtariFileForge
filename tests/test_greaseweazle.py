@@ -326,6 +326,47 @@ class GreaseweazleReadTests(unittest.TestCase):
         self.assertTrue(progress.called)
         self.assertIn("--format=atarist.720", popen.call_args.args[0])
 
+    @patch("atari_greaseweazle.client.subprocess.Popen")
+    @patch("atari_greaseweazle.client.subprocess.run")
+    def test_the_boot_sector_is_read_from_one_track_only(self, run, popen) -> None:
+        run.return_value = subprocess.CompletedProcess(["gw", "info"], 0, "Device: Greaseweazle")
+        image = blank_image(DS_720K)
+        popen.side_effect = self._capture("T0.0: IBM MFM (9/9 sectors)\nFound 9 sectors of 9 (100%)\n", image)
+        with tempfile.TemporaryDirectory() as folder:
+            boot = self._client().boot_sector("A", directory=folder)
+            self.assertEqual(list(Path(folder).iterdir()), [], "the probe leaves nothing behind")
+        self.assertEqual(boot, image[:512])
+        command = popen.call_args.args[0]
+        self.assertIn("--tracks=c=0:h=0", command)
+        self.assertIn("--format=atarist.720", command)
+        self.assertNotIn("write", command)
+
+    @patch("atari_greaseweazle.client.subprocess.Popen")
+    @patch("atari_greaseweazle.client.subprocess.run")
+    def test_a_high_density_disk_is_probed_at_its_own_data_rate(self, run, popen) -> None:
+        run.return_value = subprocess.CompletedProcess(["gw", "info"], 0, "Device: Greaseweazle")
+        outputs = iter(["Found 0 sectors of 9 (0%)\n", "Found 18 sectors of 18 (100%)\n"])
+
+        def capture(command, **_kwargs):
+            Path(command[-1]).write_bytes(bytes(1_474_560))
+            return _Process(next(outputs))
+
+        popen.side_effect = capture
+        self._client().boot_sector("A")
+        formats = [
+            next(argument for argument in call.args[0] if argument.startswith("--format="))
+            for call in popen.call_args_list
+        ]
+        self.assertEqual(formats, ["--format=atarist.720", "--format=ibm.1440"])
+
+    @patch("atari_greaseweazle.client.subprocess.Popen")
+    @patch("atari_greaseweazle.client.subprocess.run")
+    def test_an_unreadable_boot_track_is_reported_and_flux_suggested(self, run, popen) -> None:
+        run.return_value = subprocess.CompletedProcess(["gw", "info"], 0, "Device: Greaseweazle")
+        popen.side_effect = self._capture("Found 0 sectors of 9 (0%)\n", bytes(737_280))
+        with self.assertRaisesRegex(GreaseweazleError, "SCP or HFE"):
+            self._client().boot_sector("A")
+
     @patch("atari_greaseweazle.client.subprocess.run")
     def test_a_sector_capture_without_a_format_is_refused_and_flux_suggested(self, run) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -492,7 +533,7 @@ class PhysicalReadRouteTests(unittest.TestCase):
         self.service.summary.assert_called_once_with(self.session)
 
     def test_the_requested_capture_format_selects_the_destination_suffix(self) -> None:
-        for requested, suffix in (("scp", ".scp"), ("msa", ".msa"), ("ipf", ".ipf"), ("hfe", ".hfe")):
+        for requested, suffix in (("scp", ".scp"), ("msa", ".msa"), ("hfe", ".hfe")):
             with self.subTest(format=requested):
                 self.service.create_from_path.reset_mock()
                 with patch("app.routes.desktop.GreaseweazleClient") as client:
@@ -506,7 +547,8 @@ class PhysicalReadRouteTests(unittest.TestCase):
                 self.assertEqual(Path(destination).suffix, suffix)
 
     def test_an_unsupported_capture_format_is_refused(self) -> None:
-        for requested in ("exe", "stx", "dim"):
+        # gw reads IPF but has no writer for it, so it is no capture target.
+        for requested in ("exe", "stx", "dim", "ipf"):
             with self.subTest(format=requested):
                 response = self.client.post(
                     "/api/desktop/physical-floppy/read",
@@ -526,6 +568,69 @@ class PhysicalReadRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("No disk in drive A.", response.get_json()["error"])
         self.service.create_from_path.assert_not_called()
+
+    def test_a_sector_capture_detects_its_geometry_from_the_boot_sector(self) -> None:
+        """An 800K disk is read as 800K without the operator having to know."""
+        from tests.msa_fixture import blank_image as image_of
+        from app.floppy_geometry import GEOMETRIES
+
+        boot = image_of(GEOMETRIES["ds-80t-10s"])[:512]
+        with patch("app.routes.desktop.GreaseweazleClient") as client:
+            client.return_value.boot_sector.return_value = boot
+            client.return_value.read.return_value = self._read_result()
+            response = self.client.post(
+                "/api/desktop/physical-floppy/read",
+                json={"drive": "A", "format": "st"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["geometry"]["id"], "ds-80t-10s")
+        self.assertEqual(client.return_value.read.call_args.kwargs["disk_format"], "atarist.800")
+
+    def test_a_disk_without_a_boot_sector_asks_for_its_geometry(self) -> None:
+        with patch("app.routes.desktop.GreaseweazleClient") as client:
+            client.return_value.boot_sector.return_value = bytes(512)
+            response = self.client.post(
+                "/api/desktop/physical-floppy/read",
+                json={"drive": "A", "format": "st", "geometry": "auto"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Choose the geometry", response.get_json()["error"])
+        client.return_value.read.assert_not_called()
+
+    def test_a_chosen_geometry_skips_the_boot_sector_probe(self) -> None:
+        with patch("app.routes.desktop.GreaseweazleClient") as client:
+            client.return_value.read.return_value = self._read_result()
+            self.client.post(
+                "/api/desktop/physical-floppy/read",
+                json={"drive": "A", "format": "st", "geometry": "ss-80t-9s"},
+            )
+        client.return_value.boot_sector.assert_not_called()
+        self.assertEqual(client.return_value.read.call_args.kwargs["disk_format"], "atarist.360")
+
+    def test_a_flux_capture_needs_no_geometry_at_all(self) -> None:
+        with patch("app.routes.desktop.GreaseweazleClient") as client:
+            client.return_value.read.return_value = self._read_result("capture.scp")
+            response = self.client.post(
+                "/api/desktop/physical-floppy/read",
+                json={"drive": "A", "format": "scp"},
+            )
+        self.assertEqual(response.status_code, 200)
+        client.return_value.boot_sector.assert_not_called()
+        self.assertIsNone(client.return_value.read.call_args.kwargs["disk_format"])
+
+    def test_the_reader_status_offers_only_what_gw_can_write(self) -> None:
+        with patch("app.routes.desktop.GreaseweazleClient") as client:
+            client.return_value.probe.return_value = ProbeResult(True, "/usr/bin/gw", "Device ready")
+            response = self.client.get("/api/desktop/physical-floppy")
+        self.assertEqual(response.status_code, 200)
+        status = response.get_json()
+        self.assertTrue(status["available"])
+        self.assertEqual([item["id"] for item in status["captureFormats"]], ["st", "msa", "hfe", "scp"])
+        self.assertEqual(
+            {item["id"]: item["sectors"] for item in status["captureFormats"]},
+            {"st": True, "msa": True, "hfe": False, "scp": False},
+        )
+        self.assertIn("ds-80t-9s", [item["id"] for item in status["geometries"]])
 
     def test_the_capture_scratch_directory_does_not_outlive_the_request(self) -> None:
         with patch("app.routes.desktop.GreaseweazleClient") as client:
