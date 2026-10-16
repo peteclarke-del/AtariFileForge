@@ -42,6 +42,11 @@
   <url type="homepage">https://github.com/peteclarke-del/AtariFileForge</url>
   <url type="bugtracker">https://github.com/peteclarke-del/AtariFileForge/issues</url>
   <releases>
+    <release version="0.6.1" date="2026-10-16">
+      <description>
+        <p>Expands the Online Library with twelve Atari ST sources, including the Atari Document Archive and improved Atarimania downloads. Fixes folder imports to preserve their directory structure and stages downloaded disk software on GEMDOS hard disks when it cannot be installed automatically.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-10-02">
       <description>
         <p>Reads a real floppy disk as a source. Read floppy disk, on an empty pane and in the File menu, captures the disk in a Greaseweazle drive or a floppy controller as an ST, MSA, SCP or HFE image and opens it in the pane, with the geometry taken from the disk's own boot sector. A floppy controller can also be the destination of a physical write. The HDDRIVER distribution floppy is recognised as a driver source.</p>

@@ -88,7 +88,7 @@ Release builds also provide a native-architecture Debian package. Install it
 on the Debian or Ubuntu release for which it was built:
 
 ```bash
-sudo apt install ./atari-file-forge_0.6.0-1.deb13_amd64.deb
+sudo apt install ./atari-file-forge_0.6.1-1.deb13_amd64.deb
 atari-file-forge
 ```
 
@@ -154,9 +154,9 @@ developing; they will not be committed or packaged.
 
 ## Current status
 
-The current release is `0.6.0`. It provides the editing, drive preparation,
+The current release is `0.6.1`. It provides the editing, drive preparation,
 analysis and deployment workflows for the whole ST range, in the browser and in
-the Linux desktop application. The [release notes](docs/releases/0.6.0.md)
+the Linux desktop application. The [release notes](docs/releases/0.6.1.md)
 describe what it does and what it does not yet do.
 
 What this release does:
@@ -2771,7 +2771,7 @@ curl http://localhost:8684/api/health
 A healthy response looks like:
 
 ```json
-{"engine":"atarinut","status":"ok","version":"0.6.0"}
+{"engine":"atarinut","status":"ok","version":"0.6.1"}
 ```
 
 The [release checklist](docs/RELEASE-CHECKLIST.md) defines the full gate. Its
