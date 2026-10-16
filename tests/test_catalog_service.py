@@ -17,6 +17,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.catalog_service import (
@@ -31,6 +32,8 @@ from app.routes.catalog import (
     _available_folder_name,
     _catalogue_identities,
     _preferred_disk_members,
+    _stage_archive_files,
+    _stage_catalogue_files,
 )
 
 
@@ -67,11 +70,11 @@ class ShippedSourceTests(unittest.TestCase):
     def test_the_shipped_sources_are_the_st_ones(self):
         self.assertEqual(
             {row["id"] for row in DEFAULT_SOURCES},
-            {"internet-archive-st-games", "demozoo", "pigwa", "atarimania", "atari-legend"},
+            {"internet-archive-st-games", "demozoo", "pigwa", "dev-docs", "sidecartridge-public-floppy-db", "atari-home-public-domain", "atari-home-scene-disk-images", "atari-home-rgf-software", "atarimuseum-downloads", "andrew-oakley-public-domain", "atarimania", "atari-legend"},
         )
 
     def test_a_reference_database_is_not_offered_as_a_download(self):
-        for source_id in ("atarimania", "atari-legend"):
+        for source_id in ("atari-legend",):
             with self.subTest(source=source_id):
                 self.assertFalse(source(source_id)["direct"])
 
@@ -159,6 +162,47 @@ class CatalogueServiceTests(unittest.TestCase):
         self.assertEqual(rows[0]["title"], "Configured Game")
         self.assertEqual(rows[0]["sourceName"], "Arbitrary Provider")
 
+    def test_dev_docs_rows_keep_their_post_form_download(self):
+        configured = copy.deepcopy(source("dev-docs"))
+        body = """<tr><td><input value="ST" onclick=download('file$id','access-key')>
+          <font color="darkgreen">720kb</font><script>print('QUhESSBEcml2ZXIgRGlzaw==');</script></tr>"""
+        rows = self.service._parse_rows(
+            configured, body, "dev-docs-files", {"url": "https://docs.dev-docs.org/htm/search.php?find=driver"}
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "AHDI Driver Disk [ST]")
+        self.assertEqual(rows[0]["downloadRequests"][0]["form"], {
+            "item": "file$id", "key": "access-key", "click": "1",
+        })
+        token = "d" * 32
+        self.service._remember_item(token, rows[0])
+        self.service._fetch = Mock(return_value=b"disk bytes")
+        filename, content, _item = self.service.download(token)
+        self.assertEqual((filename, content), ("AHDI Driver Disk.st", b"disk bytes"))
+        self.service._fetch.assert_called_once_with(
+            "https://docs.dev-docs.org/htm/download.php",
+            ttl=1,
+            limit=128 * 1024 * 1024,
+            form={"item": "file$id", "key": "access-key", "click": "1"},
+            cookie_session=True,
+        )
+
+    def test_search_matches_each_query_word_across_a_title(self):
+        configured = configured_source("reference", "https://example.test/")
+        configured["direct"] = False
+        self.service.sources = lambda: [configured]
+        self.service._load_catalogue = lambda *_args: [{
+            "title": "A & D Universal Network Driver",
+            "publisher": "",
+            "description": "",
+            "year": "",
+            "downloadable": False,
+            "pageUrl": "https://example.test/driver",
+        }]
+        rows, failures, _continuation = self.service.search_page("A&D driver", "st")
+        self.assertEqual(failures, [])
+        self.assertEqual([row["title"] for row in rows], ["A & D Universal Network Driver"])
+
     def test_a_reference_source_still_returns_its_rows(self):
         """A source marked as not direct exists to answer "what is this".
 
@@ -241,6 +285,19 @@ class CatalogueServiceTests(unittest.TestCase):
             MEDIA_PRIORITY,
             {".st": 0, ".msa": 1, ".stx": 2, ".dim": 3, ".hfe": 4, ".scp": 5, ".zip": 6},
         )
+
+    def test_driver_archive_files_keep_folders_and_get_legal_gemdos_names(self):
+        target = SimpleNamespace(kind="gemdos", gemdos_capabilities={})
+        with tempfile.TemporaryDirectory() as folder:
+            items = _stage_archive_files(target, [
+                ("Long Directory/Long filename.prg", b"program"),
+                ("Long Directory/Read me.txt", b"notes"),
+            ], Path(folder))
+            self.assertEqual(
+                [item["targetPath"] for item in items],
+                ["LONG_DIR/LONG_FIL.PRG", "LONG_DIR/READ_ME.TXT"],
+            )
+            self.assertEqual([item["hostPath"].read_bytes() for item in items], [b"program", b"notes"])
 
     def test_a_download_is_chosen_by_format_and_by_what_was_asked_for(self):
         choices = [
@@ -542,6 +599,67 @@ class CatalogueParserTests(unittest.TestCase):
         self.assertEqual(rows[0]["publisher"], "Faster than Light (FTL)")
         self.assertEqual(rows[0]["year"], "1987")
         self.assertFalse(rows[0]["downloadable"])
+
+    def test_atarimania_rows_are_checked_for_actual_downloads(self) -> None:
+        body = (
+            '<a href="/games/atari-st-games-oids-10116"><span>Oids<span>Atari ST</span></span>'
+            '<span>Shoot &#x27;em Up · Faster than Light · USA · 1993</span></a>'
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            service = self._service(folder)
+            source = {
+                "id": "atarimania", "name": "Atarimania", "url": "https://www.atarimania.com/",
+                "machines": ["st"], "options": {
+                    "linkPattern": "/games/atari-st-games-", "resolver": "media-links",
+                    "resolverOptions": {"downloadPathContains": "/st/dumps/"},
+                },
+            }
+            rows = service._parse_database_rows(source, body, {"url": source["url"]})
+            service._fetch = lambda *args, **kwargs: b'<a href="/st/dumps/oids.zip">Download</a>'
+            resolved = service._resolve_row(rows[0])
+        self.assertTrue(rows[0]["downloadable"])
+        self.assertEqual(resolved["downloadUrl"], "https://www.atarimania.com/st/dumps/oids.zip")
+
+    def test_sidecartridge_csv_index_returns_direct_st_media(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            service = self._service(folder)
+            service._fetch = lambda *args, **kwargs: b'"Oids";"";"";"";"Game";"games/o/oids.st"\n'
+            rows = service._load_sidecartridge_db({
+                "id": "sidecartridge", "name": "SidecarTridge", "url": "https://example.test/",
+                "machines": ["st"], "options": {},
+            }, "oids", "st")
+        self.assertEqual(rows[0]["title"], "Oids")
+        self.assertEqual(rows[0]["downloadUrl"], "https://ataristdb.sidecartridge.com/games/o/oids.st")
+
+    def test_download_links_parser_keeps_only_supported_media(self) -> None:
+        source_row = configured_source(
+            "museum", "https://museum.test/downloads/", parser="download-links",
+            mediaExtensions=["zip", "st"],
+        )
+        body = (
+            '<a href="ahdi.zip">AHDI hard disk driver</a>'
+            '<a href="manual.pdf">Manual</a>'
+            '<a href="disk.st">Disk image</a>'
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            rows = self._service(folder)._parse_download_links(source_row, body, {"url": source_row["url"]})
+        self.assertEqual([row["title"] for row in rows], ["AHDI hard disk driver", "Disk image"])
+        self.assertEqual(rows[0]["downloadUrl"], "https://museum.test/downloads/ahdi.zip")
+
+    def test_non_disk_downloads_are_reported_as_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            service = Mock()
+            service.work_dir = Path(folder)
+            service.staging_parent.return_value = "INSTALL\\STAGE"
+            service.staged_folder_name.return_value = "SOFTWARE"
+            service.put_host_tree.return_value = {"imported": ["AHDI.PRG"]}
+            with patch("app.routes.catalog._available_folder_name", return_value="SOFTWARE"), patch(
+                "app.routes.catalog._stage_archive_files", return_value=[{"targetPath": "AHDI.PRG"}]
+            ):
+                result = _stage_catalogue_files(service, object(), "AHDI", [("AHDI.PRG", b"program")])
+        self.assertTrue(result["staged"])
+        self.assertEqual(result["installed"], 0)
+        self.assertEqual(result["path"], "INSTALL\\STAGE\\SOFTWARE")
 
     def test_a_database_row_with_nobody_credited_reports_no_publisher(self) -> None:
         body = (

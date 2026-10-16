@@ -225,11 +225,6 @@ release.
 
 These are stated here rather than discovered later.
 
-- **The Online Library.** Searching and downloading from the Atari collections,
-  and identifying a title from the naming conventions the Atari archives use,
-  are not finished. The sources are configured and described in the
-  [collection guide](docs/COLLECTION-GUIDE.md), but the search and install
-  workflow around them is incomplete.
 - **Picture, music and resource formats.** The ST range's own image, sound and
   GEM resource formats are not previewed. They open in the hex editor.
 - **Filenames drawn in the ST character set.** A name is decoded as Latin-1 so
@@ -459,12 +454,6 @@ filesystem free space shows a neutral unavailable meter.
 ![Online Library search results for an ST title, with the machine filter set to
 520ST and several downloadable entries selected](app/static/help/online-library.png)
 
-**Not yet in this build.** Searching the Atari collections, downloading from
-them and identifying a title from the naming conventions those archives use are
-unchecked backlog rows. The sources below are configured and verified against
-the live sites, and the workflow described here is the one being built. Nothing
-in this section should be relied on until the backlog row is checked.
-
 Every writable media pane has a **Library** menu offering **Find software
 online**. It searches enabled catalogues on the server so a browser does not
 need to negotiate cross-site download rules.
@@ -475,30 +464,43 @@ Workbench profile is used as the workspace default. It is still only a starting
 value: choose another machine in the Online Library whenever an individual
 search needs a wider or different catalogue.
 
-The shipped source set is five entries, each checked against the live site:
+The shipped source set is twelve entries:
 
 | Source | What it offers | Machines |
 | --- | --- | --- |
 | Internet Archive Atari ST games | `.st`, `.msa`, `.stx`, `.dim` and `.zip` downloads from the `softwarelibrary_atari_st_games` collection | the whole range |
 | Demozoo | demoscene productions for platform 9 (ST and STE), 58 (TT030) and 17 (Falcon030), with their download links | the whole range |
 | Pigwa Atari ST game packs | the game-pack folders on `ftp.pigwa.net`, one level deep | ST, Mega ST, STE, Mega STE |
-| Atarimania | title, publisher, country and year; no downloads | all |
+| Atari Document Archive (dev-docs.org) | searchable ST, MSA and ZIP driver/software downloads | the whole range |
+| SidecarTridge Public Floppy Database | searchable `.st` floppy images from its letter-indexed archive | the whole range |
+| Atari-home Public Domain disk archive | public-domain floppy images and ZIPs, indexed by series | the whole range |
+| Atari-home ST scene archive | scene disk images and archives, indexed by title | the whole range |
+| Atari-home RGF software archive | direct ZIP and LZH application downloads | the whole range |
+| AtariMuseum | games, utilities, system software and driver ZIPs | the whole range |
+| Andrew Oakley | public-domain games distributed as ST disk-image ZIPs | ST, Mega ST, STE, Mega STE |
+| Atarimania | title, publisher, country, year and available disk-image ZIP downloads | all |
 | Atari Legend | title and developer; no downloads | all |
 
-Atarimania and Atari Legend are reference databases rather than archives. Their
-results identify a release and link to its page; they cannot be installed, and
-the Online Library says so rather than offering a download that would fail.
-They contribute metadata and the duplicate check instead.
+Atari Legend is a reference database, with installation disabled. Atarimania
+detail pages are checked for supported disk-image downloads before an item can
+be installed. The Atari Document Archive encodes its searchable titles in page
+scripts and requires a POST form to fetch a selected file; the configured
+parser preserves that download flow for supported Atari disk formats.
+Disk images imported to a GEMDOS hard disk are placed in the app's on-image
+`INSTALL\\STAGE` queue. ZIP packages without disk images are unpacked into a
+named staging folder and reported as staged so they are not mistaken for
+installed software. LZH downloads are kept intact for extraction on an Atari.
 
 The TOSEC Atari ST collection is deliberately not shipped as a source. It is
 published as one ZIP of about 15 GB with no per-title index, so there is no way
 to search it or fetch one image out of it. Unpack it by hand and index the
 extracted images through **Collection** like any other local material.
 
-Only records with a confirmed public `.st`, `.msa`, `.stx`, `.dim`, `.hfe`,
-`.scp` or `.zip` download appear. The app suppresses gallery pages,
-documentation-only records and catalogue records whose item page does not
-contain supported downloadable media.
+Downloadable records appear only when the source exposes a supported public
+`.st`, `.msa`, `.stx`, `.dim`, `.hfe`, `.scp` or `.zip` file. Reference database
+records also appear, marked as reference-only, even when they have no
+installable media. The app suppresses gallery pages and catalogue records that
+do not match the search.
 
 Large provider indexes are checked in bounded pages. The initial result set
 contains only entries whose detail page has already confirmed a supported
@@ -522,8 +524,6 @@ link resolution. It does not branch on a catalogue name or identifier. The copy
 in the work volume contains local changes made through **Sources…**.
 
 ### Install online software onto a drive or a floppy
-
-**Not yet in this build**, for the reason given above.
 
 1. Open the destination: a partition on a hard disk, or a floppy image.
 2. Choose **Library → Find software online**, select a machine and search by

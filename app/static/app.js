@@ -2788,11 +2788,22 @@ async function chooseHostFolder(index) {
   // A drive showing its partition table has nowhere to put an ordinary file,
   // so only whole disk images are worth offering there.
   const atPartitionTable = panes[index].image?.kind === "hd" && panes[index].partition === null;
+  const nativeChooser = Boolean(window.webkit?.messageHandlers?.atariDesktop);
+  const nativePaths = nativeChooser
+    ? new Promise(resolve => { pendingNativeFolderPaths = resolve; })
+    : Promise.resolve(null);
   const files = await pickHostFiles({
     directory: true,
     accept: atPartitionTable ? formats.accept : "",
   });
-  if (files.length) addSelectedHostFolder(index, hostFolderRecords(files));
+  const relativePaths = await nativePaths;
+  pendingNativeFolderPaths = null;
+  if (!files.length) return;
+  const records = hostFolderRecords(files);
+  if (relativePaths && relativePaths.length === files.length) {
+    records.forEach((record, itemIndex) => { record.relativePath = relativePaths[itemIndex]; });
+  }
+  addSelectedHostFolder(index, records);
 }
 
 function readDroppedDirectory(entry) {
@@ -3640,11 +3651,11 @@ async function showStagedInstallations(index) {
 
   showModal(`
     <h2>Staged disks</h2>
-    <p>Disks waiting on this drive. Stage every disk of a set under one title, then install it here, or boot the drive in Hatari or a real Atari and run the title's own installer against the staging folder.</p>
+    <p>Software waiting on this drive. Multi-disk titles are grouped under one name. Install staged files into a folder here, or boot the drive in Hatari or a real Atari and run the title's own installer from the staging folder.</p>
     <div class="selected-destination"><small>STAGING FOLDER</small><code>${esc(drivePath(pane.partitionName || pane.image.driveLetter || "", data.root || DEFAULT_STAGING_PARENT))}</code></div>
     <div class="field"><label>Install into</label><input name="stagedParent" maxlength="60" value="GAMES" placeholder="Leave empty for the volume root">
       <small>The folder on this volume that finished titles are moved into.</small></div>
-    <div class="staged-title-list">${rows || `<p class="muted">Nothing is staged on this drive. Choose <strong>Install it onto this drive</strong> when you add a disk, and pick <strong>Stage it for installing later</strong>.</p>`}</div>
+    <div class="staged-title-list">${rows || '<p class="muted">Nothing is staged on this drive. Online Library items that need a manual install are kept here for later.</p>'}</div>
     <div class="modal-actions"><button class="button primary" value="cancel">Close</button></div>`,
   () => true);
 
@@ -3928,6 +3939,7 @@ function chooseSourceFolder() {
 }
 
 let pendingSourceFolder = null;
+let pendingNativeFolderPaths = null;
 let desktopFolder = "";
 
 //: The replacement desktop. The built-in TOS desktop has no icons of your
@@ -4805,7 +4817,7 @@ async function showOnlineSources(index) {
   </fieldset>`).join("");
   const closed = showModal(`<div class="modal-heading"><span class="modal-kicker">ONLINE LIBRARY</span><h2>Catalogue sources</h2><p>Enable, disable or relocate a provider. Provider settings contain its query templates, categories and machine IDs, so site changes can be handled without changing application code.</p></div>
     <div class="online-source-list">${rows}</div>
-    <fieldset class="online-new-source"><legend>Add a compatible provider</legend><label>Name<input name="newName" placeholder="My Atari archive"></label><label>URL<input name="newUrl" type="url" placeholder="https://…"></label><label>Loading strategy<select name="newLoader"><option value="page">Single page</option><option value="category-crawl">Category crawl</option><option value="machine-index">Machine indexes</option></select></label><label>Page layout<select name="newParser"><option value="thumbnail-cards">Thumbnail cards</option><option value="section-catalogue">Section catalogue</option><option value="function-calls">Function-call records</option><option value="item-rows">Linked item rows</option><option value="query-media-tiles">Media links in query parameters</option><option value="html-cards">Configurable HTML cards</option><option value="zip-links">ZIP download links</option><option value="package-paragraphs">Package paragraphs</option><option value="links">Plain links</option></select></label><label>Machines<input name="newMachines" placeholder="st,ste,falcon030"></label><label class="online-provider-options">Provider settings (JSON)<textarea name="newOptions" rows="5">{}</textarea></label></fieldset>
+    <fieldset class="online-new-source"><legend>Add a compatible provider</legend><label>Name<input name="newName" placeholder="My Atari archive"></label><label>URL<input name="newUrl" type="url" placeholder="https://…"></label><label>Loading strategy<select name="newLoader"><option value="page">Single page</option><option value="directory-listing">Directory listing</option><option value="category-crawl">Category crawl</option><option value="machine-index">Machine indexes</option><option value="internet-archive">Internet Archive JSON</option><option value="demozoo">Demozoo API</option></select></label><label>Page layout<select name="newParser"><option value="thumbnail-cards">Thumbnail cards</option><option value="section-catalogue">Section catalogue</option><option value="function-calls">Function-call records</option><option value="item-rows">Linked item rows</option><option value="query-media-tiles">Media links in query parameters</option><option value="html-cards">Configurable HTML cards</option><option value="archive-documents">Internet Archive records</option><option value="demozoo-productions">Demozoo productions</option><option value="database-rows">Reference database rows</option><option value="dev-docs-files">Atari Document Archive files</option><option value="zip-links">ZIP download links</option><option value="links">Plain links</option></select></label><label>Machines<input name="newMachines" placeholder="st,ste,falcon030"></label><label class="online-provider-options">Provider settings (JSON)<textarea name="newOptions" rows="5">{}</textarea></label></fieldset>
     <div class="modal-actions"><button class="button" type="button" data-back-library>Back</button><button class="button primary" type="submit">Save sources</button></div>`, async form => {
       const sources = data.sources.map((source, offset) => ({
         id: form.get(`id-${offset}`), name: form.get(`name-${offset}`), url: form.get(`url-${offset}`),
@@ -4833,7 +4845,7 @@ async function showOnlineSources(index) {
 //: for a container the catalogue actually declares, so an unrecognised entry
 //: says nothing rather than guessing.
 const ONLINE_MEDIA_BADGES = Object.freeze({
-  st: "ST", msa: "MSA", stx: "STX", dim: "DIM", hfe: "HFE", scp: "SCP", zip: "ZIP",
+  st: "ST", msa: "MSA", stx: "STX", dim: "DIM", hfe: "HFE", scp: "SCP", zip: "ZIP", lzh: "LZH",
 });
 
 function onlineMediaBadges(item) {
@@ -4957,7 +4969,11 @@ async function showOnlineLibrary(index) {
       await acceptImage(index, pane.image);
       const successes = results.filter(item => !item.error);
       const failures = results.filter(item => item.error);
-      toast(`${successes.length} online item${successes.length === 1 ? "" : "s"} installed${abortRequested ? " before the operation was stopped" : ""}`);
+      const installed = successes.filter(item => !item.staged).length;
+      const staged = successes.filter(item => item.staged).length;
+      if (installed) toast(`${installed} online item${installed === 1 ? "" : "s"} installed${abortRequested ? " before the operation was stopped" : ""}`);
+      if (staged) toast(`${staged} online item${staged === 1 ? "" : "s"} staged for installation. Open Staged disks to continue.`);
+      if (!successes.length && abortRequested) toast("Online Library operation stopped before an item was installed.", "warning");
       failures.forEach(item => toast(`${item.title}: ${item.error}`, true));
     });
 
@@ -4983,7 +4999,7 @@ async function showOnlineLibrary(index) {
       const ariaSort = active ? (resultSort.direction === "asc" ? "ascending" : "descending") : "none";
       return `<th aria-sort="${ariaSort}"><button class="online-sort" type="button" data-sort="${key}">${label}<span aria-hidden="true">${arrow}</span></button></th>`;
     };
-    resultHost.innerHTML = items.length ? `<table class="online-result-table" aria-label="Downloadable Atari software"><thead><tr><th></th>${heading("Title", "title")}${heading("Publisher", "publisher")}${heading("Year", "year")}${heading("Source", "sourceName")}<th></th></tr></thead><tbody>${items.map(item => `<tr class="${item.installed ? "already-installed" : ""}"><td><input type="checkbox" name="catalogItem" value="${esc(item.id)}" aria-label="Select ${esc(item.title)}" ${selected.has(item.id) ? "checked" : ""}></td><td><strong>${esc(item.title)}</strong>${item.version ? `<small>Version ${esc(item.version)}</small>` : ""}${item.description ? `<small>${esc(item.description)}</small>` : ""}</td><td>${esc(item.publisher || "Unknown")}</td><td>${esc(item.year || "-")}</td><td><span class="pill">${esc(item.sourceName)}</span>${onlineMediaBadges(item)}${item.installed ? '<small class="installed-label">Already present</small>' : ""}</td><td><a class="button tiny" href="${esc(item.pageUrl)}" target="_blank" rel="noopener">Details</a></td></tr>`).join("")}</tbody></table>` : '<div class="empty-list">No matching downloadable items were found. Try All results, another machine, or a broader search.</div>';
+    resultHost.innerHTML = items.length ? `<table class="online-result-table" aria-label="Online Library results"><thead><tr><th></th>${heading("Title", "title")}${heading("Publisher", "publisher")}${heading("Year", "year")}${heading("Source", "sourceName")}<th></th></tr></thead><tbody>${items.map(item => `<tr class="${item.installed ? "already-installed" : ""}"><td><input type="checkbox" name="catalogItem" value="${esc(item.id)}" aria-label="Select ${esc(item.title)}" ${selected.has(item.id) ? "checked" : ""} ${item.downloadable ? "" : "disabled title=\"Reference only; no installable media found\""}></td><td><strong>${esc(item.title)}</strong>${item.version ? `<small>${item.downloadable ? "Version" : "Reference only"} ${esc(item.version)}</small>` : !item.downloadable ? '<small>Reference only · no installable media</small>' : ""}${item.description ? `<small>${esc(item.description)}</small>` : ""}</td><td>${esc(item.publisher || "Unknown")}</td><td>${esc(item.year || "-")}</td><td><span class="pill">${esc(item.sourceName)}</span>${onlineMediaBadges(item)}${item.installed ? '<small class="installed-label">Already present</small>' : ""}</td><td><a class="button tiny" href="${esc(item.pageUrl)}" target="_blank" rel="noopener">${item.downloadable ? "Details" : "Open source"}</a></td></tr>`).join("")}</tbody></table>` : '<div class="empty-list">No matching catalogue items were found. Try All results, another machine, or a broader search.</div>';
     if (Object.keys(resultContinuation).length) {
       resultHost.insertAdjacentHTML("beforeend", '<div class="online-load-more"><button class="button" type="button" data-online-more>Find more downloadable results</button><small>Only entries with verified downloadable Atari media are added.</small></div>');
       resultHost.querySelector("[data-online-more]").onclick = event => runSearch(null, true, event.currentTarget);
@@ -5021,7 +5037,7 @@ async function showOnlineLibrary(index) {
           (await collectionCatalogue.list()).forEach(image => (image.titles || []).forEach(title => collectionTitles.add(title.key)));
         } catch (_error) { /* Online search remains usable if IndexedDB is unavailable. */ }
       }
-      const incoming = data.items.filter(item => item.downloadable).map(item => ({
+      const incoming = data.items.map(item => ({
         ...item,
         installed: item.installed || collectionTitles.has(window.AtariCollectionCatalogue.titleKey(item.title)),
       }));
@@ -5032,7 +5048,9 @@ async function showOnlineLibrary(index) {
       resultContinuation = data.continuation || {};
       resultHiddenInstalled = (append ? resultHiddenInstalled : 0) + Number(data.hiddenInstalled || 0);
       resultSort = { key: "title", direction: "asc" };
-      status.textContent = `${resultItems.length} verified downloadable result${resultItems.length === 1 ? "" : "s"}${resultHiddenInstalled ? ` · ${resultHiddenInstalled} installed result${resultHiddenInstalled === 1 ? "" : "s"} hidden` : ""}${Object.keys(resultContinuation).length ? " · more catalogue entries are available to check" : " · all matching catalogue entries checked"}${resultFailures.length ? ` · ${resultFailures.length} source${resultFailures.length === 1 ? "" : "s"} unavailable` : ""}`;
+      const downloadableCount = resultItems.filter(item => item.downloadable).length;
+      const referenceCount = resultItems.length - downloadableCount;
+      status.textContent = `${downloadableCount} verified downloadable result${downloadableCount === 1 ? "" : "s"}${referenceCount ? ` · ${referenceCount} reference result${referenceCount === 1 ? "" : "s"}` : ""}${resultHiddenInstalled ? ` · ${resultHiddenInstalled} installed result${resultHiddenInstalled === 1 ? "" : "s"} hidden` : ""}${Object.keys(resultContinuation).length ? " · more catalogue entries are available to check" : " · all matching catalogue entries checked"}${resultFailures.length ? ` · ${resultFailures.length} source${resultFailures.length === 1 ? "" : "s"} unavailable` : ""}`;
       renderOnlineResults();
     } catch (error) {
       status.textContent = "Search failed"; resultHost.innerHTML = `<div class="help-warning">${esc(error.message)}</div>`;
@@ -8915,6 +8933,11 @@ window.AtariDesktopHost = Object.freeze({
     const waiting = pendingSourceFolder;
     pendingSourceFolder = null;
     if (waiting) waiting(String(folder || ""));
+  },
+  folderSelectionChosen(relativePaths) {
+    const waiting = pendingNativeFolderPaths;
+    pendingNativeFolderPaths = null;
+    if (waiting) waiting(Array.isArray(relativePaths) ? relativePaths.map(String) : []);
   },
   showError(message, paneIndex = null) {
     toast(String(message || "The Linux desktop operation failed."), true);

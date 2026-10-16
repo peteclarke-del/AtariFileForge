@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import copy
+import csv
 import html
+import http.cookiejar
 import io
 import json
 import re
@@ -26,7 +29,7 @@ from .outbound import checked_url as outbound_checked_url, http_url as outbound_
 #: Gotek and SuperCard Pro track formats. Almost everything on an archive is
 #: served inside a ZIP, so that is accepted and unpacked after download.
 DOWNLOADABLE_MEDIA = re.compile(
-    r"\.(?:zip|stx|msa|dim|hfe|scp|st)(?:$|[?#])", re.I
+    r"\.(?:zip|lzh|stx|msa|dim|hfe|scp|st)(?:$|[?#])", re.I
 )
 
 #: Which disk format a download is preferred in, best first. A plain sector
@@ -63,6 +66,7 @@ class CatalogueService:
         self._pages: dict[str, CachedPage] = {}
         self._items: dict[str, tuple[float, dict]] = {}
         self._catalogues: dict[str, tuple[float, list[dict]]] = {}
+        self._cookie_jars: dict[str, http.cookiejar.CookieJar] = {}
 
     def sources(self) -> list[dict]:
         if not self.config_path.exists():
@@ -89,6 +93,8 @@ class CatalogueService:
                 existing = by_id.get(default["id"])
                 if existing and existing["type"] == default["type"]:
                     existing["options"] = _merge_settings(default.get("options", {}), existing.get("options", {}))
+                    if default["id"] == "atarimania":
+                        existing["direct"] = default["direct"]
                 elif existing:
                     replacement = copy.deepcopy(default)
                     for key in ("name", "url", "machines", "enabled", "direct"):
@@ -137,6 +143,7 @@ class CatalogueService:
         limit: int = 32 * 1024 * 1024,
         ttl: int = 900,
         form: dict[str, str] | None = None,
+        cookie_session: bool = False,
     ) -> bytes:
         """Read a catalogue page, optionally by submitting its search form.
 
@@ -158,7 +165,14 @@ class CatalogueService:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         request = urllib.request.Request(url, data=payload, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=25) as response:
+            if cookie_session:
+                host = urllib.parse.urlparse(url).hostname or ""
+                jar = self._cookie_jars.setdefault(host, http.cookiejar.CookieJar())
+                opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+                response_context = opener.open(request, timeout=25)
+            else:
+                response_context = urllib.request.urlopen(request, timeout=25)
+            with response_context as response:
                 length = int(response.headers.get("Content-Length") or 0)
                 if length > limit:
                     raise DiskError(f"The remote file is larger than the {limit // (1024 * 1024)} MB safety limit.")
@@ -184,6 +198,7 @@ class CatalogueService:
         cursors: dict[str, int] | None = None,
     ) -> tuple[list[dict], list[dict], dict[str, int]]:
         query = query.strip().casefold()
+        query_terms = re.findall(r"[a-z0-9]+", query)
         results, failures = [], []
         continuing = cursors is not None
         cursors = cursors or {}
@@ -211,7 +226,7 @@ class CatalogueService:
             candidates = []
             for row in rows:
                 haystack = " ".join(str(row.get(key, "")) for key in ("title", "publisher", "description", "year")).casefold()
-                if query and query not in haystack:
+                if query_terms and not all(term in haystack for term in query_terms):
                     continue
                 # A reference database records what a release is, not where to
                 # get it. Such a source is marked as not direct, and its rows
@@ -240,7 +255,7 @@ class CatalogueService:
             for row in candidates:
                 row.update(sourceId=source["id"], sourceName=source["name"], machines=row.get("machines") or source["machines"])
                 token = sha256_bytes(
-                    f"{source['id']}\0{row.get('downloadUrl')}\0{row.get('pageUrl')}\0{row.get('title')}".encode()
+                    f"{source['id']}\0{row.get('downloadUrl')}\0{row.get('pageUrl')}\0{row.get('title')}\0{json.dumps(row.get('downloadRequests') or [], sort_keys=True)}".encode()
                 )[:32]
                 row["id"] = token
                 self._remember_item(token, row)
@@ -260,6 +275,7 @@ class CatalogueService:
             "internet-archive": self._load_internet_archive,
             "demozoo": self._load_demozoo,
             "directory-listing": self._load_directory_listing,
+            "sidecartridge-db": self._load_sidecartridge_db,
         }
         loader = loaders.get(loader_name)
         if loader is None:
@@ -279,8 +295,30 @@ class CatalogueService:
             url,
             limit=max(1, int(options.get("pageLimitMb", 8))) * 1024 * 1024,
             ttl=max(60, int(options.get("cacheSeconds", 900))),
+            cookie_session=bool(options.get("cookieSession", False)),
         ).decode(str(options.get("encoding") or "utf-8"), "replace")
         return self._parse_rows(source, body, str(options.get("parser") or "links"), {"url": url, "machine": machine})
+
+    def _load_sidecartridge_db(self, source: dict, query: str, machine: str) -> list[dict]:
+        """Load the public floppy archive's per-letter semicolon CSV index."""
+        first = (query.strip()[:1] or "_").casefold()
+        letter = first if first.isascii() and first.isalnum() else "_"
+        base = str(source.get("options", {}).get("downloadBase") or "https://ataristdb.sidecartridge.com/")
+        url = urllib.parse.urljoin(source["url"], f"db/{letter}.csv")
+        body = self._fetch(url, limit=8 * 1024 * 1024, ttl=3600).decode("utf-8-sig", "replace")
+        rows = []
+        for fields in csv.reader(io.StringIO(body), delimiter=";"):
+            if len(fields) != 6:
+                continue
+            title, _unused, added, _unused2, label, path = [field.strip().strip('"') for field in fields]
+            if not title or not path or not path.lower().endswith(".st"):
+                continue
+            rows.append(_item(
+                title, "SidecarTridge Public Floppy Database", "", urllib.parse.urljoin(base, path),
+                source["url"], "disk-image", description=label or ("Recently added" if added else ""),
+                machines=source.get("machines", []), downloadable=True,
+            ))
+        return rows
 
     def _load_form_post(self, source: dict, query: str, machine: str) -> list[dict]:
         """Search an archive whose only search is a POST form.
@@ -305,6 +343,7 @@ class CatalogueService:
 
     def _parse_rows(self, source: dict, body: str, parser_name: str, context: dict | None = None) -> list[dict]:
         parsers = {
+            "dev-docs-files": self._parse_dev_docs_files,
             "thumbnail-cards": self._parse_thumbnail_cards,
             "section-catalogue": self._parse_section_catalogue,
             "function-calls": self._parse_function_calls,
@@ -315,12 +354,65 @@ class CatalogueService:
             "archive-documents": self._parse_archive_documents,
             "demozoo-productions": self._parse_demozoo_productions,
             "database-rows": self._parse_database_rows,
+            "download-links": self._parse_download_links,
             "links": self._parse_links,
         }
         parser = parsers.get(parser_name)
         if parser is None:
             raise DiskError(f"Unsupported catalogue parser: {parser_name}")
         return parser(source, body, context or {})
+
+    @staticmethod
+    def _parse_dev_docs_files(source: dict, body: str, context: dict) -> list[dict]:
+        """Read Atari Document Archive search rows and their POST downloads."""
+        options = source.get("options", {})
+        extensions = {
+            str(value).lower().lstrip(".")
+            for value in options.get("mediaExtensions", ["st", "msa", "stx", "dim", "hfe", "scp", "zip"])
+        }
+        page_url = str((context or {}).get("url") or source["url"])
+        download_url = urllib.parse.urljoin(source["url"], "download.php")
+        rows = []
+        for block in re.findall(r"<tr\b[^>]*>(.*?)</tr>", body, re.I | re.S):
+            kind = re.search(
+                r"<input\b[^>]*\bvalue=[\"']([A-Za-z0-9]+)[\"'][^>]*"
+                r"\bonclick\s*=\s*[\"']?download\(\s*(['\"])(.*?)\2\s*,\s*(['\"])(.*?)\4\s*\)[\"']?",
+                block,
+                re.I | re.S,
+            )
+            if not kind:
+                continue
+            extension, item_id, key = kind.group(1).lower(), kind.group(3), kind.group(5)
+            if extension not in extensions:
+                continue
+            encoded_title = re.search(r"print\(\s*['\"]([A-Za-z0-9+/=]+)['\"]\s*\)", block)
+            if not encoded_title:
+                continue
+            try:
+                title = base64.b64decode(encoded_title.group(1), validate=True).decode("utf-8", "replace").strip()
+            except (ValueError, base64.binascii.Error):
+                continue
+            if not title:
+                continue
+            size_match = re.search(r"<font[^>]*color=[\"']darkgreen[\"'][^>]*>(.*?)</font>", block, re.I | re.S)
+            size = _plain_text(size_match.group(1)) if size_match else ""
+            # The archive accepts a POST with these hidden form values. A GET
+            # to the same address does not return the selected file.
+            row = _item(
+                f"{title} [{extension.upper()}]", "Atari Document Archive", "",
+                download_url, page_url, "disk-image",
+                description=f"{size} · Downloaded from the Atari Document Archive".strip(" ·"),
+                machines=source.get("machines", []), downloadable=True,
+            )
+            row["media"] = [extension]
+            row["downloadRequests"] = [{
+                "url": download_url,
+                "filename": f"{title}.{extension}",
+                "form": {"item": item_id, "key": key, "click": "1"},
+                "cookieSession": bool(options.get("cookieSession", False)),
+            }]
+            rows.append(row)
+        return rows
 
     def _resolve_row(self, row: dict) -> dict | None:
         resolver = str(row.get("resolver") or "media-links")
@@ -980,10 +1072,15 @@ class CatalogueService:
             if re.fullmatch(r"(?:19|20)\d{2}", publisher) or publisher.casefold() == "[no publisher]":
                 publisher = ""
             year = re.search(r"\b(?:19|20)\d{2}\b", details)
-            rows.append(_item(
-                title, publisher, year.group(0) if year else "", None, page, "external",
-                description=details, machines=source.get("machines", []), downloadable=False,
-            ))
+            resolver = str(options.get("resolver") or "") or None
+            entry = _item(
+                title, publisher, year.group(0) if year else "", None, page,
+                "disk-image" if resolver else "external", description=details,
+                machines=source.get("machines", []), downloadable=bool(resolver), resolver=resolver,
+            )
+            if resolver and isinstance(options.get("resolverOptions"), dict):
+                entry["resolverOptions"] = dict(options["resolverOptions"])
+            rows.append(entry)
         return rows[:300]
 
     @staticmethod
@@ -1067,6 +1164,47 @@ class CatalogueService:
             seen.add(resolved); rows.append(_item(clean, "", "", None, resolved, "external", downloadable=False))
         return rows[:300]
 
+    @staticmethod
+    def _parse_download_links(source: dict, body: str, context: dict) -> list[dict]:
+        """Index direct media links published on a software archive page."""
+        options = source.get("options") or {}
+        extensions = tuple(
+            f".{str(value).lower().lstrip('.')}"
+            for value in options.get("mediaExtensions", ["zip", "st", "msa", "stx", "dim", "hfe", "scp"])
+        )
+        base = str((context or {}).get("url") or source.get("url") or "")
+        exclude_patterns = []
+        for value in options.get("excludeTitlePatterns", []):
+            try:
+                exclude_patterns.append(re.compile(str(value), re.I))
+            except re.error:
+                continue
+        rows, seen = [], set()
+        for href, title in re.findall(r'<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', body, re.I | re.S):
+            href = html.unescape(href.strip())
+            url = urllib.parse.urljoin(base, href)
+            path = urllib.parse.urlparse(url).path
+            suffix = Path(path).suffix.lower()
+            if suffix not in extensions or url in seen:
+                continue
+            label = _plain_text(title)
+            title_text = label if len(label) > 1 else Path(urllib.parse.unquote(path)).stem
+            filename = Path(urllib.parse.unquote(path)).name
+            if title_text.casefold() == filename.casefold():
+                title_text = Path(filename).stem.replace("_", " ")
+            if len(title_text) < 2:
+                continue
+            if any(pattern.search(title_text) for pattern in exclude_patterns):
+                continue
+            seen.add(url)
+            rows.append(_item(
+                title_text, str(options.get("publisher") or source.get("name") or ""), "",
+                url, base, "disk-image" if suffix != ".lzh" else "software-archive",
+                description=str(options.get("description") or ""),
+                machines=source.get("machines", []), downloadable=True,
+            ))
+        return rows[:max(1, int(options.get("maxResults", 1000)))]
+
     def item(self, token: str) -> dict:
         cached = self._items.get(token)
         if cached and cached[0] >= time.time():
@@ -1103,6 +1241,15 @@ class CatalogueService:
         requests = item.get("downloadRequests") or []
         if requests:
             request_row = max(requests, key=lambda row: self._download_score(row.get("filename", ""), preferred))
+            if isinstance(request_row.get("form"), dict):
+                url = self._http_url(
+                    request_row["url"], "The catalogue supplied an invalid download request URL."
+                )
+                name = str(request_row.get("filename") or Path(urllib.parse.urlparse(url).path).name or f"{item['title']}.zip")
+                content = self._fetch(url, ttl=1, limit=128 * 1024 * 1024, form={
+                    str(key): str(value) for key, value in request_row["form"].items()
+                }, cookie_session=bool(request_row.get("cookieSession", False)))
+                return name, content, item
             url = self._generated_download_url(str(request_row["url"]))
             name = str(request_row.get("filename") or Path(urllib.parse.urlparse(url).path).name or f"{item['title']}.zip")
             return name, self._fetch(url, ttl=1, limit=128 * 1024 * 1024), item

@@ -403,22 +403,45 @@ def run(argv: list[str] | None = None) -> int:
                 if request is None:
                     return
                 if response != Gtk.ResponseType.ACCEPT:
+                    self._evaluate_frontend(
+                        "window.AtariDesktopHost.folderSelectionChosen([]);"
+                    )
                     request.cancel()
                     return
                 folder = chooser.get_file()
                 root = Path(folder.get_path()) if folder and folder.get_path() else None
                 if root is None:
+                    self._evaluate_frontend(
+                        "window.AtariDesktopHost.folderSelectionChosen([]);"
+                    )
                     request.cancel()
                     return
                 # The page filters this down to the images it wants, exactly
                 # as it does with a browser's directory input.
                 files = _folder_selection(root)
                 if not files:
+                    self._evaluate_frontend(
+                        "window.AtariDesktopHost.folderSelectionChosen([]);"
+                    )
                     request.cancel()
                     return
+                # WebKitGTK's directory input returns individual files but
+                # does not populate File.webkitRelativePath. Pass the paths
+                # alongside the selection so the page can rebuild the tree.
+                relative_paths = [
+                    str(Path(path).relative_to(root.parent)).replace(os.sep, "/")
+                    for path in files
+                ]
+                self._evaluate_frontend(
+                    "window.AtariDesktopHost.folderSelectionChosen("
+                    f"{json.dumps(relative_paths)});"
+                )
                 request.select_files(files)
             except Exception as exc:
                 if request is not None:
+                    self._evaluate_frontend(
+                        "window.AtariDesktopHost.folderSelectionChosen([]);"
+                    )
                     request.cancel()
                 GLib.idle_add(
                     self._deliver_error,

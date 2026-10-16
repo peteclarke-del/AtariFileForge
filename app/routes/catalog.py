@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -116,6 +117,53 @@ def _copy_disk_files(service: "DiskService", source, target, target_path, target
     return copied
 
 
+def _stage_archive_files(target, members, staging: Path) -> list[dict]:
+    """Map ordinary ZIP contents to unique GEMDOS names and stage each file."""
+    policy = session_name_policy(target)
+    used_by_parent: dict[tuple[str, ...], set[str]] = {}
+    mapped: dict[tuple[str, ...], str] = {}
+    items = []
+    for index, (member_name, content) in enumerate(members):
+        parts = [part for part in str(member_name).replace("\\", "/").split("/") if part]
+        if not parts or any(part in {".", ".."} for part in parts):
+            continue
+        target_parts = []
+        for depth, part in enumerate(parts):
+            identity = tuple(parts[: depth + 1])
+            if identity not in mapped:
+                parent = tuple(parts[:depth])
+                used = used_by_parent.setdefault(parent, set())
+                mapped[identity] = policy.allocate(part, used)
+                used.add(mapped[identity])
+            target_parts.append(mapped[identity])
+        host_path = staging / f"member-{index:04d}.bin"
+        host_path.write_bytes(content)
+        items.append({"targetPath": "/".join(target_parts), "hostPath": host_path})
+    return items
+
+
+def _stage_catalogue_files(service, target, title: str, members) -> dict:
+    """Keep a non-disk software package in the drive's visible install queue."""
+    staging = service.staging_parent()
+    service.make_directory(target, staging)
+    preferred = service.staged_folder_name(target, title)
+    leaf = _available_folder_name(service, target, staging, preferred)
+    destination = atari_paths.join(staging, leaf)
+    with tempfile.TemporaryDirectory(prefix="catalogue-stage-", dir=service.work_dir) as folder:
+        items = _stage_archive_files(target, members, Path(folder))
+        if not items:
+            raise DiskError("The downloaded package contains no usable files to stage.")
+        imported = service.put_host_tree(target, destination, items, preserve_directories=True)
+    if imported.get("conflicts"):
+        raise DiskError("The downloaded package could not be staged without filename conflicts.")
+    manifest_folder = atari_paths.join(atari_paths.join(staging, "CLASH"), leaf)
+    service.make_directory(target, manifest_folder)
+    service._write_staged_manifest(target, staging, leaf, {
+        "title": title, "name": leaf, "parent": staging, "disks": [], "conflicts": [],
+    })
+    return {"path": destination, "staged": True, "installed": 0}
+
+
 def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprint:
     catalogue = CatalogueService(work_dir)
     blueprint = Blueprint("catalog", __name__)
@@ -194,9 +242,54 @@ def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprin
                 filename, content, item = catalogue.download(item_id, ".st")
                 members = _preferred_disk_members(filename, content)
                 if not members:
+                    # A package with no disk image needs a human or its own
+                    # installer to decide how its files should be placed.
+                    # Preserve it in the drive's standard staging queue instead
+                    # of claiming that copying its contents installed it.
+                    if target.kind in {"gemdos", "hd"}:
+                        archive_files = (
+                            [(name, data) for name, data in archive_members(filename, content) if data]
+                            if filename.lower().endswith(".zip") else [(filename, content)]
+                        )
+                        if not archive_files:
+                            raise DiskError("The downloaded package contains no files to stage.")
+                        staged = _stage_catalogue_files(service, target, item["title"], archive_files)
+                        results.append({
+                            "id": item_id,
+                            "title": item["title"],
+                            **staged,
+                            "metadata": None,
+                        })
+                        continue
                     raise DiskError(
                         "No ST, MSA, STX, DIM, HFE or SCP disk image was found in the download."
                     )
+                if target.kind in {"gemdos", "hd"}:
+                    staged = []
+                    for member_name, member_data in members:
+                        source = service.create_from_stream(Path(member_name).name, io.BytesIO(member_data))
+                        staged.append(service.stage_disk(
+                            source, target, str(item.get("title") or Path(member_name).stem),
+                        ))
+                        service.discard_session(source)
+                        source = None
+                    results.append({
+                        "id": item_id, "title": item["title"], "installed": 0,
+                        "staged": True,
+                        "path": staged[0]["path"] if staged else service.staging_parent(),
+                        "metadata": None,
+                    })
+                    continue
+                gemdos_destination = target_path
+                if target.kind in {"gemdos", "hd"} and bool(data.get("createDirectory", False)):
+                    directory = str(data.get("directoryName") or "").strip()
+                    policy = session_name_policy(target)
+                    if not directory:
+                        directory = policy.normalise(item["title"], "ONLINE")
+                    directory = service.validate_leaf_name(target, directory)
+                    directory = _available_folder_name(service, target, target_path, directory)
+                    gemdos_destination = atari_paths.join(target_path, directory)
+                    service.make_directory(target, gemdos_destination)
                 for member_name, member_data in members:
                     source = service.create_from_stream(Path(member_name).name, io.BytesIO(member_data))
                     if target.kind in {"ffs", "ofs", "hdf"}:
@@ -231,8 +324,8 @@ def create_catalog_blueprint(service: "DiskService", work_dir: Path) -> Blueprin
                         ):
                             count = len(service.list_ofs_catalogue_files(target, target_side))
                         else:
-                            count = _copy_disk_files(service, source, target, target_path, target_side)
-                        results.append({"id": item_id, "title": item["title"], "installed": count, "metadata": None})
+                            count = _copy_disk_files(service, source, target, gemdos_destination, target_side)
+                        results.append({"id": item_id, "title": item["title"], "installed": count, "path": gemdos_destination, "metadata": None})
                     service.discard_session(source); source = None
             except DiskError as exc:
                 results.append({"id": item_id, "title": catalogue.item(item_id).get("title", item_id), "error": str(exc)})
