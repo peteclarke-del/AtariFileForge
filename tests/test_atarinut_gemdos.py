@@ -621,7 +621,7 @@ class VolumeTests(unittest.TestCase):
         path = make_image(self.tmp)
         raw = bytearray(path.read_bytes())
         root_start = (1 + 2 * 5) * 512
-        raw[root_start:root_start + 7 * 512] = os.urandom(7 * 512)
+        raw[root_start:root_start + 7 * 512] = b"A" * (7 * 512)
         path.write_bytes(bytes(raw))
         candidates = identify(path)
         self.assertTrue(candidates)

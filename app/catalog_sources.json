@@ -97,6 +97,136 @@
     }
   },
   {
+    "id": "dev-docs",
+    "name": "Atari Document Archive (dev-docs.org)",
+    "type": "configured",
+    "url": "https://docs.dev-docs.org/htm/",
+    "machines": [
+      "st",
+      "megast",
+      "ste",
+      "megaste",
+      "tt030",
+      "falcon030"
+    ],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "page",
+      "parser": "dev-docs-files",
+      "queryTemplate": "search.php?find={query}",
+      "cookieSession": true,
+      "mediaExtensions": [
+        "st",
+        "msa",
+        "stx",
+        "dim",
+        "hfe",
+        "scp",
+        "zip"
+      ],
+      "cacheSeconds": 3600
+    }
+  },
+  {
+    "id": "sidecartridge-public-floppy-db",
+    "name": "SidecarTridge Public Floppy Database",
+    "type": "configured",
+    "url": "https://ataristpublicfloppydb.sidecartridge.com/",
+    "machines": ["st", "megast", "ste", "megaste", "tt030", "falcon030"],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "sidecartridge-db",
+      "downloadBase": "https://ataristdb.sidecartridge.com/",
+      "cacheSeconds": 3600
+    }
+  },
+  {
+    "id": "atari-home-public-domain",
+    "name": "Atari-home Public Domain disk archive",
+    "type": "configured",
+    "url": "https://downloads.atari-home.de/Public_Domain/",
+    "machines": ["st", "megast", "ste", "megaste", "tt030", "falcon030"],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "directory-listing",
+      "mediaExtensions": ["zip", "st", "msa", "stx", "dim", "hfe", "scp"],
+      "maxFolders": 100,
+      "maxEntries": 15000,
+      "crawlThreads": 8,
+      "cacheSeconds": 86400
+    }
+  },
+  {
+    "id": "atari-home-scene-disk-images",
+    "name": "Atari-home ST scene disk images",
+    "type": "configured",
+    "url": "https://downloads.atari-home.de/Scene_Demos/%21ST_diskimages/",
+    "machines": ["st", "megast", "ste", "megaste", "tt030", "falcon030"],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "directory-listing",
+      "mediaExtensions": ["zip", "st", "msa", "stx", "dim", "hfe", "scp", "lzh"],
+      "maxFolders": 40,
+      "maxEntries": 12000,
+      "crawlThreads": 8,
+      "cacheSeconds": 86400
+    }
+  },
+  {
+    "id": "atari-home-rgf-software",
+    "name": "Atari-home RGF software archive",
+    "type": "configured",
+    "url": "https://downloads.atari-home.de/RGF.SOFTWARE/",
+    "machines": ["st", "megast", "ste", "megaste", "tt030", "falcon030"],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "page",
+      "parser": "download-links",
+      "mediaExtensions": ["zip", "lzh", "st", "msa", "stx", "dim", "hfe", "scp"],
+      "publisher": "RGF Software",
+      "cacheSeconds": 86400,
+      "maxResults": 5000
+    }
+  },
+  {
+    "id": "atarimuseum-downloads",
+    "name": "AtariMuseum ST/TT/Falcon downloads",
+    "type": "configured",
+    "url": "https://www.atarimuseum.de/download.htm",
+    "machines": ["st", "megast", "ste", "megaste", "tt030", "falcon030"],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "page",
+      "parser": "download-links",
+      "mediaExtensions": ["zip", "st", "msa", "stx", "dim", "hfe", "scp"],
+      "publisher": "AtariMuseum",
+      "excludeTitlePatterns": ["Windows", "MS-DOS", "Portfolio", "Atari ABC", "386"],
+      "cacheSeconds": 86400
+    }
+  },
+  {
+    "id": "andrew-oakley-public-domain",
+    "name": "Andrew Oakley public-domain Atari ST games",
+    "type": "configured",
+    "url": "https://www.aoakley.com/atarist/",
+    "machines": ["st", "megast", "ste", "megaste"],
+    "enabled": true,
+    "direct": true,
+    "options": {
+      "loader": "page",
+      "parser": "download-links",
+      "mediaExtensions": ["zip", "st"],
+      "publisher": "Andrew Oakley",
+      "cacheSeconds": 86400
+    }
+  },
+  {
     "id": "atarimania",
     "name": "Atarimania ST database",
     "type": "configured",
@@ -110,13 +240,16 @@
       "falcon030"
     ],
     "enabled": true,
-    "direct": false,
+    "direct": true,
     "options": {
       "loader": "page",
       "parser": "database-rows",
       "queryTemplate": "search?q={query}&m=S",
       "linkPattern": "/games/atari-st-games-",
       "detailSeparator": "·",
+      "resolver": "media-links",
+      "resolverOptions": {"downloadPathContains": "/st/dumps/"},
+      "resultValidationLimit": 48,
       "cacheSeconds": 86400
     }
   },

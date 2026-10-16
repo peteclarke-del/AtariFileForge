@@ -70,20 +70,34 @@ same bytes.
 
 ## Online Library sources
 
-The Online Library ships five Atari ST sources, each verified against the live
-site before being enabled:
+The Online Library ships twelve Atari ST sources:
 
 | Source | Offers | Machines |
 | --- | --- | --- |
 | Internet Archive Atari ST games | `.st`, `.msa`, `.stx`, `.dim` and `.zip` downloads from the `softwarelibrary_atari_st_games` collection | ST, Mega ST, STE, Mega STE, TT, Falcon |
 | Demozoo | demoscene productions for platform 9 (ST and STE), 58 (TT) and 17 (Falcon), with their download links | ST, Mega ST, STE, Mega STE, TT, Falcon |
 | Pigwa Atari ST game packs | the game-pack folders on `ftp.pigwa.net`, one level deep | ST, Mega ST, STE, Mega STE |
-| Atarimania | title, publisher, country and year; no downloads | all |
+| Atari Document Archive (dev-docs.org) | searchable supported disk images and ZIPs, including driver releases | ST, Mega ST, STE, Mega STE, TT, Falcon |
+| SidecarTridge Public Floppy Database | searchable `.st` floppy images from its letter-indexed archive | all |
+| Atari-home Public Domain disk archive | public-domain floppy images and ZIPs, indexed by series | all |
+| Atari-home ST scene archive | scene disk images and archives, indexed by title | all |
+| Atari-home RGF software archive | direct ZIP and LZH application downloads | all |
+| AtariMuseum | games, utilities, system software and driver ZIPs | all |
+| Andrew Oakley | public-domain games distributed as ST disk-image ZIPs | ST, Mega ST, STE, Mega STE |
+| Atarimania | title, publisher, country, year and available disk-image ZIP downloads | all |
 | Atari Legend | title and developer; no downloads | all |
 
-Atarimania and Atari Legend are reference databases rather than archives. Their
-results identify a release and link to its page; they cannot be installed, and
-the Online Library says so rather than offering a download that would fail.
+Atari Legend is a reference database; its results link to release pages and
+cannot be installed. Atarimania results are checked against the detail page so
+only records with a supported media download are offered for installation. The
+Atari Document Archive uses JavaScript-coded titles and POST-based downloads,
+which its configured source adapter handles.
+
+Disk images added to a GEMDOS hard disk are staged under `INSTALL\\STAGE` so
+they remain visible in **Staged disks** until installed or run with their own
+installer. ZIP packages without a supported disk image are also unpacked into a
+named staging folder rather than being reported as installed software.
+LZH packages are kept intact in that staging folder for extraction on an Atari.
 
 Edit, disable or add to this list under **Online Library → Sources**. A source
 that a site has made unreachable ships disabled with the reason recorded, so it
